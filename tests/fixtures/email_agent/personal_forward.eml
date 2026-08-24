@@ -1,0 +1,9 @@
+From: Example Vendor <billing@example.com>
+To: jarvis.house+personal@example.com
+Delivered-To: jarvis.house+personal@example.com
+Message-ID: <personal-canary@example.com>
+Subject: Sanitized personal canary invoice
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+
+This is a sanitized bill example. No payment action is authorized by this message.

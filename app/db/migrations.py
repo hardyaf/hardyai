@@ -1,0 +1,258 @@
+from __future__ import annotations
+
+import sqlite3
+from collections.abc import Callable
+
+
+LATEST_SCHEMA_VERSION = 4
+
+
+def configure_sqlite_connection(conn: sqlite3.Connection) -> None:
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 5000")
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA synchronous = FULL")
+
+
+def _migration_001_action_ticket_ledger(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS work_tickets (
+            ticket_id TEXT PRIMARY KEY,
+            root_ticket_id TEXT NOT NULL,
+            parent_ticket_id TEXT,
+            ticket_kind TEXT NOT NULL,
+            remediation_generation INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL,
+            version INTEGER NOT NULL DEFAULT 1,
+            origin_request_id TEXT NOT NULL UNIQUE,
+            session_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            agent_id TEXT NOT NULL,
+            source TEXT NOT NULL,
+            intent TEXT NOT NULL,
+            skill_id TEXT,
+            route TEXT NOT NULL,
+            resource_key TEXT,
+            title TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            last_material_activity_at TEXT NOT NULL,
+            completed_at TEXT,
+            review_due_at TEXT,
+            source_action_revision TEXT,
+            expected_effect_hash TEXT,
+            plane_work_item_id TEXT,
+            plane_sync_status TEXT NOT NULL DEFAULT 'not_configured',
+            terminal_reason TEXT,
+            FOREIGN KEY (root_ticket_id) REFERENCES work_tickets(ticket_id),
+            FOREIGN KEY (parent_ticket_id) REFERENCES work_tickets(ticket_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS ticket_entries (
+            entry_id TEXT PRIMARY KEY,
+            ticket_id TEXT NOT NULL,
+            sequence_number INTEGER NOT NULL,
+            request_id TEXT NOT NULL,
+            entry_type TEXT NOT NULL,
+            actor_type TEXT NOT NULL,
+            actor_id TEXT,
+            created_at TEXT NOT NULL,
+            verbatim_text TEXT,
+            structured_payload_json TEXT NOT NULL DEFAULT '{}',
+            content_hash TEXT NOT NULL,
+            dedupe_key TEXT NOT NULL UNIQUE,
+            FOREIGN KEY (ticket_id) REFERENCES work_tickets(ticket_id),
+            UNIQUE(ticket_id, sequence_number)
+        );
+
+        CREATE TABLE IF NOT EXISTS operation_receipts (
+            operation_id TEXT PRIMARY KEY,
+            ticket_id TEXT NOT NULL,
+            capability TEXT NOT NULL,
+            action TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            provider_resource_id TEXT,
+            provider_revision TEXT,
+            resource_key TEXT NOT NULL,
+            outcome TEXT NOT NULL,
+            committed_at TEXT,
+            expected_effect_json TEXT NOT NULL,
+            validator_name TEXT NOT NULL,
+            validator_version TEXT NOT NULL,
+            resource_locator_json TEXT NOT NULL,
+            execution_observation_json TEXT NOT NULL DEFAULT '{}',
+            result_json TEXT NOT NULL DEFAULT '{}',
+            FOREIGN KEY (ticket_id) REFERENCES work_tickets(ticket_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS ticket_expectations (
+            expectation_id TEXT PRIMARY KEY,
+            ticket_id TEXT NOT NULL,
+            operation_id TEXT NOT NULL UNIQUE,
+            capability TEXT NOT NULL,
+            validator_name TEXT NOT NULL,
+            validator_version TEXT NOT NULL,
+            resource_locator_json TEXT NOT NULL,
+            expected_state_json TEXT NOT NULL,
+            expected_state_hash TEXT NOT NULL,
+            source_revision_at_execution TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (ticket_id) REFERENCES work_tickets(ticket_id),
+            FOREIGN KEY (operation_id) REFERENCES operation_receipts(operation_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS ticket_review_runs (
+            review_run_id TEXT PRIMARY KEY,
+            ticket_id TEXT NOT NULL,
+            source_action_revision TEXT NOT NULL,
+            attempt_number INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            deterministic_verdict TEXT,
+            model_verdict TEXT,
+            model_name TEXT,
+            prompt_version TEXT NOT NULL,
+            context_pack_hash TEXT,
+            source_evidence_json TEXT NOT NULL DEFAULT '{}',
+            source_evidence_hash TEXT,
+            discrepancy_json TEXT NOT NULL DEFAULT '[]',
+            proposed_repair_json TEXT,
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            error_code TEXT,
+            FOREIGN KEY (ticket_id) REFERENCES work_tickets(ticket_id),
+            UNIQUE(ticket_id, source_action_revision, attempt_number)
+        );
+
+        CREATE TABLE IF NOT EXISTS durable_jobs (
+            job_id TEXT PRIMARY KEY,
+            job_type TEXT NOT NULL,
+            aggregate_id TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL,
+            available_at TEXT NOT NULL,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            max_attempts INTEGER NOT NULL DEFAULT 3,
+            lease_owner TEXT,
+            lease_expires_at TEXT,
+            last_error_code TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS external_identity_bindings (
+            source TEXT NOT NULL,
+            external_user_id TEXT NOT NULL,
+            external_display_name TEXT,
+            user_id TEXT NOT NULL,
+            agent_id TEXT NOT NULL,
+            age_band TEXT,
+            presentation_profile TEXT NOT NULL DEFAULT 'default',
+            policy_profile TEXT NOT NULL DEFAULT 'adult',
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (source, external_user_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_work_tickets_status_due
+            ON work_tickets(status, review_due_at);
+        CREATE INDEX IF NOT EXISTS idx_work_tickets_root_generation
+            ON work_tickets(root_ticket_id, remediation_generation);
+        CREATE INDEX IF NOT EXISTS idx_work_tickets_session_created
+            ON work_tickets(session_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_work_tickets_resource_completed
+            ON work_tickets(resource_key, completed_at);
+        CREATE INDEX IF NOT EXISTS idx_ticket_entries_ticket_sequence
+            ON ticket_entries(ticket_id, sequence_number);
+        CREATE INDEX IF NOT EXISTS idx_ticket_expectations_ticket
+            ON ticket_expectations(ticket_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_operation_receipts_ticket
+            ON operation_receipts(ticket_id, committed_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_ticket_review_runs_ticket
+            ON ticket_review_runs(ticket_id, started_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_durable_jobs_claim
+            ON durable_jobs(job_type, status, available_at);
+        CREATE INDEX IF NOT EXISTS idx_durable_jobs_lease
+            ON durable_jobs(status, lease_expires_at);
+        CREATE INDEX IF NOT EXISTS idx_identity_bindings_agent
+            ON external_identity_bindings(agent_id, active);
+        """
+    )
+
+
+def _migration_002_list_operation_ids(conn: sqlite3.Connection) -> None:
+    table_exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'list_items'"
+    ).fetchone()
+    if table_exists is None:
+        return
+    columns = {
+        str(row[1]).strip().lower()
+        for row in conn.execute("PRAGMA table_info(list_items)").fetchall()
+    }
+    if "operation_id" not in columns:
+        conn.execute("ALTER TABLE list_items ADD COLUMN operation_id TEXT")
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_list_items_operation_id
+        ON list_items(operation_id)
+        WHERE operation_id IS NOT NULL
+        """
+    )
+
+
+def _migration_003_worker_heartbeats(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS worker_heartbeats (
+            worker_type TEXT NOT NULL,
+            worker_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            last_error_code TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY (worker_type, worker_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_worker_heartbeats_seen
+            ON worker_heartbeats(worker_type, last_seen_at DESC);
+        """
+    )
+
+
+def _migration_004_memory_operation_ids(conn: sqlite3.Connection) -> None:
+    columns = {
+        str(row[1]).strip().lower()
+        for row in conn.execute("PRAGMA table_info(memory_entries)").fetchall()
+    }
+    if "operation_id" not in columns:
+        conn.execute("ALTER TABLE memory_entries ADD COLUMN operation_id TEXT")
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_entries_operation_id
+        ON memory_entries(operation_id)
+        WHERE operation_id IS NOT NULL
+        """
+    )
+
+
+_MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
+    1: _migration_001_action_ticket_ledger,
+    2: _migration_002_list_operation_ids,
+    3: _migration_003_worker_heartbeats,
+    4: _migration_004_memory_operation_ids,
+}
+
+
+def apply_migrations(conn: sqlite3.Connection) -> int:
+    current = int(conn.execute("PRAGMA user_version").fetchone()[0])
+    if current > LATEST_SCHEMA_VERSION:
+        raise RuntimeError(
+            f"Database schema version {current} is newer than supported version {LATEST_SCHEMA_VERSION}."
+        )
+    for version in range(current + 1, LATEST_SCHEMA_VERSION + 1):
+        migration = _MIGRATIONS[version]
+        migration(conn)
+        conn.execute(f"PRAGMA user_version = {version}")
+        conn.commit()
+    return LATEST_SCHEMA_VERSION

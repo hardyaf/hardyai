@@ -1,0 +1,29 @@
+[Unit]
+Description=Jarvis assistant POC
+Wants=network-online.target
+After=network-online.target ollama.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=@JARVIS_USER@
+Group=@JARVIS_GROUP@
+WorkingDirectory=@JARVIS_REPO_ROOT@
+EnvironmentFile=@JARVIS_REPO_ROOT@/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=SKILL_ARTIFACT_AUTO_COMPILE_ENABLED=false
+UMask=0077
+ExecStart=@JARVIS_REPO_ROOT@/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=@JARVIS_REPO_ROOT@/data
+
+[Install]
+WantedBy=multi-user.target

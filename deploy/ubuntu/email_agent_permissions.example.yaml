@@ -1,0 +1,59 @@
+version: 1
+
+gmail_profile: jarvis.house@example.com
+google_account_key: replace-with-house-google-account-key
+taxonomy_version: shared-v1
+
+source_routes:
+  - route_key: work
+    source_mailbox: work.sender@example.edu
+    destination_alias: jarvis.house+work@example.com
+  - route_key: community
+    source_mailbox: community.sender@example.org
+    destination_alias: jarvis.house+community@example.com
+  - route_key: personal
+    source_mailbox: personal.sender@example.com
+    destination_alias: jarvis.house+personal@example.com
+  - route_key: county
+    source_mailbox: county.sender@example.gov
+    destination_alias: jarvis.house+county@example.com
+
+# Every initial category is shared. Gmail label names/IDs are deliberately absent
+# until shadow classification has been reviewed.
+categories:
+  - key: bills
+    display_name: Bills
+    audience: shared
+  - key: work_mail
+    display_name: Work Mail
+    audience: shared
+  - key: community_sports
+    display_name: Community Sports
+    audience: shared
+  - key: projects
+    display_name: Projects
+    audience: shared
+  - key: community_org
+    display_name: Community Organization
+    audience: shared
+  - key: needs_review
+    display_name: Needs Review
+    audience: shared
+
+access:
+  - user_id: operator
+    discord_channel_id: "222222222222222222"
+    external_user_id: "333333333333333333"
+    agent_ids: [jarvis]
+    audiences: [shared]
+    enabled: true
+  - user_id: second_user
+    discord_channel_id: ""
+    external_user_id: "444444444444444444"
+    agent_ids: [jarvis, catparty]
+    audiences: [shared]
+    enabled: false
+
+# Add deterministic sender/source rules only after representative shadow samples
+# prove they are precise. Unmatched mail falls into needs_review.
+classification_rules: []

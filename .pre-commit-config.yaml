@@ -1,0 +1,13 @@
+repos:
+  - repo: local
+    hooks:
+      - id: jarvis-public-tree
+        name: Reject secrets and private artifacts
+        entry: python scripts/check_public_tree.py --root .
+        language: system
+        pass_filenames: false
+      - id: jarvis-python-fatal-lint
+        name: Check fatal Python errors
+        entry: python -m ruff check app scripts tests --select E9,F63,F7,F82
+        language: system
+        pass_filenames: false

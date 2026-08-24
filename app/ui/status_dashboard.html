@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Jarvis Status Dashboard</title>
+  <style>
+    :root {
+      --bg: #f4f6f0;
+      --panel: #ffffff;
+      --ink: #182018;
+      --muted: #4e5e52;
+      --line: #d5dccf;
+      --accent: #2d6a4f;
+      --warn: #c95a3a;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "Trebuchet MS", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 20% -10%, #d8ead8 0%, transparent 35%),
+        radial-gradient(circle at 90% 10%, #f0e8cf 0%, transparent 30%),
+        var(--bg);
+    }
+    .shell {
+      max-width: 1080px;
+      margin: 0 auto;
+      padding: 20px 16px 28px;
+    }
+    .top-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 12px;
+    }
+    .title {
+      margin: 0;
+      font-size: clamp(1.2rem, 2.2vw, 1.8rem);
+      letter-spacing: 0.02em;
+    }
+    .row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    button {
+      border: 1px solid transparent;
+      border-radius: 10px;
+      padding: 8px 11px;
+      font-size: 0.9rem;
+      cursor: pointer;
+      background: #eef2eb;
+      color: var(--ink);
+      border-color: var(--line);
+    }
+    .chip {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 4px 8px;
+      background: #eef3ec;
+      font-size: 0.78rem;
+      color: #2a4a35;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(12, 1fr);
+      gap: 12px;
+    }
+    .panel {
+      grid-column: span 6;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 12px;
+      box-shadow: 0 6px 18px rgba(24, 32, 24, 0.06);
+    }
+    .panel.wide {
+      grid-column: span 12;
+    }
+    .panel h2 {
+      margin: 0 0 8px;
+      font-size: 1rem;
+    }
+    .value {
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 0.9rem;
+      white-space: pre-wrap;
+      background: #f9fbf7;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px;
+      min-height: 52px;
+    }
+    .muted {
+      color: var(--muted);
+      font-size: 0.86rem;
+    }
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border-radius: 999px;
+      padding: 4px 10px;
+      border: 1px solid var(--line);
+      background: #eef3ec;
+      font-size: 0.82rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+    .status-pill.awake {
+      background: #dff2e5;
+      color: #1d5b38;
+      border-color: #b7dec6;
+    }
+    .status-pill.asleep {
+      background: #f8e7e1;
+      color: #844031;
+      border-color: #e7c5bb;
+    }
+    .timeline {
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 0.82rem;
+      background: #f9fbf7;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px;
+      max-height: 340px;
+      overflow: auto;
+      display: grid;
+      gap: 7px;
+    }
+    .event-row {
+      border-bottom: 1px dashed #d8dfd3;
+      padding-bottom: 6px;
+    }
+    .event-row:last-child {
+      border-bottom: 0;
+      padding-bottom: 0;
+    }
+    @media (max-width: 900px) {
+      .panel {
+        grid-column: span 12;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="top-row">
+      <h1 class="title">Jarvis Status Dashboard</h1>
+      <div class="row">
+        <span id="last-refresh" class="chip">last refresh: pending</span>
+        <span id="poll-rate" class="chip">poll: 10s</span>
+        <button id="refresh-now" type="button">Refresh Now</button>
+        <a href="/dashboard" style="text-decoration:none;"><button type="button">Open Entry Dashboard</button></a>
+      </div>
+    </div>
+
+    <div class="grid">
+      <section class="panel">
+        <h2>Runtime Power</h2>
+        <div id="power-pill" class="status-pill">UNKNOWN</div>
+        <p id="power-note" class="muted" style="margin-top:8px;">waiting for data...</p>
+      </section>
+
+      <section class="panel">
+        <h2>Active Channel</h2>
+        <div id="active-channel" class="value">waiting for data...</div>
+      </section>
+
+      <section class="panel">
+        <h2>Model Runtime</h2>
+        <div id="model-runtime" class="value">waiting for data...</div>
+      </section>
+
+      <section class="panel">
+        <h2>Active Model Lane</h2>
+        <div id="active-model" class="value">waiting for data...</div>
+      </section>
+
+      <section class="panel wide">
+        <h2>Latest Turn</h2>
+        <div id="latest-turn" class="value">waiting for data...</div>
+      </section>
+
+      <section class="panel wide">
+        <h2>Handoff / Runtime Tail</h2>
+        <div id="status-tail" class="timeline"></div>
+      </section>
+    </div>
+  </div>
+
+  <script>
+    const REFRESH_MS = 10000;
+    const lastRefresh = document.getElementById("last-refresh");
+    const pollRate = document.getElementById("poll-rate");
+    const refreshNowBtn = document.getElementById("refresh-now");
+    const powerPill = document.getElementById("power-pill");
+    const powerNote = document.getElementById("power-note");
+    const activeChannel = document.getElementById("active-channel");
+    const modelRuntime = document.getElementById("model-runtime");
+    const activeModel = document.getElementById("active-model");
+    const latestTurn = document.getElementById("latest-turn");
+    const statusTail = document.getElementById("status-tail");
+    let operatorLoginPromise = null;
+
+    pollRate.textContent = `poll: ${Math.round(REFRESH_MS / 1000)}s`;
+
+    function stringify(value) {
+      try {
+        return JSON.stringify(value, null, 2);
+      } catch (error) {
+        return JSON.stringify({ error: String(error) }, null, 2);
+      }
+    }
+
+    function shortTs(value) {
+      const raw = String(value || "").trim();
+      if (!raw) return "n/a";
+      const dt = new Date(raw);
+      if (Number.isNaN(dt.getTime())) return raw;
+      return dt.toLocaleTimeString();
+    }
+
+    async function ensureOperatorSession() {
+      if (operatorLoginPromise) return operatorLoginPromise;
+      operatorLoginPromise = (async () => {
+        const existing = await fetch("/operator/session", { credentials: "same-origin" });
+        if (existing.ok) return;
+        const apiKey = window.prompt("Jarvis operator key");
+        if (!apiKey) throw new Error("Operator authentication is required.");
+        const login = await fetch("/operator/session", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "X-Jarvis-Operator-Key": apiKey }
+        });
+        if (!login.ok) throw new Error(`${login.status}: operator authentication failed`);
+      })();
+      try {
+        await operatorLoginPromise;
+      } finally {
+        operatorLoginPromise = null;
+      }
+    }
+
+    async function fetchStatus(retryAuth = true) {
+      const response = await fetch("/dashboard/status", { credentials: "same-origin" });
+      if (response.status === 401 && retryAuth) {
+        await ensureOperatorSession();
+        return fetchStatus(false);
+      }
+      return response;
+    }
+
+    function renderTail(data) {
+      const rows = [];
+      if (data.latest_handoff) rows.push(data.latest_handoff);
+      if (data.latest_runtime_event) rows.push(data.latest_runtime_event);
+      if (data.latest_model_runtime_event) rows.push(data.latest_model_runtime_event);
+      if (data.latest_input) rows.push(data.latest_input);
+      if (data.latest_response) rows.push(data.latest_response);
+      statusTail.replaceChildren();
+      if (!rows.length) {
+        statusTail.textContent = "No recent events yet.";
+        return;
+      }
+      for (const row of rows) {
+        const div = document.createElement("div");
+        div.className = "event-row";
+        const type = String(row.event_type || "unknown");
+        const sessionId = String(row.session_id || "n/a");
+        const ts = shortTs(row.timestamp);
+        div.textContent = `${ts} | ${type} | ${sessionId}\n${stringify(row.payload || {})}`;
+        statusTail.appendChild(div);
+      }
+    }
+
+    async function loadStatus() {
+      try {
+        const response = await fetchStatus();
+        if (!response.ok) {
+          throw new Error(`${response.status} ${await response.text()}`);
+        }
+        const data = await response.json();
+        const power = String(data.power_state || "unknown").toUpperCase();
+        powerPill.textContent = power;
+        powerPill.classList.toggle("awake", power === "AWAKE");
+        powerPill.classList.toggle("asleep", power === "ASLEEP");
+        powerNote.textContent = `source: ${data.active_source || "n/a"} | channel: ${data.active_channel || "n/a"}`;
+
+        activeChannel.textContent = stringify({
+          source: data.active_source || null,
+          channel: data.active_channel || null,
+        });
+
+        modelRuntime.textContent = stringify(data.model_runtime || {});
+        activeModel.textContent = stringify({
+          lane: data.active_model_lane || null,
+          active_model: data.active_model_name || null,
+          effective_owner: data.effective_owner || null,
+          owner_note: data.owner_note || null,
+          configured_models: data.configured_models || {},
+        });
+
+        latestTurn.textContent = stringify({
+          latest_input: data.latest_input || null,
+          latest_response: data.latest_response || null,
+          latest_handoff: data.latest_handoff || null,
+        });
+
+        renderTail(data);
+        const now = new Date();
+        lastRefresh.textContent = `last refresh: ${now.toLocaleTimeString()}`;
+      } catch (error) {
+        powerPill.textContent = "ERROR";
+        powerPill.classList.remove("awake", "asleep");
+        powerNote.textContent = `status fetch failed: ${error.message}`;
+      }
+    }
+
+    refreshNowBtn.addEventListener("click", () => {
+      loadStatus();
+    });
+
+    loadStatus();
+    setInterval(loadStatus, REFRESH_MS);
+  </script>
+</body>
+</html>

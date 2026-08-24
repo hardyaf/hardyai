@@ -1,0 +1,10 @@
+{
+  "artifact": "critical_skills",
+  "compiled_at": "2026-08-19T21:12:19.394978+00:00",
+  "content_hash": "24f185fdd670fe9aff1b32b2f018ff87be644815f12e2b554e08d9773d24b927",
+  "min_critical_level": 1,
+  "missing_markdown_count": 0,
+  "output_path": "C:\\Users\\afhar\\Desktop\\Jarvis\\app\\prompts\\skills\\critical_skills.md",
+  "skill_count": 7,
+  "source_hash": "5da62ec436642ef6e020dd7d5b135a21dd5d124b285d762ebad383dc73b64c4f"
+}

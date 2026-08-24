@@ -1,0 +1,15 @@
+use_default_settings: true
+
+server:
+  limiter: false
+  public_instance: false
+  image_proxy: false
+
+search:
+  safe_search: 1
+  formats:
+    - html
+    - json
+
+ui:
+  static_use_hash: true

@@ -1,0 +1,9 @@
+From: Example Professor <professor@example.edu>
+To: jarvis.house+work@example.com
+Delivered-To: jarvis.house+work@example.com
+Message-ID: <work-canary@example.edu>
+Subject: Sanitized WORK canary
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+
+This is a sanitized forwarding-route canary. A response is requested by August 25, 2026.

@@ -1,0 +1,28 @@
+[Unit]
+Description=Jarvis delayed action-ticket review worker
+Wants=network-online.target
+After=network-online.target ollama.service jarvis.service
+PartOf=jarvis.service
+
+[Service]
+Type=simple
+User=@JARVIS_USER@
+Group=@JARVIS_GROUP@
+WorkingDirectory=@JARVIS_REPO_ROOT@
+EnvironmentFile=@JARVIS_REPO_ROOT@/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=SKILL_ARTIFACT_AUTO_COMPILE_ENABLED=false
+UMask=0077
+ExecStart=@JARVIS_REPO_ROOT@/.venv/bin/python -m app.workers.ticket_review_worker
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=240
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=@JARVIS_REPO_ROOT@/data
+
+[Install]
+WantedBy=multi-user.target

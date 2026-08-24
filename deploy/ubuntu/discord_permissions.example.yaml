@@ -1,0 +1,50 @@
+version: 1
+
+# Replace both example IDs before enabling Discord. Developer Mode in the
+# Discord client exposes "Copy Server ID" and "Copy Channel ID" actions.
+defaults:
+  command_prefix: "!jarvis"
+  require_prefix: true
+  allow_direct_messages: false
+  allowed_guild_ids:
+    - 111111111111111111
+  allowed_channel_ids: []
+  allowed_role_ids: []
+  allowed_user_ids: []
+  denied_user_ids: []
+
+guilds:
+  - guild_id: 111111111111111111
+    guild_name: replace-with-test-server-name
+    require_prefix: true
+    allowed_channel_ids:
+      - 222222222222222222
+    allowed_role_ids: []
+    allowed_user_ids: []
+    denied_user_ids: []
+    # Optional exact user/channel scopes for sensitive interactive skills.
+    # This admits the channel to the Discord adapter; the skill re-checks its
+    # own protected permissions before reading any data.
+    skill_channel_access:
+      - skill_id: skill.email.agent
+        channel_id: 555555555555555555
+        allowed_user_ids:
+          - 666666666666666666
+        audiences:
+          - shared
+    # Optional silent capture channels for skill.private_notes.digest.
+    # Messages from any other user ID are ignored, and captured messages receive no reply or reaction.
+    private_notes_channels:
+      - channel_id: 333333333333333333
+        delivery_channel_id: 333333333333333333
+        allowed_user_ids:
+          - 444444444444444444
+        owner_user_id: example_user
+        owner_display_name: Example User
+        agent_id: catparty
+        timezone: America/New_York
+        digest_at: "18:00"
+        skip_if_empty: true
+        # Only raw notes already included in a delivered digest are removed.
+        # Digest summaries are retained.
+        raw_note_retention_days: 30

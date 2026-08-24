@@ -1,0 +1,1755 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Jarvis Dashboard</title>
+  <style>
+    :root {
+      --bg: #f4f6f0;
+      --panel: #ffffff;
+      --ink: #182018;
+      --muted: #4e5e52;
+      --line: #d5dccf;
+      --accent: #2d6a4f;
+      --accent-2: #1b4332;
+      --warn: #c95a3a;
+      --on: #1f7a43;
+      --off: #7b8794;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "Trebuchet MS", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 20% -10%, #d8ead8 0%, transparent 35%),
+        radial-gradient(circle at 90% 10%, #f0e8cf 0%, transparent 30%),
+        var(--bg);
+    }
+    .shell {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 20px 16px 32px;
+    }
+    .title {
+      margin: 0 0 16px;
+      font-size: clamp(1.4rem, 2.4vw, 2rem);
+      letter-spacing: 0.02em;
+    }
+    .top-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 14px;
+      flex-wrap: wrap;
+    }
+    .title {
+      margin: 0;
+    }
+    .brain-indicator {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border: 1px solid var(--line);
+      background: #fbfcf9;
+      border-radius: 999px;
+      padding: 6px;
+    }
+    .status-cluster {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+    .brain-label {
+      font-size: 0.8rem;
+      color: var(--muted);
+      padding-left: 8px;
+      white-space: nowrap;
+    }
+    .brain-switch {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .brain-pill {
+      border: 1px solid var(--line);
+      background: #f1f4ef;
+      color: var(--muted);
+      border-radius: 999px;
+      padding: 6px 10px;
+      font-size: 0.78rem;
+      font-weight: 600;
+      cursor: default;
+    }
+    .brain-pill.active {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #ffffff;
+    }
+    .brain-note {
+      font-size: 0.76rem;
+      color: var(--muted);
+      padding-right: 8px;
+      white-space: nowrap;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(12, 1fr);
+      gap: 14px;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 14px;
+      box-shadow: 0 6px 18px rgba(24, 32, 24, 0.06);
+    }
+    .panel h2 {
+      margin: 0 0 8px;
+      font-size: 1rem;
+      letter-spacing: 0.02em;
+    }
+    .panel h3 {
+      margin: 10px 0 6px;
+      font-size: 0.9rem;
+      letter-spacing: 0.02em;
+      color: #2c3f31;
+    }
+    .muted { color: var(--muted); font-size: 0.9rem; }
+    .command-panel { grid-column: span 7; }
+    .state-panel { grid-column: span 5; }
+    .switch-panel { grid-column: span 7; }
+    .voice-panel { grid-column: span 7; }
+    .events-panel { grid-column: span 5; }
+    .debug-panel { grid-column: span 12; }
+    /* Operator mode: keep runtime bars, hide deep trace panels from the live view. */
+    .events-panel,
+    .debug-panel {
+      display: none;
+    }
+    .row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    input[type="text"] {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px 12px;
+      font-size: 0.95rem;
+      color: var(--ink);
+      background: #fbfcf9;
+    }
+    textarea {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px 12px;
+      font-size: 0.92rem;
+      color: var(--ink);
+      background: #fbfcf9;
+      resize: vertical;
+      min-height: 84px;
+    }
+    button {
+      border: 1px solid transparent;
+      border-radius: 10px;
+      padding: 9px 12px;
+      font-size: 0.9rem;
+      cursor: pointer;
+    }
+    button.primary {
+      background: var(--accent);
+      color: #fff;
+    }
+    button.primary:hover {
+      background: var(--accent-2);
+    }
+    button.ghost {
+      background: #eef2eb;
+      color: var(--ink);
+      border-color: var(--line);
+    }
+    .pill {
+      display: inline-block;
+      padding: 3px 8px;
+      border-radius: 999px;
+      font-size: 0.75rem;
+      margin-right: 6px;
+      background: #ecf3ec;
+      color: #21503b;
+    }
+    .result-box {
+      margin-top: 10px;
+      background: #f7faf6;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px;
+      min-height: 70px;
+      white-space: pre-wrap;
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 0.82rem;
+    }
+    .switch-list {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .switch-card {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px;
+      background: #fcfdf9;
+    }
+    .switch-name { font-weight: 600; }
+    .switch-state {
+      font-size: 0.82rem;
+      margin-top: 4px;
+      margin-bottom: 8px;
+      color: var(--off);
+    }
+    .switch-state.on { color: var(--on); }
+    .switch-actions {
+      display: flex;
+      gap: 8px;
+    }
+    .switch-actions button {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border-width: 1px;
+      border-style: solid;
+    }
+    .btn-icon {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      border: 2px solid currentColor;
+      background: transparent;
+      display: inline-block;
+    }
+    .switch-actions button.active .btn-icon {
+      background: currentColor;
+    }
+    .on-btn { background: #e4f4e9; color: #1b6a3d; border-color: #cde6d4; }
+    .off-btn { background: #f0f3f6; color: #536070; border-color: #dae1e8; }
+    .on-btn.active {
+      background: #1f7a43;
+      color: #ffffff;
+      border-color: #1f7a43;
+    }
+    .off-btn.active {
+      background: #536070;
+      color: #ffffff;
+      border-color: #536070;
+    }
+    .events {
+      margin-top: 8px;
+      max-height: 520px;
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #f9fbf7;
+      padding: 8px;
+    }
+    .event-row {
+      padding: 6px 0;
+      border-bottom: 1px dashed #d8dfd3;
+      font-size: 0.82rem;
+      font-family: Consolas, "Courier New", monospace;
+    }
+    .event-row:last-child { border-bottom: 0; }
+    .voice-tags {
+      margin-top: 10px;
+    }
+    .dialog-history {
+      margin-top: 10px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #f9fbf7;
+      min-height: 180px;
+      max-height: 360px;
+      overflow: auto;
+      padding: 10px;
+      display: grid;
+      gap: 8px;
+    }
+    .dialog-row {
+      display: flex;
+      width: 100%;
+    }
+    .dialog-row.user { justify-content: flex-end; }
+    .dialog-row.assistant { justify-content: flex-start; }
+    .dialog-bubble {
+      max-width: 85%;
+      border-radius: 12px;
+      border: 1px solid var(--line);
+      padding: 8px 10px;
+      background: #ffffff;
+      white-space: pre-wrap;
+      line-height: 1.35;
+      font-size: 0.9rem;
+    }
+    .dialog-row.user .dialog-bubble {
+      background: #e8f1ec;
+      border-color: #c9decf;
+    }
+    .dialog-role {
+      display: block;
+      font-size: 0.72rem;
+      color: var(--muted);
+      margin-bottom: 3px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .voice-debug {
+      margin-top: 10px;
+    }
+    .voice-debug summary {
+      cursor: pointer;
+      color: var(--muted);
+      font-size: 0.85rem;
+    }
+    .debug-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 10px;
+      margin-top: 8px;
+    }
+    .trace-wrap {
+      margin-top: 8px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      overflow: auto;
+      max-height: 320px;
+      background: #f9fbf7;
+    }
+    .trace-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.8rem;
+      font-family: Consolas, "Courier New", monospace;
+    }
+    .trace-table th,
+    .trace-table td {
+      border-bottom: 1px solid #d9e0d4;
+      padding: 6px 8px;
+      vertical-align: top;
+      text-align: left;
+    }
+    .trace-table th {
+      position: sticky;
+      top: 0;
+      background: #eef3ec;
+      z-index: 1;
+    }
+    .trace-empty {
+      padding: 10px;
+      color: var(--muted);
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 0.82rem;
+    }
+    .top-actions {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .ghost-link {
+      display: inline-flex;
+      align-items: center;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 9px 12px;
+      color: var(--ink);
+      background: #eef2eb;
+      text-decoration: none;
+      font-size: 0.9rem;
+    }
+    .ghost-link:hover {
+      background: #e6ece2;
+    }
+    .events.events-compact {
+      max-height: 240px;
+    }
+    @media (max-width: 900px) {
+      .command-panel, .state-panel, .switch-panel, .voice-panel, .events-panel, .debug-panel { grid-column: span 12; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="top-row">
+      <h1 class="title">Jarvis House Dashboard</h1>
+      <div class="top-actions">
+        <a class="ghost-link" href="/status-dashboard" target="_blank" rel="noopener">Open Status Dashboard</a>
+        <button id="download-session-logs" class="ghost" type="button">Download Session Logs</button>
+        <span id="session-log-status" class="brain-note">logs: 0 turns</span>
+      </div>
+    </div>
+    <div class="grid">
+      <section class="panel command-panel">
+        <h2>Command Console</h2>
+        <p class="muted">Send test commands through the same <code>/ask</code> path used by all interfaces.</p>
+        <div class="row">
+          <input id="command-input" type="text" placeholder="Try: add milk to groceries" />
+          <button id="send-command" class="primary" type="button">Send</button>
+        </div>
+        <div class="row" style="margin-top:8px;">
+          <label class="muted">
+            <input id="kid-mode-toggle" type="checkbox" />
+            Kid Mode Context
+          </label>
+        </div>
+        <div id="command-mode-tags" class="voice-tags"></div>
+        <div id="command-history" class="dialog-history"></div>
+        <details class="voice-debug">
+          <summary>Raw Turn Data</summary>
+          <div id="command-tags" style="margin-top:10px;"></div>
+          <div id="command-result" class="result-box"></div>
+        </details>
+      </section>
+
+      <section class="panel state-panel">
+        <h2>Discord Entry Channel</h2>
+        <p class="muted">Route through Discord semantics (shared channel lane, auto-wake, main-owned).</p>
+        <div class="row">
+          <input id="discord-input" type="text" placeholder="Try: what is on my calendar tomorrow?" />
+          <button id="send-discord" class="primary" type="button">Send Discord Turn</button>
+        </div>
+        <div id="discord-history" class="dialog-history"></div>
+        <details class="voice-debug">
+          <summary>Raw Discord Turn Data</summary>
+          <div id="discord-result" class="result-box"></div>
+        </details>
+      </section>
+
+      <section class="panel switch-panel">
+        <h2>House Switches</h2>
+        <p class="muted">Simulated controls for phase-1 testing.</p>
+        <div class="row" style="margin-top:8px;">
+          <button id="refresh-switches" class="ghost" type="button">Refresh</button>
+        </div>
+        <div id="switch-list" class="switch-list"></div>
+      </section>
+
+      <section class="panel voice-panel">
+        <h2>Voice Test Mode</h2>
+        <p class="muted">Simulate voice transcripts through the same command path for early voice-flow testing.</p>
+        <textarea id="voice-transcript" placeholder="Try: Jarvis, add dentist appointment to my calendar"></textarea>
+        <div class="row" style="margin-top:8px;">
+          <button id="send-voice" class="primary" type="button">Run Voice Simulation</button>
+          <button id="mic-toggle" class="ghost" type="button">Start Mic</button>
+          <button id="voice-sample-1" class="ghost" type="button">Sample: Calendar</button>
+          <button id="voice-sample-2" class="ghost" type="button">Sample: Sleep/Wake</button>
+        </div>
+        <p id="mic-status" class="muted" style="margin-top:8px;">Mic: not started</p>
+        <div id="voice-mode-tags" class="voice-tags"></div>
+        <div id="voice-history" class="dialog-history"></div>
+        <details class="voice-debug">
+          <summary>Raw Turn Data</summary>
+          <div id="voice-result" class="result-box"></div>
+        </details>
+      </section>
+
+      <section class="panel events-panel">
+        <h2>Event Trace</h2>
+        <p class="muted">Recent events and handoffs.</p>
+        <div class="row">
+          <button id="refresh-events" class="ghost" type="button">Refresh</button>
+        </div>
+        <div id="events" class="events"></div>
+      </section>
+
+      <section class="panel debug-panel">
+        <h2>Agent Debug</h2>
+        <p class="muted">Turn-by-turn diagnostics for routing, loop execution, context budget, and policy outcomes.</p>
+
+        <h3>Turn Header</h3>
+        <div id="debug-turn-header" class="result-box"></div>
+
+        <div class="debug-grid">
+          <div>
+            <h3>Routing Summary</h3>
+            <div id="debug-routing" class="result-box"></div>
+          </div>
+          <div>
+            <h3>Agent Loop Summary</h3>
+            <div id="debug-loop-summary" class="result-box"></div>
+          </div>
+          <div>
+            <h3>Reasoning Signals</h3>
+            <div id="debug-reasoning" class="result-box"></div>
+          </div>
+          <div>
+            <h3>Plan Materialization</h3>
+            <div id="debug-materialization" class="result-box"></div>
+          </div>
+          <div>
+            <h3>Context Budget</h3>
+            <div id="debug-budget" class="result-box"></div>
+          </div>
+          <div>
+            <h3>Policy</h3>
+            <div id="debug-policy" class="result-box"></div>
+          </div>
+          <div>
+            <h3>Clarification</h3>
+            <div id="debug-clarification" class="result-box"></div>
+          </div>
+          <div>
+            <h3>Tool Result Summary</h3>
+            <div id="debug-tool-summary" class="result-box"></div>
+          </div>
+        </div>
+
+        <h3>Step Trace</h3>
+        <div class="trace-wrap">
+          <table class="trace-table">
+            <thead>
+              <tr>
+                <th>Step</th>
+                <th>Action</th>
+                <th>Command</th>
+                <th>Tool/Skill</th>
+                <th>Status</th>
+                <th>Rationale</th>
+                <th>State</th>
+              </tr>
+            </thead>
+            <tbody id="debug-trace-body"></tbody>
+          </table>
+          <div id="debug-trace-empty" class="trace-empty">No trace captured yet.</div>
+        </div>
+
+        <details class="voice-debug" style="margin-top:10px;">
+          <summary>Raw Tool Payload</summary>
+          <div id="debug-raw-result" class="result-box" style="margin-top:10px;"></div>
+        </details>
+
+        <h3>Event Tail</h3>
+        <div class="row">
+          <label class="muted" for="debug-event-filter">Filter</label>
+          <select id="debug-event-filter">
+            <option value="all">all</option>
+            <option value="main_loop">main.agent_loop.*</option>
+            <option value="verify_injection">verification injection</option>
+            <option value="main_repair">main.repair.*</option>
+            <option value="tool_exec">tool execution</option>
+            <option value="session_only">current session only</option>
+          </select>
+          <button id="debug-refresh-events" class="ghost" type="button">Refresh Tail</button>
+        </div>
+        <div id="debug-events-tail" class="events events-compact"></div>
+      </section>
+    </div>
+  </div>
+
+  <script>
+    const commandInput = document.getElementById("command-input");
+    const commandResult = document.getElementById("command-result");
+    const commandTags = document.getElementById("command-tags");
+    const commandHistory = document.getElementById("command-history");
+    const commandModeTags = document.getElementById("command-mode-tags");
+    const discordInput = document.getElementById("discord-input");
+    const discordResult = document.getElementById("discord-result");
+    const discordHistory = document.getElementById("discord-history");
+    const switchList = document.getElementById("switch-list");
+    const eventsBox = document.getElementById("events");
+    const voiceTranscript = document.getElementById("voice-transcript");
+    const voiceResult = document.getElementById("voice-result");
+    const voiceHistory = document.getElementById("voice-history");
+    const voiceModeTags = document.getElementById("voice-mode-tags");
+    const micToggle = document.getElementById("mic-toggle");
+    const micStatus = document.getElementById("mic-status");
+    const pipelinePillMicro = document.getElementById("pipeline-pill-micro");
+    const pipelinePillMain = document.getElementById("pipeline-pill-main");
+    const pipelineNote = document.getElementById("pipeline-note");
+    const runtimePillMicro = document.getElementById("runtime-pill-micro");
+    const runtimePillMain = document.getElementById("runtime-pill-main");
+    const runtimePillJarvis = document.getElementById("runtime-pill-jarvis");
+    const runtimeNote = document.getElementById("runtime-note");
+    const downloadSessionLogsBtn = document.getElementById("download-session-logs");
+    const sessionLogStatus = document.getElementById("session-log-status");
+    const kidModeToggle = document.getElementById("kid-mode-toggle");
+    const debugTurnHeader = document.getElementById("debug-turn-header");
+    const debugRouting = document.getElementById("debug-routing");
+    const debugLoopSummary = document.getElementById("debug-loop-summary");
+    const debugReasoning = document.getElementById("debug-reasoning");
+    const debugMaterialization = document.getElementById("debug-materialization");
+    const debugBudget = document.getElementById("debug-budget");
+    const debugPolicy = document.getElementById("debug-policy");
+    const debugClarification = document.getElementById("debug-clarification");
+    const debugToolSummary = document.getElementById("debug-tool-summary");
+    const debugRawResult = document.getElementById("debug-raw-result");
+    const debugTraceBody = document.getElementById("debug-trace-body");
+    const debugTraceEmpty = document.getElementById("debug-trace-empty");
+    const debugEventFilter = document.getElementById("debug-event-filter");
+    const debugEventsTail = document.getElementById("debug-events-tail");
+
+    const commandSessionChannel = "dashboard.command";
+    const voiceSessionChannel = "dashboard.voice";
+    const discordSessionChannel = "discord.guild.dashboard.channel.main";
+    let commandSessionId = null;
+    const userId = "dashboard-user";
+    let voiceSessionId = null;
+    let discordSessionId = null;
+    const VOICE_IDLE_WINDOW_MS = 1200;
+    let recognition = null;
+    let micActive = false;
+    let micIdleTimer = null;
+    let pendingMicTranscript = "";
+    let lastMicAutoSentTranscript = "";
+    let voiceSendInFlight = false;
+    let cachedEvents = [];
+    let sessionTurnLogs = [];
+    let latestDebugTurn = null;
+    let commandDialogState = {
+      mode: "command_action",
+      turn_complete: true,
+      pending_intent: null,
+      awaiting_fields: []
+    };
+    let voiceDialogState = {
+      mode: "command_action",
+      turn_complete: true,
+      pending_intent: null,
+      awaiting_fields: []
+    };
+    let discordDialogState = {
+      mode: "command_action",
+      turn_complete: true,
+      pending_intent: null,
+      awaiting_fields: []
+    };
+
+    let operatorCsrfToken = null;
+    let operatorLoginPromise = null;
+
+    async function ensureOperatorSession() {
+      if (operatorLoginPromise) {
+        return operatorLoginPromise;
+      }
+      operatorLoginPromise = (async () => {
+        const existing = await fetch("/operator/session", { credentials: "same-origin" });
+        if (existing.ok) {
+          const session = await existing.json();
+          operatorCsrfToken = String(session.csrf_token || "");
+          return;
+        }
+        const apiKey = window.prompt("Jarvis operator key");
+        if (!apiKey) {
+          throw new Error("Operator authentication is required.");
+        }
+        const login = await fetch("/operator/session", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "X-Jarvis-Operator-Key": apiKey }
+        });
+        if (!login.ok) {
+          throw new Error(`${login.status}: operator authentication failed`);
+        }
+        const session = await login.json();
+        operatorCsrfToken = String(session.csrf_token || "");
+      })();
+      try {
+        await operatorLoginPromise;
+      } finally {
+        operatorLoginPromise = null;
+      }
+    }
+
+    async function callApi(path, options = {}, retryAuth = true) {
+      const requestOptions = { ...options, credentials: "same-origin" };
+      const headers = new Headers(options.headers || {});
+      const method = String(options.method || "GET").toUpperCase();
+      if (!["GET", "HEAD", "OPTIONS"].includes(method) && operatorCsrfToken) {
+        headers.set("X-CSRF-Token", operatorCsrfToken);
+      }
+      requestOptions.headers = headers;
+      const response = await fetch(path, requestOptions);
+      if (response.status === 401 && retryAuth) {
+        await ensureOperatorSession();
+        return callApi(path, options, false);
+      }
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`${response.status}: ${text}`);
+      }
+      return response.json();
+    }
+
+    function setCommandResult(data) {
+      commandResult.textContent = JSON.stringify({
+        route: data.route,
+        intent: data.intent,
+        dialog: data.dialog,
+        assistant: data.assistant,
+        result: data.result
+      }, null, 2);
+      commandTags.replaceChildren();
+      for (const [label, value] of [
+        ["intent", data.intent],
+        ["route", data.route],
+        ["confidence", Number(data.classification?.confidence ?? 0).toFixed(2)],
+        ["owner", data.owner],
+        ["state", data.state],
+        ["power", data.power_state]
+      ]) {
+        const pill = document.createElement("span");
+        pill.className = "pill";
+        pill.textContent = `${label}: ${String(value ?? "")}`;
+        commandTags.appendChild(pill);
+      }
+      updateStatusIndicators(data);
+    }
+
+    function resolveActivePipeline(data) {
+      const owner = String(data?.owner || "").toLowerCase();
+      if (owner === "micro_jarvis") {
+        return "micro";
+      }
+      if (owner === "main_jarvis") {
+        return "main";
+      }
+
+      const route = String(data?.route || "").toLowerCase();
+      if (route === "micro_tool") {
+        return "micro";
+      }
+      if (route.startsWith("main_jarvis")) {
+        return "main";
+      }
+
+      const runtime = data?.model_runtime || {};
+      if (runtime.larger_models_active === true) {
+        return "main";
+      }
+      if (runtime.main_labeled_count > runtime.micro_labeled_count) {
+        return "main";
+      }
+      return "micro";
+    }
+
+    function updatePipelineIndicator(data) {
+      if (!pipelinePillMicro || !pipelinePillMain || !pipelineNote) {
+        return;
+      }
+      const activePipeline = resolveActivePipeline(data);
+      const microActive = activePipeline === "micro";
+      const mainActive = activePipeline === "main";
+      pipelinePillMicro.classList.toggle("active", microActive);
+      pipelinePillMain.classList.toggle("active", mainActive);
+      pipelinePillMicro.setAttribute("aria-pressed", String(microActive));
+      pipelinePillMain.setAttribute("aria-pressed", String(mainActive));
+
+      const owner = String(data?.owner || "unknown");
+      const route = String(data?.route || "unknown");
+      const intent = String(data?.intent || "unknown");
+      if (owner === "system") {
+        pipelineNote.textContent = `owner: system | intent: ${intent} | route: ${route}`;
+      } else {
+        pipelineNote.textContent = `owner: ${owner} | intent: ${intent} | route: ${route}`;
+      }
+    }
+
+    function summarizeChannelSession(data) {
+      const channel = data?.session_runtime?.channel;
+      if (!channel || typeof channel !== "object") {
+        return "channel: n/a";
+      }
+      const rawKey = String(channel.channel_key || "").trim();
+      const channelLabel = rawKey.includes(":")
+        ? rawKey.split(":").slice(1).join(":")
+        : (rawKey || "unknown");
+      const expired = channel.expired === true;
+      const expiresInRaw = Number(channel.expires_in_seconds);
+      const ttl = Number.isFinite(expiresInRaw) ? `${Math.max(0, Math.floor(expiresInRaw))}s` : "n/a";
+      const ttlText = expired ? "expired" : `ttl: ${ttl}`;
+      return `channel: ${channelLabel} | ${ttlText}`;
+    }
+
+    function updateModelRuntimeIndicator(data) {
+      if (!runtimePillMicro || !runtimePillMain || !runtimePillJarvis || !runtimeNote) {
+        return;
+      }
+      const runtime = data?.model_runtime || {};
+      const owner = String(data?.owner || "").toLowerCase();
+      const route = String(data?.route || "").toLowerCase();
+      const jarvisActive = owner === "main_jarvis" || route.startsWith("main_jarvis");
+      const mainWarm = runtime.larger_models_active === true;
+      const microOnly = !mainWarm && !jarvisActive;
+      runtimePillMicro.classList.toggle("active", microOnly);
+      runtimePillMain.classList.toggle("active", mainWarm);
+      runtimePillJarvis.classList.toggle("active", jarvisActive);
+      runtimePillMicro.setAttribute("aria-pressed", String(microOnly));
+      runtimePillMain.setAttribute("aria-pressed", String(mainWarm));
+      runtimePillJarvis.setAttribute("aria-pressed", String(jarvisActive));
+
+      const taskCount = Number(runtime.task_count || 0);
+      const windowSeconds = Number(runtime.window_seconds || 0);
+      const microCount = Number(runtime.micro_labeled_count || 0);
+      const mainCount = Number(runtime.main_labeled_count || 0);
+      const modeText = jarvisActive ? "jarvis active" : (mainWarm ? "main warm" : "micro-only");
+      const channelSession = summarizeChannelSession(data);
+      runtimeNote.textContent = `${modeText} | tasks: ${taskCount} | micro/main: ${microCount}/${mainCount} | window: ${windowSeconds}s | ${channelSession}`;
+    }
+
+    function updateStatusIndicators(data) {
+      updatePipelineIndicator(data);
+      updateModelRuntimeIndicator(data);
+    }
+
+    function stringifySafe(value) {
+      if (value === undefined) {
+        return "null";
+      }
+      try {
+        return JSON.stringify(value, null, 2);
+      } catch (error) {
+        return JSON.stringify({ error: String(error) }, null, 2);
+      }
+    }
+
+    function cloneForLog(value) {
+      try {
+        return JSON.parse(JSON.stringify(value));
+      } catch (error) {
+        return {
+          _serialization_error: String(error)
+        };
+      }
+    }
+
+    function updateSessionLogStatus() {
+      if (!sessionLogStatus) {
+        return;
+      }
+      sessionLogStatus.textContent = `logs: ${sessionTurnLogs.length} turns`;
+    }
+
+    function captureSessionTurnLog({ requestPayload, responsePayload, sourceMode, kidMode }) {
+      const response = responsePayload || {};
+      const modelRuntime = response.model_runtime || {};
+      const sessionRuntime = response.session_runtime || {};
+      const channelRuntime = sessionRuntime.channel || {};
+      const expiresInRaw = Number(channelRuntime.expires_in_seconds);
+      const turn = {
+        turn_number: sessionTurnLogs.length + 1,
+        timestamp: new Date().toISOString(),
+        source_mode: sourceMode,
+        kid_mode: kidMode === true,
+        request: cloneForLog(requestPayload),
+        response: cloneForLog(responsePayload),
+        summary: {
+          intent: response.intent || null,
+          route: response.route || null,
+          owner: response.owner || null,
+          state: response.state || null,
+          power_state: response.power_state || null,
+          session_channel_key: channelRuntime.channel_key || null,
+          session_channel_expires_in_seconds: Number.isFinite(expiresInRaw) ? Number(expiresInRaw) : null,
+          session_channel_expired: channelRuntime.expired === true,
+          task_pipeline_lane: resolveActivePipeline(response),
+          model_runtime_active: modelRuntime.larger_models_active === true,
+          model_runtime_task_count: Number(modelRuntime.task_count || 0),
+          model_runtime_main_labeled_count: Number(modelRuntime.main_labeled_count || 0),
+          model_runtime_micro_labeled_count: Number(modelRuntime.micro_labeled_count || 0)
+        }
+      };
+      sessionTurnLogs.push(turn);
+      updateSessionLogStatus();
+    }
+
+    function captureSessionTurnError({ requestPayload, sourceMode, kidMode, errorMessage }) {
+      const turn = {
+        turn_number: sessionTurnLogs.length + 1,
+        timestamp: new Date().toISOString(),
+        source_mode: sourceMode,
+        kid_mode: kidMode === true,
+        request: cloneForLog(requestPayload),
+        response: null,
+        error: String(errorMessage || "unknown_error")
+      };
+      sessionTurnLogs.push(turn);
+      updateSessionLogStatus();
+    }
+
+    function downloadSessionLogs() {
+      const payload = {
+        exported_at: new Date().toISOString(),
+        dashboard_session_ids: {
+          command_session_id: commandSessionId,
+          voice_session_id: voiceSessionId,
+          discord_session_id: discordSessionId
+        },
+        turn_count: sessionTurnLogs.length,
+        turns: cloneForLog(sessionTurnLogs)
+      };
+      const json = JSON.stringify(payload, null, 2);
+      const blob = new Blob([json], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `jarvis-session-logs-${timestamp}.json`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+      URL.revokeObjectURL(url);
+    }
+
+    function truncateText(text, maxChars = 180) {
+      const raw = String(text || "");
+      if (raw.length <= maxChars) {
+        return raw;
+      }
+      return `${raw.slice(0, maxChars - 3)}...`;
+    }
+
+    function toFixedConfidence(value) {
+      const num = Number(value);
+      if (Number.isFinite(num)) {
+        return Number(num).toFixed(2);
+      }
+      return "n/a";
+    }
+
+    function summarizeReasoningSignals(traceRows) {
+      if (!Array.isArray(traceRows) || !traceRows.length) {
+        return {
+          status: "not_available",
+          reason: "No trace rows available for reasoning signals."
+        };
+      }
+      const perStep = [];
+      for (const row of traceRows) {
+        const candidates = Array.isArray(row.candidate_actions) ? row.candidate_actions : [];
+        const normalized = candidates.map((item) => {
+          const score = Number(item?.score);
+          return {
+            action_type: String(item?.action_type || ""),
+            score: Number.isFinite(score) ? score : 0.0
+          };
+        }).sort((left, right) => right.score - left.score);
+        const selectedAction = String(row.chosen_action || row.action_type || "").trim();
+        const selectedByAction = normalized.find((item) => item.action_type === selectedAction) || null;
+        const selectedScoreRaw = Number(row.selected_candidate_score);
+        const selectedScore = Number.isFinite(selectedScoreRaw)
+          ? selectedScoreRaw
+          : (selectedByAction ? selectedByAction.score : null);
+        const runnerUp = normalized.length > 1 ? normalized[1] : null;
+        const runnerUpScore = runnerUp ? Number(runnerUp.score) : null;
+        const scoreGap = (selectedScore !== null && Number.isFinite(runnerUpScore))
+          ? Number((selectedScore - runnerUpScore).toFixed(3))
+          : null;
+        perStep.push({
+          step_number: row.step_number ?? row.index ?? null,
+          action: selectedAction || null,
+          selected_candidate_score: selectedScore !== null ? Number(selectedScore.toFixed(3)) : null,
+          runner_up_action: runnerUp?.action_type || null,
+          runner_up_score: Number.isFinite(runnerUpScore) ? Number(runnerUpScore.toFixed(3)) : null,
+          score_gap: scoreGap,
+          uncertainty: Number.isFinite(Number(row.uncertainty)) ? Number(Number(row.uncertainty).toFixed(3)) : null,
+          candidate_count: normalized.length
+        });
+      }
+      const latest = perStep.length ? perStep[perStep.length - 1] : null;
+      return {
+        step_count: perStep.length,
+        latest,
+        last_three_steps: perStep.slice(-3)
+      };
+    }
+
+    function renderTraceRows(traceRows, materialization = null) {
+      debugTraceBody.replaceChildren();
+      if (!Array.isArray(traceRows) || !traceRows.length) {
+        debugTraceEmpty.style.display = "block";
+        return;
+      }
+      const materializedByStepIndex = new Map();
+      const materializedRows = Array.isArray(materialization?.injected_verifications)
+        ? materialization.injected_verifications
+        : [];
+      for (const detail of materializedRows) {
+        const maybeIndex = Number(detail?.materialized_index);
+        if (Number.isInteger(maybeIndex) && maybeIndex >= 0) {
+          materializedByStepIndex.set(maybeIndex, detail);
+        }
+      }
+      debugTraceEmpty.style.display = "none";
+      for (const row of traceRows) {
+        const tr = document.createElement("tr");
+        const step = row.step_number ?? row.index ?? "-";
+        const stepIndex = Number(step) - 1;
+        const verification = Number.isInteger(stepIndex) ? materializedByStepIndex.get(stepIndex) : null;
+        const action = row.chosen_action || row.action_type || "execute_command";
+        const actionLabel = verification ? `${action} [verify]` : action;
+        const command = row.command_text || "";
+        const tool = row.tool_or_skill || row.intent || "";
+        const status = row.result_status || row.status || "";
+        const rationale = row.rationale || "";
+        const rationaleLabel = verification
+          ? `${rationale} | ${verification.verification_reason || "verification_injected"}`
+          : rationale;
+        const before = row.state_before || "";
+        const after = row.state_after || "";
+        for (const value of [
+          step,
+          actionLabel,
+          truncateText(command, 80),
+          tool,
+          status,
+          truncateText(rationaleLabel, 120),
+          before && after ? `${before} -> ${after}` : after || before
+        ]) {
+          const td = document.createElement("td");
+          td.textContent = String(value ?? "");
+          tr.appendChild(td);
+        }
+        debugTraceBody.appendChild(tr);
+      }
+    }
+
+    function renderDebugEventTail() {
+      if (!Array.isArray(cachedEvents)) {
+        debugEventsTail.textContent = "No events available.";
+        return;
+      }
+      const filter = debugEventFilter.value || "all";
+      const sessionIdForTurn = String(latestDebugTurn?.session_id || "");
+      const rows = cachedEvents.slice().reverse().filter((row) => {
+        const eventType = String(row.event_type || "");
+        const payload = (row && typeof row.payload === "object" && row.payload !== null) ? row.payload : {};
+        const plannerMetadata = (payload && typeof payload.planner_metadata === "object" && payload.planner_metadata !== null)
+          ? payload.planner_metadata
+          : {};
+        if (filter === "main_loop") {
+          return eventType.startsWith("main.agent_loop");
+        }
+        if (filter === "verify_injection") {
+          if (eventType !== "main.agent_loop.step") {
+            return false;
+          }
+          return plannerMetadata.is_verification === true
+            || plannerMetadata.generated_by === "planner.verify_injection"
+            || typeof plannerMetadata.verification_reason === "string";
+        }
+        if (filter === "main_repair") {
+          return eventType.startsWith("main.repair");
+        }
+        if (filter === "tool_exec") {
+          return eventType === "tool.executed" || eventType === "main.plan.command.executed";
+        }
+        if (filter === "session_only") {
+          return !!sessionIdForTurn && String(row.session_id || "") === sessionIdForTurn;
+        }
+        return true;
+      }).slice(0, 20);
+
+      debugEventsTail.replaceChildren();
+      if (!rows.length) {
+        const empty = document.createElement("div");
+        empty.className = "event-row";
+        empty.textContent = "No events matched the selected filter.";
+        debugEventsTail.appendChild(empty);
+        return;
+      }
+      for (const row of rows) {
+        const line = document.createElement("div");
+        line.className = "event-row";
+        const payloadPreview = truncateText(stringifySafe(row.payload), 220);
+        line.textContent = `${row.timestamp} | ${row.event_type} | ${row.session_id} | ${payloadPreview}`;
+        debugEventsTail.appendChild(line);
+      }
+    }
+
+    function updateDebugPanel(data, meta = {}) {
+      latestDebugTurn = data;
+      const result = data.result || {};
+      const execution = result.execution || {};
+      const agentLoop = execution.agent_loop || {};
+      const traceRows = Array.isArray(agentLoop.trace)
+        ? agentLoop.trace
+        : (Array.isArray(execution.results) ? execution.results : []);
+      const materialization = agentLoop.plan_materialization || null;
+      const confidence = toFixedConfidence(data.classification?.confidence);
+      const requestText = typeof meta.requestText === "string" ? meta.requestText : "";
+      const sourceMode = typeof meta.source === "string" ? meta.source : "unknown";
+      const kidMode = meta.kidMode === true;
+      const topEvent = cachedEvents.length ? cachedEvents[cachedEvents.length - 1] : null;
+      const policyRoot = agentLoop.policy || null;
+      const policy = (policyRoot && policyRoot.latest) || result.policy || {
+        status: "not_reported",
+        reason: "No policy verdict attached to this turn yet."
+      };
+      const policyView = policyRoot
+        ? {
+            applied: policyRoot.applied === true,
+            decision_count: Array.isArray(policyRoot.decisions) ? policyRoot.decisions.length : 0,
+            latest: policy
+          }
+        : policy;
+      const clarification = {
+        mode: data.dialog?.mode,
+        turn_complete: data.dialog?.turn_complete,
+        pending_intent: data.dialog?.pending_intent,
+        awaiting_fields: data.dialog?.awaiting_fields,
+        missing_fields: result.missing_fields,
+        question: result.question || data.dialog?.question || null
+      };
+
+      debugTurnHeader.textContent = stringifySafe({
+        timestamp: topEvent?.timestamp || new Date().toISOString(),
+        session_id: data.session_id,
+        request_text: requestText || null,
+        source_mode: sourceMode,
+        kid_mode: kidMode,
+        agent_id: data.agent_id || data.result?.agent_id || "not_reported"
+      });
+      debugRouting.textContent = stringifySafe({
+        route: data.route,
+        owner: data.owner,
+        state: data.state,
+        intent: data.intent,
+        confidence,
+        repaired_by: result.repaired_by || null
+      });
+      debugLoopSummary.textContent = stringifySafe({
+        execution_status: execution.status || result.status || "n/a",
+        loop_state: execution.loop_state || "n/a",
+        run_id: agentLoop.run_id || null,
+        requested_count: execution.requested_count ?? null,
+        success_count: execution.success_count ?? null,
+        failed_count: execution.failed_count ?? null,
+        injected_verification_count: materialization?.injected_verification_count ?? 0
+      });
+      debugReasoning.textContent = stringifySafe(summarizeReasoningSignals(traceRows));
+      debugMaterialization.textContent = stringifySafe(materialization || {
+        status: "not_available",
+        reason: "No planner materialization payload on this turn."
+      });
+      debugBudget.textContent = stringifySafe(agentLoop.context_budget || {
+        status: "not_available",
+        reason: "No loop context budget on this turn."
+      });
+      debugPolicy.textContent = stringifySafe(policyView);
+      debugClarification.textContent = stringifySafe(clarification);
+      debugToolSummary.textContent = stringifySafe({
+        result_status: result.status || null,
+        message: result.message || null,
+        debug_skill_id: result.debug_skill_id || null,
+        assistant_text: data.assistant?.text || null
+      });
+      debugRawResult.textContent = stringifySafe(result);
+      renderTraceRows(traceRows, materialization);
+      renderDebugEventTail();
+    }
+
+    function renderModeTags(target, data) {
+      const dialog = data.dialog || {};
+      const awaitingFields = Array.isArray(dialog.awaiting_fields)
+        ? dialog.awaiting_fields.filter(Boolean)
+        : [];
+      const pendingIntent = dialog.pending_intent || "none";
+      const mode = dialog.mode || "command_action";
+      target.replaceChildren();
+      for (const [label, value] of [
+        ["mode", mode],
+        ["turn_complete", dialog.turn_complete !== false],
+        ["pending_intent", pendingIntent],
+        ["awaiting", awaitingFields.length ? awaitingFields.join(", ") : "none"]
+      ]) {
+        const pill = document.createElement("span");
+        pill.className = "pill";
+        pill.textContent = `${label}: ${String(value)}`;
+        target.appendChild(pill);
+      }
+    }
+
+    function appendDialog(target, role, text) {
+      const row = document.createElement("div");
+      row.className = `dialog-row ${role}`;
+
+      const bubble = document.createElement("div");
+      bubble.className = "dialog-bubble";
+
+      const roleLabel = document.createElement("span");
+      roleLabel.className = "dialog-role";
+      roleLabel.textContent = role === "user" ? "You" : "Jarvis";
+
+      const body = document.createElement("div");
+      body.textContent = text;
+
+      bubble.appendChild(roleLabel);
+      bubble.appendChild(body);
+      row.appendChild(bubble);
+      target.appendChild(row);
+      target.scrollTop = target.scrollHeight;
+    }
+
+    function summarizeAssistantText(data) {
+      const assistantText = typeof data.assistant?.text === "string"
+        ? data.assistant.text.trim()
+        : "";
+      if (assistantText) {
+        return assistantText;
+      }
+
+      const result = data.result || {};
+      const dialog = data.dialog || {};
+      const status = String(result.status || "").trim().toLowerCase();
+      const question = typeof result.question === "string" ? result.question.trim() : "";
+      const message = typeof result.message === "string" ? result.message.trim() : "";
+
+      if (question) {
+        return message ? `${message}\n${question}` : question;
+      }
+      if (message) {
+        return message;
+      }
+
+      if (data.intent === "calendar.add_event" && result.event?.event_title) {
+        const whenHint = result.event.when_hint ? ` (${result.event.when_hint})` : "";
+        return `Added "${result.event.event_title}"${whenHint}.`;
+      }
+      if (data.intent === "calendar.view" && typeof result.summary === "string" && result.summary.trim()) {
+        return result.summary.trim();
+      }
+      if (data.intent === "lists.add_item" && result.item_text && result.list_name) {
+        return `Added "${result.item_text}" to ${result.list_name}.`;
+      }
+      if (data.intent === "lists.create_list" && result.list_name) {
+        if (result.created === true) {
+          return `Created ${result.list_name}.`;
+        }
+        if (result.created === false) {
+          return `${result.list_name} already exists.`;
+        }
+      }
+      if (data.intent === "lists.get_items" && Array.isArray(result.items) && result.list_name) {
+        if (!result.items.length) {
+          return `${result.list_name} is empty.`;
+        }
+        return `${result.list_name}: ${result.items.join(", ")}`;
+      }
+      if (data.intent === "home.set_switch" && result.switch_name && result.action) {
+        return `Set ${result.switch_name} ${result.action}.`;
+      }
+
+      if (dialog.mode === "conversation_pending") {
+        return "I am waiting on your clarification.";
+      }
+
+      if (status) {
+        return `Completed with status: ${status}.`;
+      }
+      return "Processed.";
+    }
+
+    async function sendCommand() {
+      const text = commandInput.value.trim();
+      if (!text) {
+        appendDialog(commandHistory, "assistant", "Please enter a command.");
+        return;
+      }
+      const kidMode = kidModeToggle.checked;
+      const requestPayload = {
+        text,
+        session_id: commandSessionId,
+        user_id: userId,
+        source: "dashboard",
+        context: {
+          mode: "command_console",
+          session_channel: commandSessionChannel,
+          auto_channel_session: true,
+          dialog_mode: commandDialogState.mode,
+          pending_intent: commandDialogState.pending_intent,
+          awaiting_fields: commandDialogState.awaiting_fields,
+          kid_mode: kidMode,
+          content_profile: kidMode ? "child" : "adult"
+        }
+      };
+      appendDialog(commandHistory, "user", text);
+      commandInput.value = "";
+      try {
+        const data = await callApi("/ask", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(requestPayload)
+        });
+        commandDialogState = {
+          mode: data.dialog?.mode || "command_action",
+          turn_complete: data.dialog?.turn_complete !== false,
+          pending_intent: data.dialog?.pending_intent || null,
+          awaiting_fields: Array.isArray(data.dialog?.awaiting_fields) ? data.dialog.awaiting_fields : []
+        };
+        if (typeof data.session_id === "string" && data.session_id.trim()) {
+          commandSessionId = data.session_id;
+        }
+        captureSessionTurnLog({
+          requestPayload,
+          responsePayload: data,
+          sourceMode: "command_console",
+          kidMode
+        });
+        renderModeTags(commandModeTags, data);
+        appendDialog(commandHistory, "assistant", summarizeAssistantText(data));
+        setCommandResult(data);
+        await Promise.all([loadSwitches(), loadEvents()]);
+        updateDebugPanel(data, {
+          requestText: text,
+          source: "command_console",
+          kidMode
+        });
+      } catch (err) {
+        captureSessionTurnError({
+          requestPayload,
+          sourceMode: "command_console",
+          kidMode,
+          errorMessage: err.message
+        });
+        appendDialog(commandHistory, "assistant", `Command error: ${err.message}`);
+        commandResult.textContent = `Error: ${err.message}`;
+      }
+    }
+
+    async function sendDiscord() {
+      const text = discordInput.value.trim();
+      if (!text) {
+        appendDialog(discordHistory, "assistant", "Please enter a Discord message.");
+        return;
+      }
+      const requestPayload = {
+        text,
+        session_id: discordSessionId,
+        user_id: "discord-dashboard-user",
+        source: "discord",
+        context: {
+          mode: "discord_command",
+          session_channel: discordSessionChannel,
+          auto_channel_session: true,
+          channel_session_scope: "shared",
+          force_main_owner: true,
+          wake_on_message: true,
+          dialog_mode: discordDialogState.mode,
+          pending_intent: discordDialogState.pending_intent,
+          awaiting_fields: discordDialogState.awaiting_fields
+        }
+      };
+      appendDialog(discordHistory, "user", text);
+      discordInput.value = "";
+      try {
+        const data = await callApi("/ask", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(requestPayload)
+        });
+        discordDialogState = {
+          mode: data.dialog?.mode || "command_action",
+          turn_complete: data.dialog?.turn_complete !== false,
+          pending_intent: data.dialog?.pending_intent || null,
+          awaiting_fields: Array.isArray(data.dialog?.awaiting_fields) ? data.dialog.awaiting_fields : []
+        };
+        if (typeof data.session_id === "string" && data.session_id.trim()) {
+          discordSessionId = data.session_id;
+        }
+        captureSessionTurnLog({
+          requestPayload,
+          responsePayload: data,
+          sourceMode: "discord_command",
+          kidMode: false
+        });
+        appendDialog(discordHistory, "assistant", summarizeAssistantText(data));
+        discordResult.textContent = JSON.stringify({
+          route: data.route,
+          intent: data.intent,
+          classification: data.classification,
+          owner: data.owner,
+          state: data.state,
+          dialog: data.dialog,
+          result: data.result
+        }, null, 2);
+        updateStatusIndicators(data);
+        await Promise.all([loadSwitches(), loadEvents()]);
+        updateDebugPanel(data, {
+          requestText: text,
+          source: "discord_command",
+          kidMode: false
+        });
+      } catch (err) {
+        captureSessionTurnError({
+          requestPayload,
+          sourceMode: "discord_command",
+          kidMode: false,
+          errorMessage: err.message
+        });
+        appendDialog(discordHistory, "assistant", `Discord channel error: ${err.message}`);
+        discordResult.textContent = `Discord channel error: ${err.message}`;
+      }
+    }
+
+    async function sendVoiceSimulation(textOverride = null, options = {}) {
+      const fromMicIdle = options.fromMicIdle === true;
+      const text = typeof textOverride === "string"
+        ? textOverride.trim()
+        : voiceTranscript.value.trim();
+      if (!text) {
+        appendDialog(voiceHistory, "assistant", "Please enter a transcript first.");
+        return;
+      }
+      if (fromMicIdle && text === lastMicAutoSentTranscript) {
+        pendingMicTranscript = "";
+        micStatus.textContent = "Mic: idle detected (duplicate transcript ignored).";
+        return;
+      }
+      if (voiceSendInFlight) {
+        if (!fromMicIdle) {
+          appendDialog(voiceHistory, "assistant", "Still processing the prior voice request.");
+        }
+        return;
+      }
+      if (!fromMicIdle) {
+        clearMicIdleTimer();
+        pendingMicTranscript = "";
+      }
+      const kidMode = kidModeToggle.checked;
+      const requestPayload = {
+        text,
+        session_id: voiceSessionId,
+        user_id: userId,
+        source: "voice",
+        context: {
+          mode: "voice_test",
+          session_channel: voiceSessionChannel,
+          auto_channel_session: true,
+          dialog_mode: voiceDialogState.mode,
+          pending_intent: voiceDialogState.pending_intent,
+          awaiting_fields: voiceDialogState.awaiting_fields,
+          kid_mode: kidMode,
+          content_profile: kidMode ? "child" : "adult"
+        }
+      };
+      appendDialog(voiceHistory, "user", text);
+      voiceTranscript.value = "";
+      voiceSendInFlight = true;
+      try {
+        const data = await callApi("/ask", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(requestPayload)
+        });
+        voiceDialogState = {
+          mode: data.dialog?.mode || "command_action",
+          turn_complete: data.dialog?.turn_complete !== false,
+          pending_intent: data.dialog?.pending_intent || null,
+          awaiting_fields: Array.isArray(data.dialog?.awaiting_fields) ? data.dialog.awaiting_fields : []
+        };
+        if (typeof data.session_id === "string" && data.session_id.trim()) {
+          voiceSessionId = data.session_id;
+        }
+        captureSessionTurnLog({
+          requestPayload,
+          responsePayload: data,
+          sourceMode: "voice_test",
+          kidMode
+        });
+        renderModeTags(voiceModeTags, data);
+        appendDialog(voiceHistory, "assistant", summarizeAssistantText(data));
+        voiceResult.textContent = JSON.stringify({
+          route: data.route,
+          intent: data.intent,
+          classification: data.classification,
+          owner: data.owner,
+          state: data.state,
+          dialog: data.dialog,
+          result: data.result
+        }, null, 2);
+        updateStatusIndicators(data);
+        await Promise.all([loadSwitches(), loadEvents()]);
+        updateDebugPanel(data, {
+          requestText: text,
+          source: "voice_test",
+          kidMode
+        });
+        if (fromMicIdle) {
+          lastMicAutoSentTranscript = text;
+        }
+      } catch (err) {
+        captureSessionTurnError({
+          requestPayload,
+          sourceMode: "voice_test",
+          kidMode,
+          errorMessage: err.message
+        });
+        appendDialog(voiceHistory, "assistant", `Voice simulation error: ${err.message}`);
+        voiceResult.textContent = `Voice simulation error: ${err.message}`;
+      } finally {
+        voiceSendInFlight = false;
+      }
+    }
+
+    function clearMicIdleTimer() {
+      if (micIdleTimer !== null) {
+        window.clearTimeout(micIdleTimer);
+        micIdleTimer = null;
+      }
+    }
+
+    function queueVoiceSendOnMicIdle(transcript) {
+      const normalized = transcript.trim();
+      if (!normalized) {
+        return;
+      }
+      pendingMicTranscript = normalized;
+      voiceTranscript.value = normalized;
+      micStatus.textContent = `Mic captured: "${normalized}" (waiting for idle...)`;
+      clearMicIdleTimer();
+      micIdleTimer = window.setTimeout(() => {
+        micIdleTimer = null;
+        void flushVoiceSendFromMicIdle();
+      }, VOICE_IDLE_WINDOW_MS);
+    }
+
+    async function flushVoiceSendFromMicIdle() {
+      const text = pendingMicTranscript.trim();
+      if (!text) {
+        return;
+      }
+      pendingMicTranscript = "";
+      micStatus.textContent = "Mic: idle detected, sending...";
+      await sendVoiceSimulation(text, { fromMicIdle: true });
+      if (!micActive && !micStatus.textContent.includes("error")) {
+        micStatus.textContent = "Mic: idle";
+      }
+    }
+
+    function initMicSupport() {
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SpeechRecognition) {
+        micToggle.disabled = true;
+        micStatus.textContent = "Mic: browser speech recognition not supported here.";
+        return;
+      }
+      recognition = new SpeechRecognition();
+      recognition.lang = "en-US";
+      recognition.interimResults = false;
+      recognition.continuous = false;
+
+      recognition.onstart = () => {
+        micActive = true;
+        micToggle.textContent = "Stop Mic";
+        micStatus.textContent = "Mic: listening...";
+      };
+      recognition.onend = () => {
+        micActive = false;
+        micToggle.textContent = "Start Mic";
+        clearMicIdleTimer();
+        if (pendingMicTranscript) {
+          void flushVoiceSendFromMicIdle();
+          return;
+        }
+        if (!micStatus.textContent.includes("error")) {
+          micStatus.textContent = "Mic: idle";
+        }
+      };
+      recognition.onerror = (event) => {
+        clearMicIdleTimer();
+        pendingMicTranscript = "";
+        micStatus.textContent = `Mic error: ${event.error}`;
+      };
+      recognition.onresult = (event) => {
+        const transcript = Array.from(event.results)
+          .map(result => result[0]?.transcript || "")
+          .join(" ")
+          .trim();
+        if (transcript) {
+          queueVoiceSendOnMicIdle(transcript);
+        }
+      };
+    }
+
+    function toggleMic() {
+      if (!recognition) {
+        return;
+      }
+      if (micActive) {
+        clearMicIdleTimer();
+        pendingMicTranscript = "";
+        micStatus.textContent = "Mic: stopping...";
+        recognition.stop();
+      } else {
+        pendingMicTranscript = "";
+        micStatus.textContent = "Mic: requesting permission...";
+        recognition.start();
+      }
+    }
+
+    async function setSwitch(name, action) {
+      try {
+        await callApi(`/house/switches/${encodeURIComponent(name)}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action
+          })
+        });
+        await Promise.all([loadSwitches(), loadEvents()]);
+      } catch (err) {
+        commandResult.textContent = `Switch error: ${err.message}`;
+      }
+    }
+
+    async function loadSwitches() {
+      const data = await callApi("/house/switches");
+      switchList.replaceChildren();
+      for (const item of data.switches) {
+        const card = document.createElement("div");
+        card.className = "switch-card";
+        const stateClass = item.state === "on" ? "switch-state on" : "switch-state";
+        const onActive = item.state === "on" ? "active" : "";
+        const offActive = item.state === "off" ? "active" : "";
+        const name = document.createElement("div");
+        name.className = "switch-name";
+        name.textContent = String(item.name || "");
+        const state = document.createElement("div");
+        state.className = stateClass;
+        state.textContent = `state: ${String(item.state || "")}`;
+        const actions = document.createElement("div");
+        actions.className = "switch-actions";
+        const onBtn = document.createElement("button");
+        onBtn.className = `on-btn ${onActive}`.trim();
+        onBtn.type = "button";
+        onBtn.setAttribute("aria-pressed", String(item.state === "on"));
+        const onIcon = document.createElement("span");
+        onIcon.className = "btn-icon";
+        onBtn.append(onIcon, document.createTextNode(" On"));
+        const offBtn = document.createElement("button");
+        offBtn.className = `off-btn ${offActive}`.trim();
+        offBtn.type = "button";
+        offBtn.setAttribute("aria-pressed", String(item.state === "off"));
+        const offIcon = document.createElement("span");
+        offIcon.className = "btn-icon";
+        offBtn.append(offIcon, document.createTextNode(" Off"));
+        actions.append(onBtn, offBtn);
+        card.append(name, state, actions);
+        onBtn.addEventListener("click", () => setSwitch(item.name, "on"));
+        offBtn.addEventListener("click", () => setSwitch(item.name, "off"));
+        switchList.appendChild(card);
+      }
+    }
+
+    async function loadEvents() {
+      const data = await callApi("/events");
+      cachedEvents = Array.isArray(data.events) ? data.events : [];
+      const rows = cachedEvents.slice(-40).reverse();
+      eventsBox.replaceChildren();
+      for (const row of rows) {
+        const line = document.createElement("div");
+        line.className = "event-row";
+        line.textContent = `${row.timestamp} | ${row.event_type} | ${row.session_id}`;
+        eventsBox.appendChild(line);
+      }
+      renderDebugEventTail();
+    }
+
+    document.getElementById("send-command").addEventListener("click", sendCommand);
+    document.getElementById("send-discord").addEventListener("click", sendDiscord);
+    if (downloadSessionLogsBtn) {
+      downloadSessionLogsBtn.addEventListener("click", downloadSessionLogs);
+    }
+    document.getElementById("refresh-switches").addEventListener("click", loadSwitches);
+    document.getElementById("refresh-events").addEventListener("click", loadEvents);
+    document.getElementById("debug-refresh-events").addEventListener("click", loadEvents);
+    debugEventFilter.addEventListener("change", renderDebugEventTail);
+    document.getElementById("send-voice").addEventListener("click", sendVoiceSimulation);
+    document.getElementById("mic-toggle").addEventListener("click", toggleMic);
+    document.getElementById("voice-sample-1").addEventListener("click", () => {
+      voiceTranscript.value = "Jarvis, add dentist appointment to my calendar";
+    });
+    document.getElementById("voice-sample-2").addEventListener("click", () => {
+      voiceTranscript.value = "Jarvis go to sleep";
+    });
+    commandInput.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") {
+        ev.preventDefault();
+        sendCommand();
+      }
+    });
+    discordInput.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") {
+        ev.preventDefault();
+        sendDiscord();
+      }
+    });
+
+    async function boot() {
+      updateSessionLogStatus();
+      commandResult.textContent = "Ready. Send a command to begin.";
+      discordResult.textContent = "Ready. Send a Discord-formatted turn.";
+      voiceResult.textContent = "Ready. Paste a transcript and run simulation.";
+      debugTurnHeader.textContent = "Waiting for first turn...";
+      debugRouting.textContent = "Waiting for first turn...";
+      debugLoopSummary.textContent = "Waiting for first turn...";
+      debugBudget.textContent = "Waiting for first turn...";
+      debugPolicy.textContent = "Waiting for first turn...";
+      debugClarification.textContent = "Waiting for first turn...";
+      debugToolSummary.textContent = "Waiting for first turn...";
+      debugRawResult.textContent = "Waiting for first turn...";
+      renderTraceRows([]);
+      const defaultDialogPayload = {
+        dialog: {
+          mode: "command_action",
+          turn_complete: true,
+          pending_intent: null,
+          awaiting_fields: []
+        }
+      };
+      renderModeTags(commandModeTags, defaultDialogPayload);
+      renderModeTags(voiceModeTags, defaultDialogPayload);
+      appendDialog(commandHistory, "assistant", "Command console ready. Send a command or question.");
+      appendDialog(discordHistory, "assistant", "Discord channel ready. Messages here auto-wake and route to main Jarvis.");
+      appendDialog(voiceHistory, "assistant", "Voice conversation ready. Send a command or question.");
+      await Promise.all([loadSwitches(), loadEvents()]);
+      setInterval(() => {
+        loadSwitches().catch(() => {});
+        loadEvents().catch(() => {});
+      }, 3000);
+      initMicSupport();
+      updateStatusIndicators({
+        owner: "system",
+        route: "idle",
+        model_runtime: {
+          larger_models_active: false,
+          task_count: 0,
+          main_labeled_count: 0,
+          micro_labeled_count: 0,
+          window_seconds: 0
+        }
+      });
+      updateDebugPanel({
+        session_id: commandSessionId,
+        source: "dashboard",
+        owner: "system",
+        state: "IDLE",
+        route: "idle",
+        intent: "unknown",
+        classification: {},
+        result: {},
+        dialog: defaultDialogPayload.dialog,
+        assistant: {}
+      }, { source: "dashboard_boot", requestText: "" });
+    }
+
+    boot();
+  </script>
+</body>
+</html>

@@ -1,0 +1,28 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.pytest_tmp*/
+pytest-cache-files-*/
+*.pyc
+*.pyo
+*.pyd
+data/
+*.db
+*.sqlite3
+*.log
+
+
+.env
+
+# Local credentials and secret vault
+secrets/**
+!secrets/.gitkeep
+!secrets/README.md
+!secrets/templates/
+!secrets/templates/*.example.yaml
+
+# Local credential/tokens (jarvis_poc)
+jarvis_poc/permissions/*google_credentials*.json
+jarvis_poc/permissions/*client_secret*.json
+jarvis_poc/permissions/google_permissions.local.yaml
+jarvis_poc/data/google_tokens.json

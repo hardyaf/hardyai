@@ -1,0 +1,229 @@
+name: jarvis-poc
+
+services:
+  ollama:
+    image: ollama/ollama@sha256:77f1a2a54460f0380f2611e1464233d9b82cb6e58afc8f60abec0061049d2d82
+    restart: unless-stopped
+    environment:
+      OLLAMA_CONTEXT_LENGTH: "32768"
+      OLLAMA_MAX_LOADED_MODELS: "2"
+      OLLAMA_NUM_PARALLEL: "1"
+    volumes:
+      - ollama-data:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  jarvis:
+    image: jarvis-poc-app:local
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    restart: unless-stopped
+    init: true
+    user: "${JARVIS_UID:-1001}:${JARVIS_GID:-1001}"
+    depends_on:
+      ollama:
+        condition: service_healthy
+    env_file:
+      - ../../.env
+    environment:
+      APP_ENV: production
+      DATABASE_PATH: /opt/jarvis/data/jarvis_v2.db
+      MEMORY_MODE: sqlite
+      MEMORY_MARKDOWN_PATH: /opt/jarvis/data/memory_markdown
+      SKILL_ARTIFACT_AUTO_COMPILE_ENABLED: "false"
+      LOCAL_MODEL_URL: http://ollama:11434
+      MICRO_MODEL_ENABLED: "${JARVIS_MODELS_ENABLED:-false}"
+      MICRO_MODEL_PROVIDER: ollama
+      MICRO_MODEL_NAME: "${JARVIS_MICRO_MODEL:-qwen2.5:7b}"
+      MICRO_MODEL_TIMEOUT_SECONDS: "30"
+      MICRO_MODEL_NUM_CTX: "${MICRO_MODEL_NUM_CTX:-4096}"
+      MICRO_MODEL_NUM_PREDICT: "${MICRO_MODEL_NUM_PREDICT:-256}"
+      MICRO_MODEL_HEURISTIC_FALLBACK_ENABLED: "true"
+      MAIN_REPAIR_MODEL_ENABLED: "${JARVIS_MODELS_ENABLED:-false}"
+      MAIN_REPAIR_MODEL_PROVIDER: ollama
+      MAIN_REPAIR_MODEL_NAME: "${JARVIS_MAIN_MODEL:-gpt-oss:20b}"
+      MAIN_REPAIR_MODEL_TIMEOUT_SECONDS: "60"
+      MAIN_REPAIR_MODEL_NUM_CTX: "${MAIN_REPAIR_MODEL_NUM_CTX:-32768}"
+      MAIN_REPAIR_MODEL_NUM_PREDICT: "${MAIN_REPAIR_MODEL_NUM_PREDICT:-512}"
+      MAIN_CONVERSATION_MODEL_TIMEOUT_SECONDS: "90"
+      MAIN_CONVERSATION_MODEL_NUM_CTX: "${MAIN_CONVERSATION_MODEL_NUM_CTX:-32768}"
+      MAIN_CONVERSATION_MODEL_NUM_PREDICT: "${MAIN_CONVERSATION_MODEL_NUM_PREDICT:-1024}"
+      MAIN_AGENT_LOOP_CONTEXT_MAX_CHARS: "${MAIN_AGENT_LOOP_CONTEXT_MAX_CHARS:-6000}"
+      WEB_RESEARCH_ENABLED: "${WEB_RESEARCH_ENABLED:-false}"
+      WEB_RESEARCH_PROVIDER: searxng
+      WEB_RESEARCH_BASE_URL: http://searxng:8080
+      WEB_RESEARCH_DECISION_MODEL_NUM_CTX: "${WEB_RESEARCH_DECISION_MODEL_NUM_CTX:-32768}"
+      WEB_RESEARCH_DECISION_MODEL_NUM_PREDICT: "${WEB_RESEARCH_DECISION_MODEL_NUM_PREDICT:-256}"
+      CALENDAR_GOOGLE_ENABLED: "${CALENDAR_GOOGLE_ENABLED:-false}"
+      GOOGLE_PERMISSIONS_PATH: /opt/jarvis/secrets/live/google_permissions.yaml
+      CALENDAR_INBOX_ENABLED: "${CALENDAR_INBOX_ENABLED:-false}"
+      CALENDAR_INBOX_TIMEZONE: "${CALENDAR_INBOX_TIMEZONE:-America/New_York}"
+      CALENDAR_INBOX_START_HOUR: "${CALENDAR_INBOX_START_HOUR:-8}"
+      CALENDAR_INBOX_END_HOUR: "${CALENDAR_INBOX_END_HOUR:-20}"
+      CALENDAR_INBOX_POLL_SECONDS: "${CALENDAR_INBOX_POLL_SECONDS:-60}"
+      CALENDAR_INBOX_MAX_MESSAGES_PER_RUN: "${CALENDAR_INBOX_MAX_MESSAGES_PER_RUN:-100}"
+      CALENDAR_INBOX_LOOKBACK_DAYS: "${CALENDAR_INBOX_LOOKBACK_DAYS:-30}"
+      CALENDAR_INBOX_ALLOWED_SENDER_EMAILS: "${CALENDAR_INBOX_ALLOWED_SENDER_EMAILS:-}"
+      EMAIL_AGENT_ENABLED: "${EMAIL_AGENT_ENABLED:-false}"
+      EMAIL_AGENT_SYNC_ENABLED: "${EMAIL_AGENT_SYNC_ENABLED:-false}"
+      EMAIL_AGENT_PERMISSIONS_PATH: /opt/jarvis/secrets/live/email_agent_permissions.yaml
+      EMAIL_AGENT_TIMEZONE: "${EMAIL_AGENT_TIMEZONE:-America/New_York}"
+      EMAIL_AGENT_SCHEDULER_POLL_SECONDS: "${EMAIL_AGENT_SCHEDULER_POLL_SECONDS:-60}"
+      EMAIL_AGENT_SYNC_INTERVAL_SECONDS: "${EMAIL_AGENT_SYNC_INTERVAL_SECONDS:-600}"
+      EMAIL_AGENT_ON_DEMAND_STALE_SECONDS: "${EMAIL_AGENT_ON_DEMAND_STALE_SECONDS:-120}"
+      EMAIL_AGENT_MAX_HISTORY_PAGES: "${EMAIL_AGENT_MAX_HISTORY_PAGES:-5}"
+      EMAIL_AGENT_MAX_MESSAGES_PER_RUN: "${EMAIL_AGENT_MAX_MESSAGES_PER_RUN:-100}"
+      EMAIL_AGENT_MAX_INTERACTIVE_MESSAGES: "${EMAIL_AGENT_MAX_INTERACTIVE_MESSAGES:-10}"
+      EMAIL_AGENT_MAX_BODY_BYTES: "${EMAIL_AGENT_MAX_BODY_BYTES:-1048576}"
+      EMAIL_AGENT_REFERENCE_RETENTION_HOURS: "${EMAIL_AGENT_REFERENCE_RETENTION_HOURS:-72}"
+      EMAIL_AGENT_ALLOW_HISTORICAL_BACKFILL: "${EMAIL_AGENT_ALLOW_HISTORICAL_BACKFILL:-false}"
+      EMAIL_AGENT_SUMMARY_MODEL_PROVIDER: "${EMAIL_AGENT_SUMMARY_MODEL_PROVIDER:-ollama}"
+      EMAIL_AGENT_MODEL_NUM_CTX: "${EMAIL_AGENT_MODEL_NUM_CTX:-32768}"
+      EMAIL_AGENT_SUMMARY_NUM_PREDICT: "${EMAIL_AGENT_SUMMARY_NUM_PREDICT:-1024}"
+      EMAIL_AGENT_CLASSIFIER_NUM_PREDICT: "${EMAIL_AGENT_CLASSIFIER_NUM_PREDICT:-256}"
+      EMAIL_AGENT_ALLOW_REMOTE_MODEL: "${EMAIL_AGENT_ALLOW_REMOTE_MODEL:-false}"
+      EMAIL_AGENT_ATTACHMENT_EXTRACTION_ENABLED: "false"
+      EMAIL_AGENT_LABEL_SHADOW_ENABLED: "true"
+      EMAIL_AGENT_LABEL_WRITES_ENABLED: "${EMAIL_AGENT_LABEL_WRITES_ENABLED:-false}"
+      # The API sees the configured path but does not mount or load the Modify token.
+      EMAIL_AGENT_LABEL_TOKEN_PATH: /opt/jarvis/secrets/email-spam-worker/token.json
+      EMAIL_AGENT_SPAM_WRITES_ENABLED: "${EMAIL_AGENT_SPAM_WRITES_ENABLED:-false}"
+      EMAIL_AGENT_WORKER_TOKEN_ISOLATED: "true"
+      # The path is visible to the API for configuration only. The token itself is not mounted here.
+      EMAIL_AGENT_SPAM_TOKEN_PATH: /opt/jarvis/secrets/email-spam-worker/token.json
+      DISCORD_ENABLED: "${JARVIS_DISCORD_ENABLED:-false}"
+      DISCORD_PERMISSIONS_PATH: /opt/jarvis/secrets/live/discord_permissions.yaml
+    ports:
+      - "${JARVIS_BIND_ADDRESS:-127.0.0.1}:8000:8000"
+    volumes:
+      - ../../.env:/opt/jarvis/.env:ro
+      - ../../data:/opt/jarvis/data
+      - ../../secrets/live:/opt/jarvis/secrets/live:ro
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import json, urllib.request;
+          payload=json.load(urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3));
+          raise SystemExit(0 if payload.get('status') == 'ok' else 1)
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  searxng:
+    image: searxng/searxng@sha256:892cf809341915a4b7710d3c9045005b4c377d51335a089b6d4da0b28750788d
+    profiles: ["research"]
+    restart: unless-stopped
+    environment:
+      SEARXNG_BASE_URL: http://searxng:8080/
+      SEARXNG_SECRET: "${SEARXNG_SECRET_KEY:-replace-before-nonlocal-use}"
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  ticket-review:
+    image: jarvis-poc-app:local
+    profiles: ["tickets"]
+    restart: unless-stopped
+    init: true
+    user: "${JARVIS_UID:-1001}:${JARVIS_GID:-1001}"
+    depends_on:
+      ollama:
+        condition: service_healthy
+      jarvis:
+        condition: service_healthy
+    env_file:
+      - ../../.env
+    environment:
+      APP_ENV: production
+      DATABASE_PATH: /opt/jarvis/data/jarvis_v2.db
+      SKILL_ARTIFACT_AUTO_COMPILE_ENABLED: "false"
+      LOCAL_MODEL_URL: http://ollama:11434
+      ACTION_TICKET_REVIEW_ENABLED: "true"
+    command: ["python", "-m", "app.workers.ticket_review_worker"]
+    volumes:
+      - ../../data:/opt/jarvis/data
+      - ../../secrets/live:/opt/jarvis/secrets/live:ro
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  plane-sync:
+    image: jarvis-poc-app:local
+    profiles: ["plane"]
+    restart: unless-stopped
+    init: true
+    user: "${JARVIS_UID:-1001}:${JARVIS_GID:-1001}"
+    depends_on:
+      jarvis:
+        condition: service_healthy
+    env_file:
+      - ../../.env
+    environment:
+      APP_ENV: production
+      DATABASE_PATH: /opt/jarvis/data/jarvis_v2.db
+      SKILL_ARTIFACT_AUTO_COMPILE_ENABLED: "false"
+      PLANE_ENABLED: "true"
+    command: ["python", "-m", "app.workers.plane_sync_worker"]
+    volumes:
+      - ../../data:/opt/jarvis/data
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  email-spam-worker:
+    image: jarvis-poc-app:local
+    profiles: ["email-spam"]
+    restart: "no"
+    init: true
+    user: "${JARVIS_UID:-1001}:${JARVIS_GID:-1001}"
+    env_file:
+      - ../../.env
+    environment:
+      APP_ENV: production
+      DATABASE_PATH: /opt/jarvis/data/jarvis_v2.db
+      SKILL_ARTIFACT_AUTO_COMPILE_ENABLED: "false"
+      EMAIL_AGENT_ENABLED: "true"
+      EMAIL_AGENT_SPAM_WRITES_ENABLED: "true"
+      EMAIL_AGENT_WORKER_TOKEN_ISOLATED: "false"
+      EMAIL_AGENT_LABEL_WRITES_ENABLED: "${EMAIL_AGENT_LABEL_WRITES_ENABLED:-false}"
+      EMAIL_AGENT_PERMISSIONS_PATH: /opt/jarvis/secrets/live/email_agent_permissions.yaml
+      EMAIL_AGENT_SPAM_TOKEN_PATH: /opt/jarvis/secrets/email-spam-worker/token.json
+      EMAIL_AGENT_LABEL_TOKEN_PATH: /opt/jarvis/secrets/email-spam-worker/token.json
+    command: ["python", "scripts/run_email_spam_worker.py"]
+    volumes:
+      - ../../data:/opt/jarvis/data
+      - ../../secrets/live/email_agent_permissions.yaml:/opt/jarvis/secrets/live/email_agent_permissions.yaml:ro
+      - ../../secrets/email-spam-worker/token.json:/opt/jarvis/secrets/email-spam-worker/token.json
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+volumes:
+  ollama-data:
