@@ -1,95 +1,23 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 import threading
-from pathlib import Path
 from typing import Any
 from uuid import uuid4
+
+from app.db.connection import open_sqlite_connection
+from app.db.domain_schema import ensure_calendar_inbox_schema
 
 
 class CalendarInboxSQLiteStorage:
     """Durable slot, Gmail-message, and reconciled-event ledger for calendar ingestion."""
 
     def __init__(self, database_path: str) -> None:
-        path = Path(database_path).expanduser().resolve()
-        path.parent.mkdir(parents=True, exist_ok=True)
+        path, self._conn = open_sqlite_connection(database_path)
         self.database_path = str(path)
         self._lock = threading.RLock()
-        self._conn = sqlite3.connect(self.database_path, check_same_thread=False, timeout=30.0)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA foreign_keys = ON")
-        self._conn.execute("PRAGMA journal_mode = WAL")
-        self._conn.execute("PRAGMA busy_timeout = 5000")
-        self._initialize()
+        ensure_calendar_inbox_schema(self._conn)
 
-    def _initialize(self) -> None:
-        with self._lock:
-            self._conn.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS calendar_inbox_state (
-                    state_key TEXT PRIMARY KEY,
-                    state_value TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS calendar_inbox_runs (
-                    run_id TEXT PRIMARY KEY,
-                    slot_key TEXT NOT NULL UNIQUE,
-                    status TEXT NOT NULL,
-                    attempt_count INTEGER NOT NULL DEFAULT 0,
-                    scanned_count INTEGER NOT NULL DEFAULT 0,
-                    imported_count INTEGER NOT NULL DEFAULT 0,
-                    updated_count INTEGER NOT NULL DEFAULT 0,
-                    existing_count INTEGER NOT NULL DEFAULT 0,
-                    ignored_count INTEGER NOT NULL DEFAULT 0,
-                    failed_count INTEGER NOT NULL DEFAULT 0,
-                    last_error TEXT,
-                    result_json TEXT NOT NULL DEFAULT '{}',
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    completed_at TEXT
-                );
-
-                CREATE TABLE IF NOT EXISTS calendar_inbox_messages (
-                    gmail_message_id TEXT PRIMARY KEY,
-                    gmail_thread_id TEXT,
-                    gmail_internal_date TEXT,
-                    run_id TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    attempt_count INTEGER NOT NULL DEFAULT 0,
-                    outcome_json TEXT NOT NULL DEFAULT '{}',
-                    last_error TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    completed_at TEXT,
-                    FOREIGN KEY (run_id) REFERENCES calendar_inbox_runs(run_id)
-                );
-
-                CREATE TABLE IF NOT EXISTS calendar_inbox_events (
-                    source_key TEXT PRIMARY KEY,
-                    gmail_message_id TEXT NOT NULL,
-                    ical_uid TEXT NOT NULL,
-                    recurrence_id TEXT,
-                    house_calendar_id TEXT NOT NULL,
-                    google_event_id TEXT,
-                    action TEXT NOT NULL,
-                    payload_hash TEXT,
-                    result_json TEXT NOT NULL DEFAULT '{}',
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    FOREIGN KEY (gmail_message_id) REFERENCES calendar_inbox_messages(gmail_message_id)
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_calendar_inbox_runs_status
-                    ON calendar_inbox_runs(status, slot_key);
-                CREATE INDEX IF NOT EXISTS idx_calendar_inbox_messages_status
-                    ON calendar_inbox_messages(status, updated_at);
-                CREATE INDEX IF NOT EXISTS idx_calendar_inbox_events_uid
-                    ON calendar_inbox_events(ical_uid, recurrence_id);
-                """
-            )
-            self._conn.commit()
 
     def close(self) -> None:
         with self._lock:

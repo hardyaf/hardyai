@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import signal
-import time
 from threading import Event
 from typing import Any
 from uuid import uuid4

@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from app.db.repositories import ScheduledJobsRepository
 from app.db.sqlite_store import SQLiteStore
 from app.services.event_log import EventLogService
 from app.skills.registry_service import SkillRegistryService
@@ -22,7 +23,7 @@ class ScheduledJobsService:
     def __init__(
         self,
         *,
-        sqlite_store: SQLiteStore,
+        sqlite_store: SQLiteStore | ScheduledJobsRepository,
         skill_registry: SkillRegistryService,
         event_log: EventLogService | None = None,
         critical_skills_output_path: str = "app/prompts/skills/critical_skills.md",

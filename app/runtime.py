@@ -16,6 +16,7 @@ from app.core.router import JarvisRouter
 from app.core.session_store import SessionStore
 from app.core.state_machine import RuntimePowerController
 from app.db.sqlite_store import SQLiteStore
+from app.db.repositories import RuntimeStateRepository, ScheduledJobsRepository, SkillCatalogRepository
 from app.memory.composite_memory_store import CompositeMemoryStore
 from app.memory.markdown_memory_store import MarkdownMemoryStore
 from app.memory.sqlite_memory_store import SQLiteMemoryStore
@@ -78,7 +79,10 @@ def _is_local_model_url(value: str) -> bool:
         return False
 
 sqlite_store = SQLiteStore(database_path=settings.database_path)
-event_log = EventLogService(persistence=sqlite_store)
+runtime_state_repository = RuntimeStateRepository(sqlite_store)
+skill_catalog_repository = SkillCatalogRepository(sqlite_store)
+scheduled_jobs_repository = ScheduledJobsRepository(sqlite_store)
+event_log = EventLogService(persistence=runtime_state_repository)
 
 
 def _record_ollama_call(metrics: dict[str, Any]) -> None:
@@ -98,7 +102,7 @@ action_ticket_service = ActionTicketService(
     plane_enabled=settings.plane_enabled,
     execution_watchdog_seconds=settings.action_ticket_execution_watchdog_seconds,
 )
-skill_registry = SkillRegistryService(sqlite_store=sqlite_store)
+skill_registry = SkillRegistryService(sqlite_store=skill_catalog_repository)
 skill_registry.seed_defaults()
 skill_registry.sync_skills_from_markdown()
 external_identity_service = ExternalIdentityService(
@@ -193,7 +197,7 @@ main_jarvis = MainJarvis(
     research_service=web_research_service,
 )
 session_store = SessionStore(
-    persistence=sqlite_store,
+    persistence=runtime_state_repository,
     channel_idle_timeout_seconds=settings.channel_session_idle_timeout_seconds,
 )
 runtime_power = RuntimePowerController(
@@ -206,7 +210,7 @@ private_notes_service = PrivateNotesDigestService(
     event_log=event_log,
 )
 scheduled_jobs = ScheduledJobsService(
-    sqlite_store=sqlite_store,
+    sqlite_store=scheduled_jobs_repository,
     skill_registry=skill_registry,
     event_log=event_log,
 )
@@ -463,6 +467,8 @@ router = JarvisRouter(
     email_agent_service=email_agent_service,
     durable_write_service=durable_write_service,
 )
+action_execution_service = router.action_execution_service
+turn_finalizer = router.turn_finalizer
 turn_service = TurnService(
     router=router,
     max_concurrency=settings.turn_max_concurrency,

@@ -33,6 +33,8 @@ def test_router_captures_recent_turns_in_single_post_turn_pipeline_point():
         )
     )
     assert response["result"]["status"] == "ok"
+    assert response["delivery"]["session"]["status"] == "committed"
+    assert response["delivery"]["memory"]["status"] == "not_applicable"
 
     session = session_store.get_or_create(
         session_id="recent-turns-1",

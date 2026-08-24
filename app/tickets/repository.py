@@ -3,13 +3,13 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from threading import RLock
-from typing import Any, Iterator
+from typing import Any, ContextManager
 
-from app.db.migrations import apply_migrations, configure_sqlite_connection
+from app.db.connection import open_sqlite_connection
+from app.db.migrations import initialize_schema
+from app.db.transaction import sqlite_transaction
 from app.tickets.types import JobStatus, TicketKind, TicketStatus, iso_utc, new_id, utc_now
 
 
@@ -84,32 +84,20 @@ class TicketRepository:
     }
 
     def __init__(self, database_path: str) -> None:
-        resolved = Path(database_path).expanduser()
-        if not resolved.is_absolute():
-            resolved = (Path.cwd() / resolved).resolve()
-        resolved.parent.mkdir(parents=True, exist_ok=True)
-        self._database_path = resolved
+        self._database_path, self._conn = open_sqlite_connection(database_path)
         self._lock = RLock()
-        self._conn = sqlite3.connect(str(resolved), check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        configure_sqlite_connection(self._conn)
-        apply_migrations(self._conn)
+        initialize_schema(self._conn)
 
     @property
     def database_path(self) -> str:
         return str(self._database_path)
 
-    @contextmanager
-    def _transaction(self, *, immediate: bool = False) -> Iterator[sqlite3.Cursor]:
-        with self._lock:
-            cur = self._conn.cursor()
-            try:
-                cur.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
-                yield cur
-                self._conn.commit()
-            except Exception:
-                self._conn.rollback()
-                raise
+    def _transaction(self, *, immediate: bool = False) -> ContextManager[sqlite3.Cursor]:
+        return sqlite_transaction(
+            conn=self._conn,
+            lock=self._lock,
+            immediate=immediate,
+        )
 
     @staticmethod
     def _ticket_row(row: sqlite3.Row | None) -> dict[str, Any] | None:

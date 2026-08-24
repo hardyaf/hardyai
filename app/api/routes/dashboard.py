@@ -9,8 +9,8 @@ from fastapi.responses import FileResponse
 
 from app.config import settings
 from app.api.operator_auth import require_operator
-from app.dependencies import get_event_log
-from app.runtime import runtime_power
+from app.dependencies import get_event_log, get_runtime_power
+from app.core.state_machine import RuntimePowerController
 from app.services.event_log import EventLogService
 
 router = APIRouter(tags=["dashboard"])
@@ -61,7 +61,10 @@ def _safe_status_event(event: dict[str, Any] | None) -> dict[str, Any] | None:
 
 
 @router.get("/dashboard/status", dependencies=[Depends(require_operator)])
-async def dashboard_status(event_log: EventLogService = Depends(get_event_log)) -> dict[str, Any]:
+async def dashboard_status(
+    event_log: EventLogService = Depends(get_event_log),
+    runtime_power: RuntimePowerController = Depends(get_runtime_power),
+) -> dict[str, Any]:
     events = event_log.recent(limit=400)
     latest_input = _latest_event(events, event_type="input.received")
     latest_response = _latest_event(events, event_type="response.generated")

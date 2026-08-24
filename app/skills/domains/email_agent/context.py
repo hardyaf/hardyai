@@ -16,6 +16,21 @@ class EmailAgentContextContract:
     def supports_intent(self, *, intent: str) -> bool:
         return str(intent or "").strip().casefold() in EMAIL_INTENTS
 
+    def normalize_entities(self, *, intent: str, entities: dict[str, Any]) -> dict[str, Any]:
+        del intent
+        return dict(entities)
+
+    def apply_text_constraints(
+        self,
+        *,
+        intent: str,
+        text: str,
+        entities: dict[str, Any],
+    ) -> dict[str, Any]:
+        del intent
+        del text
+        return dict(entities)
+
     def emit_context_updates(self, *, intent: str, result: dict[str, Any]) -> list[dict[str, Any]]:
         del intent
         rows = result.get("email_context_entities")

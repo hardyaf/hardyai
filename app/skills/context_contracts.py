@@ -15,6 +15,21 @@ class SkillContextContract(Protocol):
     def emit_context_updates(self, *, intent: str, result: dict[str, Any]) -> list[dict[str, Any]]:
         ...
 
+    def normalize_entities(self, *, intent: str, entities: dict[str, Any]) -> dict[str, Any]:
+        ...
+
+    def apply_text_constraints(
+        self,
+        *,
+        intent: str,
+        text: str,
+        entities: dict[str, Any],
+    ) -> dict[str, Any]:
+        ...
+
+    def clarification_supplemental_fields(self, *, intent: str) -> list[str]:
+        ...
+
     def resolve_followup(
         self,
         *,

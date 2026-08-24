@@ -3,6 +3,8 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Callable
 
+from app.db.core_schema import ensure_core_schema
+
 
 LATEST_SCHEMA_VERSION = 4
 
@@ -256,3 +258,10 @@ def apply_migrations(conn: sqlite3.Connection) -> int:
         conn.execute(f"PRAGMA user_version = {version}")
         conn.commit()
     return LATEST_SCHEMA_VERSION
+
+
+def initialize_schema(conn: sqlite3.Connection) -> int:
+    """Run the baseline and ordered migrations through one schema authority."""
+
+    ensure_core_schema(conn)
+    return apply_migrations(conn)

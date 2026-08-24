@@ -21,6 +21,8 @@ def test_house_switch_endpoints_and_logs():
     )
     assert set_resp.status_code == 200
     assert set_resp.json()["status"] == "ok"
+    assert set_resp.json()["delivery"]["session"]["status"] == "committed"
+    assert set_resp.json()["delivery"]["ticket"]["status"] == "committed"
 
     list_again = client.get("/house/switches")
     assert list_again.status_code == 200
@@ -54,6 +56,7 @@ def test_ask_switch_command_resolves_to_existing_named_switch():
     assert payload["intent"] == "home.set_switch"
     assert payload["result"]["switch_name"] == "office test light"
     assert payload["result"]["matched_existing"] is True
+    assert payload["delivery"]["memory"]["status"] in {"queued", "committed"}
 
     switches = client.get("/house/switches").json()["switches"]
     names = [item["name"] for item in switches]

@@ -71,11 +71,169 @@ def _aliases_for_person_name(person_name: str) -> list[str]:
     return sorted(item for item in aliases if item)
 
 
+def _pick_first_text(container: dict[str, Any], keys: list[str]) -> str | None:
+    for key in keys:
+        value = container.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return None
+
+
+def _coerce_name_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        cleaned = re.sub(r"^\s*invite(?:\s+to)?\s+", "", value.strip(), flags=re.IGNORECASE)
+        parts = re.split(r"\s*(?:,| and | & )\s*", cleaned)
+        return _dedupe_names([part.strip(" .") for part in parts if part.strip(" .")])
+    if isinstance(value, list):
+        return _dedupe_names([str(item).strip(" .") for item in value if str(item).strip(" .")])
+    return []
+
+
+def _normalize_person_reference(value: Any) -> str | None:
+    if value is None:
+        return None
+    candidate: str | None = None
+    if isinstance(value, list):
+        for item in value:
+            text = str(item).strip(" []'\"")
+            if text:
+                candidate = text
+                break
+    else:
+        candidate = str(value).strip()
+    if not candidate:
+        return None
+    list_repr_match = re.fullmatch(r"\[\s*['\"]?(?P<value>[^'\"]+)['\"]?\s*\]", candidate)
+    if list_repr_match:
+        candidate = str(list_repr_match.group("value") or "").strip()
+    candidate = re.sub(r"\bcalendar\b", "", candidate, flags=re.IGNORECASE).strip(" ,.-")
+    candidate = re.sub(r"^(?:for|on|in|at|to)\s+", "", candidate, flags=re.IGNORECASE).strip(" ,.-")
+    normalized = re.sub(r"[^a-z0-9\s_-]+", " ", candidate.lower())
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    if not normalized:
+        return None
+    if normalized in {"my", "our", "me", "us", "the", "house", "home", "household"}:
+        return "default"
+    normalized = re.sub(r"^(?:my|the|our)\s+", "", normalized).strip()
+    normalized = re.sub(r"\s+calendar$", "", normalized).strip()
+    if normalized in {"", "default", "main", "primary", "mine", "ours"}:
+        return "default"
+    return normalized
+
+
 class CalendarContextContract:
     contract_id = "calendar"
 
     def supports_intent(self, *, intent: str) -> bool:
         return str(intent or "").strip().lower() in CALENDAR_INTENTS
+
+    def normalize_entities(self, *, intent: str, entities: dict[str, Any]) -> dict[str, Any]:
+        intent_value = str(intent or "").strip().lower()
+        normalized = dict(entities)
+        if intent_value == "calendar.add_event":
+            event_title = _pick_first_text(
+                normalized,
+                ["event_title", "event_name", "title", "name", "subject", "event"],
+            )
+            when_hint = _pick_first_text(
+                normalized,
+                ["when_hint", "when", "start_time", "start", "start_at", "time", "date", "datetime"],
+            )
+            invitee_names = _coerce_name_list(
+                normalized.get("invitee_names")
+                or normalized.get("invitees")
+                or normalized.get("attendees")
+                or normalized.get("guests")
+            )
+            if event_title:
+                normalized["event_title"] = event_title
+            if when_hint:
+                normalized["when_hint"] = when_hint
+            if invitee_names:
+                normalized["invitee_names"] = invitee_names
+            normalized.pop("person_name", None)
+            return normalized
+
+        if intent_value == "calendar.view":
+            window = _pick_first_text(normalized, ["window", "range", "period"]) or "daily"
+            window_clean = window.strip().lower()
+            normalized["window"] = "weekly" if "week" in window_clean else "daily"
+            person_name = _normalize_person_reference(
+                normalized.get("person_name")
+                or normalized.get("person")
+                or normalized.get("owner")
+                or normalized.get("calendar_owner")
+            )
+            if person_name:
+                normalized["person_name"] = person_name
+            else:
+                normalized.pop("person_name", None)
+            return normalized
+
+        if intent_value in {"calendar.update_event", "calendar.delete_event"}:
+            event_reference = _pick_first_text(
+                normalized,
+                ["event_reference", "event_name", "event_title", "event", "title", "name", "reference"],
+            )
+            event_id = _pick_first_text(normalized, ["event_id", "google_event_id"])
+            calendar_id = _pick_first_text(normalized, ["calendar_id", "host_calendar_id"])
+            if event_reference:
+                normalized["event_reference"] = event_reference
+            if event_id:
+                normalized["event_id"] = event_id
+            if calendar_id:
+                normalized["calendar_id"] = calendar_id
+            if intent_value == "calendar.update_event":
+                new_title = _pick_first_text(
+                    normalized,
+                    ["new_event_title", "new_title", "updated_title", "replacement_title", "rename_to"],
+                )
+                new_when = _pick_first_text(
+                    normalized,
+                    ["new_when_hint", "new_when", "new_time", "when_hint", "when", "start_time", "date"],
+                )
+                if new_title:
+                    normalized["new_event_title"] = new_title
+                if new_when:
+                    normalized["new_when_hint"] = new_when
+                raw_all_day = normalized.get("all_day")
+                if isinstance(raw_all_day, str):
+                    bool_value = raw_all_day.strip().casefold()
+                    if bool_value in {"true", "1", "yes", "on", "all_day", "all-day", "all day"}:
+                        normalized["all_day"] = True
+                    elif bool_value in {"false", "0", "no", "off", "timed"}:
+                        normalized["all_day"] = False
+            return normalized
+        return normalized
+
+    def apply_text_constraints(
+        self,
+        *,
+        intent: str,
+        text: str,
+        entities: dict[str, Any],
+    ) -> dict[str, Any]:
+        constrained = dict(entities)
+        if str(intent or "").strip().lower() != "calendar.add_event":
+            return constrained
+        invitee_names = _extract_calendar_invitee_names(text)
+        if invitee_names:
+            constrained["invitee_names"] = invitee_names
+            constrained["invite_explicit"] = True
+        else:
+            constrained.pop("invitee_names", None)
+            constrained.pop("invite_explicit", None)
+        return constrained
+
+    def clarification_supplemental_fields(self, *, intent: str) -> list[str]:
+        if str(intent or "").strip().lower() == "calendar.add_event":
+            return ["invitee_names", "invite_explicit"]
+        return []
 
     def emit_context_updates(self, *, intent: str, result: dict[str, Any]) -> list[dict[str, Any]]:
         return emit_context_entities(intent=intent, result=result)

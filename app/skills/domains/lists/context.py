@@ -9,6 +9,17 @@ from app.context.types import EntityRegistry
 from app.core.types import SessionOwner
 
 
+def _pick_first_text(container: dict[str, Any], keys: list[str]) -> str | None:
+    for key in keys:
+        value = container.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return None
+
+
 LIST_INTENTS = {
     "lists.create_list",
     "lists.add_item",
@@ -84,6 +95,35 @@ class ListsContextContract:
 
     def supports_intent(self, *, intent: str) -> bool:
         return str(intent or "").strip().lower() in LIST_INTENTS
+
+    def normalize_entities(self, *, intent: str, entities: dict[str, Any]) -> dict[str, Any]:
+        intent_value = str(intent or "").strip().lower()
+        normalized = dict(entities)
+        if intent_value in {"lists.add_item", "lists.remove_item", "lists.mark_item_done"}:
+            for target, aliases in {
+                "item_text": ["item_text", "item"],
+                "list_name": ["list_name", "list"],
+                "completion_mode": ["completion_mode", "mode", "mark_mode"],
+            }.items():
+                value = _pick_first_text(normalized, aliases)
+                if value:
+                    normalized[target] = value
+        elif intent_value in {"lists.get_items", "lists.create_list", "lists.delete_list"}:
+            list_name = _pick_first_text(normalized, ["list_name", "list"])
+            if list_name:
+                normalized["list_name"] = list_name
+        return normalized
+
+    def apply_text_constraints(
+        self,
+        *,
+        intent: str,
+        text: str,
+        entities: dict[str, Any],
+    ) -> dict[str, Any]:
+        del intent
+        del text
+        return dict(entities)
 
     def emit_context_updates(self, *, intent: str, result: dict[str, Any]) -> list[dict[str, Any]]:
         return emit_context_entities(intent=intent, result=result)

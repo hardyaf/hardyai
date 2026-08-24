@@ -9,6 +9,7 @@ from typing import Any
 
 import yaml
 
+from app.db.repositories import SkillCatalogRepository
 from app.db.sqlite_store import SQLiteStore
 
 
@@ -73,7 +74,11 @@ SECTION_KEY_ALIASES: dict[str, set[str]] = {
 
 
 class SkillRegistryService:
-    def __init__(self, sqlite_store: SQLiteStore, repo_root: str | None = None) -> None:
+    def __init__(
+        self,
+        sqlite_store: SQLiteStore | SkillCatalogRepository,
+        repo_root: str | None = None,
+    ) -> None:
         self._sqlite_store = sqlite_store
         self._repo_root = Path(repo_root).expanduser().resolve() if repo_root else Path.cwd().resolve()
         self._markdown_cache: dict[str, str] = {}

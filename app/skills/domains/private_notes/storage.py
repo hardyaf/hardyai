@@ -3,78 +3,22 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from pathlib import Path
 from typing import Any
 from uuid import uuid4
+
+from app.db.connection import open_sqlite_connection
+from app.db.domain_schema import ensure_private_notes_schema
 
 
 class PrivateNotesSQLiteStorage:
     """Domain-owned durable storage for silent notes and their delivery lifecycle."""
 
     def __init__(self, database_path: str) -> None:
-        path = Path(database_path).expanduser().resolve()
-        path.parent.mkdir(parents=True, exist_ok=True)
+        path, self._conn = open_sqlite_connection(database_path)
         self.database_path = str(path)
         self._lock = threading.RLock()
-        self._conn = sqlite3.connect(self.database_path, check_same_thread=False, timeout=30.0)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA foreign_keys = ON")
-        self._conn.execute("PRAGMA journal_mode = WAL")
-        self._conn.execute("PRAGMA busy_timeout = 5000")
-        self._initialize()
+        ensure_private_notes_schema(self._conn)
 
-    def _initialize(self) -> None:
-        with self._lock:
-            cur = self._conn.cursor()
-            cur.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS private_note_digests (
-                    digest_id TEXT PRIMARY KEY,
-                    owner_user_id TEXT NOT NULL,
-                    agent_id TEXT NOT NULL,
-                    guild_id TEXT NOT NULL,
-                    channel_id TEXT NOT NULL,
-                    delivery_channel_id TEXT NOT NULL,
-                    local_date TEXT NOT NULL,
-                    timezone_name TEXT NOT NULL,
-                    scheduled_for TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    note_count INTEGER NOT NULL DEFAULT 0,
-                    summary_text TEXT,
-                    discord_message_ids_json TEXT NOT NULL DEFAULT '[]',
-                    delivery_attempts INTEGER NOT NULL DEFAULT 0,
-                    last_error TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    UNIQUE(channel_id, local_date)
-                );
-
-                CREATE TABLE IF NOT EXISTS private_note_entries (
-                    note_id TEXT PRIMARY KEY,
-                    external_message_id TEXT NOT NULL UNIQUE,
-                    owner_user_id TEXT NOT NULL,
-                    guild_id TEXT NOT NULL,
-                    channel_id TEXT NOT NULL,
-                    author_external_user_id TEXT NOT NULL,
-                    author_display_name TEXT,
-                    note_text TEXT NOT NULL,
-                    captured_at TEXT NOT NULL,
-                    digest_id TEXT,
-                    status TEXT NOT NULL DEFAULT 'pending',
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    FOREIGN KEY (digest_id) REFERENCES private_note_digests(digest_id)
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_private_notes_pending
-                    ON private_note_entries(owner_user_id, channel_id, status, captured_at);
-                CREATE INDEX IF NOT EXISTS idx_private_notes_digest
-                    ON private_note_entries(digest_id, captured_at);
-                CREATE INDEX IF NOT EXISTS idx_private_digests_delivery
-                    ON private_note_digests(status, scheduled_for);
-                """
-            )
-            self._conn.commit()
 
     def close(self) -> None:
         with self._lock:

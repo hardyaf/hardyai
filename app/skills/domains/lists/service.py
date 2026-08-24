@@ -3,7 +3,6 @@ from __future__ import annotations
 import difflib
 import re
 from datetime import datetime, timezone
-from typing import Any
 
 from app.db.sqlite_store import SQLiteStore
 from app.skills.domains.lists.storage import InMemoryListsStorage, ListsStorage, SQLiteListsStorage

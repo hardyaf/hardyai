@@ -104,7 +104,6 @@ class MainAgentLoop:
             planner_decision = self._planner.next_decision(step_number=step_number, plan=execution_plan)
             state_before = loop_state
             policy_verdict_payload: dict[str, Any] | None = None
-            blocked_by_policy = False
             if (
                 content_policy_gate is not None
                 and planner_decision.action_type == AgentLoopActionType.EXECUTE_COMMAND
@@ -124,7 +123,6 @@ class MainAgentLoop:
                     }
                 )
                 if not verdict.allowed:
-                    blocked_by_policy = True
                     outcome = ExecutionOutcome(
                         status="blocked_by_policy",
                         success=False,

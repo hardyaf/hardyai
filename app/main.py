@@ -16,14 +16,7 @@ from app.api.routes.identities import router as identities_router
 from app.api.routes.operator_session import router as operator_session_router
 from app.api.operator_auth import validate_security_configuration
 from app.api.security_headers import SECURITY_HEADERS
-from app.config import settings
-from app.runtime import (
-    calendar_inbox_service,
-    durable_write_service,
-    email_agent_service,
-    private_notes_service,
-    turn_service,
-)
+from app.container import ApplicationContainer
 from app.services.clock_scheduler import BoundedClockScheduler, ClockJob
 from app.services.discord.bot import DiscordJarvisBot
 
@@ -45,7 +38,9 @@ def _report_clock_task_result(task: asyncio.Task[None]) -> None:
 
 
 @asynccontextmanager
-async def _lifespan(_: FastAPI):
+async def _lifespan(application: FastAPI):
+    container: ApplicationContainer = application.state.container
+    settings = container.settings
     validate_security_configuration()
     discord_bot: DiscordJarvisBot | None = None
     discord_task: asyncio.Task[None] | None = None
@@ -53,24 +48,24 @@ async def _lifespan(_: FastAPI):
     durable_write_task: asyncio.Task[None] | None = None
     clock_jobs: list[ClockJob] = []
     poll_intervals: list[float] = []
-    await asyncio.to_thread(durable_write_service.recover_startup)
+    await asyncio.to_thread(container.durable_write_service.recover_startup)
     durable_write_task = asyncio.create_task(
-        durable_write_service.run_forever(),
+        container.durable_write_service.run_forever(),
         name="jarvis-durable-write-worker",
     )
-    if calendar_inbox_service is not None:
+    if container.calendar_inbox_service is not None:
         clock_jobs.append(
             ClockJob(
                 name="calendar_inbox.reconcile",
-                callback=calendar_inbox_service.run_due,
+                callback=container.calendar_inbox_service.run_due,
             )
         )
         poll_intervals.append(settings.calendar_inbox_poll_seconds)
-    if email_agent_service is not None and settings.email_agent_sync_enabled:
+    if container.email_agent_service is not None and settings.email_agent_sync_enabled:
         clock_jobs.append(
             ClockJob(
                 name="email.sync",
-                callback=email_agent_service.run_due,
+                callback=container.email_agent_service.run_due,
             )
         )
         poll_intervals.append(settings.email_agent_scheduler_poll_seconds)
@@ -93,8 +88,8 @@ async def _lifespan(_: FastAPI):
             command_channel_id=settings.discord_command_channel_id,
             command_guild_id=settings.discord_command_guild_id,
             permissions_path=settings.discord_permissions_path,
-            private_notes_service=private_notes_service,
-            turn_service=turn_service,
+            private_notes_service=container.private_notes_service,
+            turn_service=container.turn_service,
         )
         await discord_bot.login(token)
         discord_task = asyncio.create_task(discord_bot.connect(reconnect=True))
@@ -122,30 +117,33 @@ async def _lifespan(_: FastAPI):
                 await durable_write_task
 
 
-app = FastAPI(title="Jarvis v2 POC", version="0.1.0", lifespan=_lifespan)
+def create_app(container: ApplicationContainer | None = None) -> FastAPI:
+    application = FastAPI(title="Jarvis v2 POC", version="0.1.0", lifespan=_lifespan)
+    application.state.container = container or ApplicationContainer.from_default_runtime()
+
+    @application.middleware("http")
+    async def _apply_security_headers(request: Request, call_next):
+        response = await call_next(request)
+        for name, value in SECURITY_HEADERS.items():
+            response.headers[name] = value
+        return response
+
+    @application.middleware("http")
+    async def _handle_request_cancellation(request: Request, call_next):
+        try:
+            return await call_next(request)
+        except asyncio.CancelledError:
+            # Treat request cancellation during shutdown/client disconnect as expected.
+            return Response(status_code=499)
+
+    application.include_router(health_router)
+    application.include_router(ask_router)
+    application.include_router(house_router)
+    application.include_router(tickets_router)
+    application.include_router(identities_router)
+    application.include_router(operator_session_router)
+    application.include_router(dashboard_router)
+    return application
 
 
-@app.middleware("http")
-async def _apply_security_headers(request: Request, call_next):
-    response = await call_next(request)
-    for name, value in SECURITY_HEADERS.items():
-        response.headers[name] = value
-    return response
-
-
-@app.middleware("http")
-async def _handle_request_cancellation(request: Request, call_next):
-    try:
-        return await call_next(request)
-    except asyncio.CancelledError:
-        # Treat request cancellation during shutdown/client disconnect as expected.
-        return Response(status_code=499)
-
-
-app.include_router(health_router)
-app.include_router(ask_router)
-app.include_router(house_router)
-app.include_router(tickets_router)
-app.include_router(identities_router)
-app.include_router(operator_session_router)
-app.include_router(dashboard_router)
+app = create_app()

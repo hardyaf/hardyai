@@ -44,6 +44,9 @@ jobs:
       - name: Compile Python
         run: python -m compileall -q app scripts tests
 
+      - name: Enforce architecture boundaries
+        run: python -m pytest -q tests/unit/test_architecture_boundaries.py
+
       - name: Run tests
         env:
           APP_ENV: test

@@ -455,7 +455,6 @@ class OllamaMainRepairBackend:
         relevant_memory = _relevant_memory_hint(context)
         skill_context = _active_skill_context(context)
         last_event_reference = str(skill_context.get("last_event_reference") or "").strip()
-        web_research = _web_research_hint(context)
         runtime_capability_catalog = _runtime_capability_catalog_hint(context)
         registry_profiles = self._profiles_from_registry(model_name="jarvis", context=context)
         identity_profile = registry_profiles.get("identity") or self._read_prompt_profile(self._identity_profile_path)

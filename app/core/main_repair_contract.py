@@ -111,10 +111,6 @@ def _normalize_entities(intent: str | None, entities: dict[str, Any]) -> dict[st
                 "datetime",
             ],
         )
-        person_name = _pick_first_text(
-            normalized,
-            ["person_name", "person", "owner", "calendar_owner"],
-        )
         invitee_names = _coerce_name_list(
             normalized.get("invitee_names")
             or normalized.get("invitees")

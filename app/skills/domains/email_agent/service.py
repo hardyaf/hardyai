@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.services.event_log import EventLogService
 from app.services.google.gmail_gateway import GmailHistoryExpiredError, GmailReadOnlyGateway
-from app.services.google.gmail_mime import GmailMimeParser, ParsedGmailMessage
+from app.services.google.gmail_mime import GmailMimeParser
 from app.skills.domains.email_agent.classification import EmailClassifier
 from app.skills.domains.email_agent.config import EmailAgentPermissions
 from app.skills.domains.email_agent.storage import EmailAgentSQLiteStorage

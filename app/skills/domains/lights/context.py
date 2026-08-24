@@ -9,6 +9,17 @@ from app.context.types import EntityRegistry
 from app.core.types import SessionOwner
 
 
+def _pick_first_text(container: dict[str, Any], keys: list[str]) -> str | None:
+    for key in keys:
+        value = container.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return None
+
+
 LIGHT_INTENTS = {"home.set_switch"}
 
 
@@ -73,6 +84,29 @@ class LightsContextContract:
 
     def supports_intent(self, *, intent: str) -> bool:
         return str(intent or "").strip().lower() in LIGHT_INTENTS
+
+    def normalize_entities(self, *, intent: str, entities: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(entities)
+        if str(intent or "").strip().lower() != "home.set_switch":
+            return normalized
+        switch_name = _pick_first_text(normalized, ["switch_name", "switch", "device", "light"])
+        action = _pick_first_text(normalized, ["action", "state"])
+        if switch_name:
+            normalized["switch_name"] = switch_name
+        if action:
+            normalized["action"] = action
+        return normalized
+
+    def apply_text_constraints(
+        self,
+        *,
+        intent: str,
+        text: str,
+        entities: dict[str, Any],
+    ) -> dict[str, Any]:
+        del intent
+        del text
+        return dict(entities)
 
     def emit_context_updates(self, *, intent: str, result: dict[str, Any]) -> list[dict[str, Any]]:
         return emit_context_entities(intent=intent, result=result)
