@@ -472,6 +472,7 @@ def test_build_ask_request_payload_marks_explicit_micro_command():
 
     assert payload["context"]["micro_command_explicit"] is True
     assert payload["context"]["discord_routing_lane"] == "micro"
+    assert payload["context"]["force_main_owner"] is False
 
 
 def test_summarize_ask_response_prefers_assistant_text():

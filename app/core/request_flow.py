@@ -133,7 +133,10 @@ class RequestFlowCoordinator:
             context=effective_context,
         )
         source_channel = str(effective_payload.source or "").strip().lower()
-        force_main_channel = bool(effective_payload.context.get("force_main_owner")) or source_channel == "discord"
+        force_main_channel = bool(effective_payload.context.get("force_main_owner")) or (
+            source_channel == "discord"
+            and effective_payload.context.get("micro_command_explicit") is not True
+        )
         wake_on_message = bool(effective_payload.context.get("wake_on_message")) or source_channel == "discord"
 
         channel_key = router._channel_key_for_payload(effective_payload)
@@ -473,6 +476,7 @@ class RequestFlowCoordinator:
             working_context=working_context_payload,
         )
         decision = router._normalize_decision_entities(decision)
+        decision = router._micro_jarvis.apply_owner_policy(decision)
         decision = router._apply_main_sticky_followup(session=session, decision=decision)
         conversation_lane = router._conversation_lane_policy.decide(
             text=effective_payload.text,

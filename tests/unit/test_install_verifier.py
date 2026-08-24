@@ -140,10 +140,20 @@ def test_model_probe_allows_reasoning_model_to_reach_visible_output(monkeypatch)
 
 
 def test_live_smoke_accepts_model_backed_main_repair(monkeypatch) -> None:
-    def fake_request_json(url, *, timeout_seconds, method="GET", payload=None):
+    captured_headers: list[dict[str, str]] = []
+
+    def fake_request_json(
+        url,
+        *,
+        timeout_seconds,
+        method="GET",
+        payload=None,
+        request_headers=None,
+    ):
         if url.endswith("/health"):
             return {"status": "ok"}
         assert url.endswith("/ask")
+        captured_headers.append(dict(request_headers or {}))
         return {
             "route": "main_jarvis_repair",
             "classification": {"repair_source": "backend"},
@@ -163,6 +173,7 @@ def test_live_smoke_accepts_model_backed_main_repair(monkeypatch) -> None:
         micro_model_name="qwen2.5:3b",
         main_repair_model_enabled=True,
         main_repair_model_name="gpt-oss:20b",
+        operator_api_key="test-operator-key",
     )
 
     verify_install._check_live_api(
@@ -174,8 +185,45 @@ def test_live_smoke_accepts_model_backed_main_repair(monkeypatch) -> None:
     )
 
     assert not checks.failed
+    assert captured_headers == [{"X-Jarvis-Operator-Key": "test-operator-key"}]
     assert any(
         result.name == "jarvis_model_path" and result.level == "PASS"
+        for result in checks.results
+    )
+
+
+def test_live_smoke_refuses_operator_key_over_plain_remote_http(monkeypatch) -> None:
+    def fake_request_json(url, *, timeout_seconds, method="GET", payload=None):
+        assert url.endswith("/health")
+        return {"status": "ok"}
+
+    monkeypatch.setattr(verify_install, "_request_json", fake_request_json)
+    monkeypatch.setattr(
+        verify_install,
+        "_request_text",
+        lambda url, *, timeout_seconds: "<title>Jarvis House Dashboard</title>",
+    )
+    checks = InstallChecks()
+    profile = SimpleNamespace(
+        micro_model_enabled=True,
+        micro_model_name="qwen2.5:3b",
+        main_repair_model_enabled=True,
+        main_repair_model_name="gpt-oss:20b",
+        operator_api_key="test-operator-key",
+    )
+
+    verify_install._check_live_api(
+        checks,
+        profile,
+        api_url="http://192.0.2.10:8000",
+        smoke_turn=True,
+        timeout_seconds=180,
+    )
+
+    assert checks.failed
+    assert any(
+        result.name == "jarvis_smoke_turn"
+        and "refusing to send the operator key" in result.detail
         for result in checks.results
     )
 

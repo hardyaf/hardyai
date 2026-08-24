@@ -280,6 +280,8 @@ def test_explicit_bang_discord_command_enters_micro():
 
     assert len(micro_backend.calls) == 1
     assert response["intent"] == "calendar.view"
+    assert response["owner"] == "micro_jarvis"
+    assert response["route"] == "micro_tool"
     assert response["result"]["status"] == "ok"
     event_types = [item["event_type"] for item in event_log.recent(limit=50)]
     assert "pipeline.micro.bypassed" not in event_types

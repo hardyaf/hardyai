@@ -142,6 +142,11 @@ class MicroJarvis:
             decision = self._merge_heuristic_entities(decision=decision, heuristic=heuristic_decision)
 
         decision = self._apply_guardrails(text=text, decision=decision)
+        return self.apply_owner_policy(decision)
+
+    def apply_owner_policy(self, decision: MicroDecision) -> MicroDecision:
+        """Refresh ownership after downstream entity normalization or resolution."""
+
         decision.recommended_owner = self._recommended_owner(decision)
         return decision
 

@@ -133,12 +133,14 @@ def _request_json(
     timeout_seconds: float,
     method: str = "GET",
     payload: dict[str, Any] | None = None,
+    request_headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     body = None
     headers: dict[str, str] = {"Accept": "application/json"}
     if payload is not None:
         body = json.dumps(payload).encode("utf-8")
         headers["Content-Type"] = "application/json"
+    headers.update(request_headers or {})
     request = Request(url=url, data=body, headers=headers, method=method)
     with urlopen(request, timeout=timeout_seconds) as response:
         raw = response.read().decode("utf-8")
@@ -762,11 +764,29 @@ def _check_live_api(
 
     if not smoke_turn:
         return
+    operator_key = str(getattr(settings, "operator_api_key", "") or "").strip()
+    request_headers: dict[str, str] = {}
+    if operator_key:
+        parsed_api_url = urlparse(base_url)
+        hostname = str(parsed_api_url.hostname or "").strip().casefold()
+        if parsed_api_url.scheme.casefold() == "https" or hostname in {
+            "127.0.0.1",
+            "localhost",
+            "::1",
+        }:
+            request_headers["X-Jarvis-Operator-Key"] = operator_key
+        else:
+            checks.fail(
+                "jarvis_smoke_turn",
+                "refusing to send the operator key over non-loopback HTTP; use localhost or HTTPS",
+            )
+            return
     try:
         response = _request_json(
             f"{base_url}/ask",
             timeout_seconds=timeout_seconds,
             method="POST",
+            request_headers=request_headers,
             payload={
                 "text": "Tell me who you are in one short sentence.",
                 "user_id": "install-smoke",

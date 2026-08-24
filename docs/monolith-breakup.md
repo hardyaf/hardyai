@@ -1,6 +1,6 @@
 # Monolith Breakup Completion Record
 
-Status: locally complete and release-candidate verified on 2026-08-24. Ubuntu promotion is still a separate operational gate.
+Status: complete and verified on the authoritative Ubuntu deployment on 2026-08-24.
 
 ## Outcome
 
@@ -67,20 +67,31 @@ ApplicationContainer -> TurnService -> RequestFlowCoordinator
 
 ## Verification
 
-The local release candidate passed:
+The final release passed:
 
 - Python compilation for `app`, `scripts`, and `tests`;
 - fatal Ruff checks (`E9`, `F63`, `F7`, `F82`);
-- all 460 tests;
-- `git diff --check`; and
-- a sanitized clean export checked by `scripts/export_clean_repo.py`.
+- all 461 tests on Ubuntu;
+- `git diff --check` and the public-tree publication scan;
+- a checksum-verified sanitized release export and isolated Ubuntu image build;
+- a pre-deploy source, environment, protected-configuration, durable-data, and online SQLite backup;
+- post-start SQLite integrity, exact-source synchronization, container health, and HTTP `/health` checks;
+- direct Qwen 2.5 7B and GPT-OSS 20B inference probes plus a model-backed authenticated Main turn;
+- live SearXNG, Google Calendar read, Main clarification, and idempotent direct-house action checks; and
+- Discord connection plus a read-only explicit-envelope Micro routing check.
 
-The clean export used for this pass was created as a disposable sibling directory. It is a verification
-artifact, not a deployment source or a second canonical checkout.
+The deployment test found and closed two gaps that the earlier assertions did not catch. The production
+verifier now authenticates its loopback smoke turn without sending the operator key over plain remote HTTP.
+Explicit Discord commands also refresh deterministic ownership after domain entity normalization, so a
+normalized complete read command executes through `micro_tool`; unprefixed, incomplete, ambiguous, and
+Main-only mutating requests still fail closed to Main.
 
-## Remaining Risks And Promotion Gate
+The clean exports used for this pass were disposable release artifacts, not deployment authorities or
+second canonical checkouts.
 
-The breakup is not permission to cut over production without parity checks:
+## Remaining Risks
+
+The breakup is complete, with these bounded follow-up concerns:
 
 - `app.runtime` remains a compatibility composition root for existing workers and tests. HTTP adapters no
   longer depend on it, but a future pass can move worker construction into container factories and retire
@@ -90,17 +101,9 @@ The breakup is not permission to cut over production without parity checks:
 - Memory is the only asynchronous generic durable-write job today. Other acknowledged writes are committed
   synchronously before the response is returned; new asynchronous write paths must register a durable job
   handler and expose delivery state before they may return success.
-- Local Windows verification is not production verification. Promotion must occur on the authoritative
-  Ubuntu deployment checkout and every Compose command must include `--env-file .env`.
-
-Before cutover on Ubuntu:
-
-1. Back up the runtime database and protected configuration.
-2. Promote the reviewed commit to the configured Ubuntu deployment checkout without copying Windows
-   runtime state.
-3. Run compile, fatal Ruff, architecture, and full test gates on Ubuntu.
-4. Run the migration against a disposable database, then a backed-up copy of production state.
-5. Start Compose with `docker compose --env-file .env -f deploy/docker/compose.yaml ...`.
-6. Verify `/health`, one explicit Discord `!` Micro action, one unprefixed Main conversation, one Main action
-   commitment, one clarification continuation, durable-write worker heartbeat, and ticket review heartbeat.
-7. Observe Ubuntu before changing or removing any Windows rollback runtime.
+- The production image still reports the known Starlette/httpx and Python `audioop` deprecation warnings.
+- The explicit Discord Micro check used the production command-envelope and router path without posting a
+  synthetic message into a real household channel. The live bot connection and adapter policy loaded
+  successfully; the next organic `!` command remains the end-to-end transport confirmation.
+- Windows rollback state was not changed. Observe the Ubuntu deployment before any separately approved
+  rollback-runtime retirement.

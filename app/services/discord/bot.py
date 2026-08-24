@@ -451,7 +451,7 @@ def build_ask_request_payload(
             "mode": "discord_command",
             "auto_channel_session": True,
             "channel_session_scope": "per_user",
-            "force_main_owner": True,
+            "force_main_owner": micro_command_explicit is not True,
             "wake_on_message": True,
             "session_channel": build_session_channel(guild_id=guild_id, channel_id=channel_id),
             "discord_channel_id": str(channel_id),
