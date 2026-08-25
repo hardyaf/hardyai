@@ -11,6 +11,8 @@ from uuid import uuid4
 from app.config import settings
 from app.integrations.docling.adapter import DoclingParserAdapter
 from app.integrations.docling.client import DoclingClient
+from app.integrations.paddleocr.adapter import PaddleOCRParserAdapter
+from app.integrations.paddleocr.client import PaddleOCRClient
 from app.integrations.paperless.adapter import PaperlessArchiveAdapter
 from app.integrations.paperless.client import PaperlessClient
 from app.jobs.document_enqueue import (
@@ -25,13 +27,17 @@ from app.reviews.repository import HumanReviewRepository
 from app.reviews.service import HumanReviewService
 from app.services.offline_runtime_policy import validate_offline_runtime
 from app.skills.domains.documents.artifacts import ContentAddressedArtifactStore
-from app.skills.domains.documents.configuration import native_docling_configuration_sha256
+from app.skills.domains.documents.configuration import (
+    conventional_ocr_configuration_sha256,
+    native_docling_configuration_sha256,
+)
 from app.skills.domains.documents.ingestion import TransientDocumentSpool
 from app.skills.domains.documents.processing import (
     DocumentProcessingError,
     DocumentProcessingPending,
     DocumentProcessingService,
 )
+from app.skills.domains.documents.quality import evaluate_conventional_ocr_artifact
 from app.skills.domains.documents.reconciliation import DocumentOriginReconciler
 from app.skills.domains.documents.scanner import WatchedDocumentScanner
 from app.skills.domains.documents.service import DocumentIngestionService
@@ -55,6 +61,8 @@ class DocumentProcessingWorker:
         archive: PaperlessArchiveAdapter,
         ingestion: DocumentIngestionService | None = None,
         processing: DocumentProcessingService | None = None,
+        processing_services: dict[ProcessingRoute, DocumentProcessingService] | None = None,
+        processing_route_metadata: dict[ProcessingRoute, dict[str, str | None]] | None = None,
         processing_enqueuer: DurableDocumentEnqueuer | None = None,
         parser_image_digest: str | None = None,
         processing_configuration_sha256: str | None = None,
@@ -73,6 +81,10 @@ class DocumentProcessingWorker:
         self.archive = archive
         self.ingestion = ingestion
         self.processing = processing
+        self.processing_services = dict(processing_services or {})
+        if processing is not None and ProcessingRoute.NATIVE_DOCLING not in self.processing_services:
+            self.processing_services[ProcessingRoute.NATIVE_DOCLING] = processing
+        self.processing_route_metadata = dict(processing_route_metadata or {})
         self.processing_enqueuer = processing_enqueuer
         self.parser_image_digest = str(parser_image_digest or "")[:160] or None
         self.processing_configuration_sha256 = str(
@@ -110,7 +122,7 @@ class DocumentProcessingWorker:
                 )
             except Exception as exc:
                 recovery_error = f"awaiting_enqueue_{type(exc).__name__}"[:120]
-        if self.processing is not None and self.processing_enqueuer is not None:
+        if self.processing_services and self.processing_enqueuer is not None:
             try:
                 recovered = 0
                 for run in self.documents.pending_processing_runs(limit=100):
@@ -121,6 +133,11 @@ class DocumentProcessingWorker:
                     )
                     recovered += 1
                 maintenance["processing_enqueue_recovered"] = recovered
+                queued_existing = 0
+                for record in self.documents.ready_unprocessed(limit=100):
+                    if self._ensure_processing_queued(record):
+                        queued_existing += 1
+                maintenance["ready_processing_queued"] = queued_existing
             except Exception as exc:
                 recovery_error = f"processing_enqueue_{type(exc).__name__}"[:120]
         if self.scanner is not None:
@@ -139,7 +156,7 @@ class DocumentProcessingWorker:
                 recovery_error = f"origin_reconciliation_{type(exc).__name__}"[:120]
 
         results = self._run_archive_jobs()
-        if self.processing is not None:
+        if self.processing_services:
             results.extend(self._run_processing_jobs())
         errors = [
             result
@@ -308,30 +325,42 @@ class DocumentProcessingWorker:
             "duplicate_reconciled": task.state == "duplicate",
         }
 
-    def _ensure_processing_queued(self, record) -> None:
-        if (
-            self.processing is None
-            or self.processing_enqueuer is None
-            or record.media_type != "application/pdf"
-            or not record.source_version_id
-        ):
-            return
+    def _ensure_processing_queued(self, record) -> bool:
+        if self.processing_enqueuer is None or not record.source_version_id:
+            return False
         if record.processing_state != ProcessingState.NOT_REQUESTED:
-            return
+            return False
+        if record.media_type == "application/pdf":
+            route = ProcessingRoute.NATIVE_DOCLING
+        elif record.media_type in {"image/jpeg", "image/png"}:
+            route = ProcessingRoute.CONVENTIONAL_OCR
+        else:
+            return False
+        processing = self.processing_services.get(route)
+        if processing is None:
+            return False
+        metadata = self.processing_route_metadata.get(route, {})
         run = self.documents.create_processing_run(
             document_id=record.document_id,
-            route=ProcessingRoute.NATIVE_DOCLING,
-            parser_name=self.processing.parser.provider_name,
-            parser_version=self.processing.parser.provider_version,
-            parser_image_digest=self.parser_image_digest,
-            configuration_sha256=self.processing_configuration_sha256,
-            resource_lane="cpu_large",
+            route=route,
+            parser_name=processing.parser.provider_name,
+            parser_version=processing.parser.provider_version,
+            parser_image_digest=(
+                str(metadata.get("image_digest") or "")[:160] or self.parser_image_digest
+            ),
+            configuration_sha256=(
+                str(metadata.get("configuration_sha256") or "")
+                or self.processing_configuration_sha256
+            ),
+            artifact_schema_version=("2" if route == ProcessingRoute.CONVENTIONAL_OCR else "1"),
+            resource_lane=str(metadata.get("resource_lane") or "cpu_large")[:40],
         )
         self.processing_enqueuer.enqueue_processing(
             document_id=record.document_id,
             source_version_id=str(run["source_version_id"]),
             run_id=str(run["run_id"]),
         )
+        return True
 
     def _run_processing_jobs(self) -> list[dict[str, Any]]:
         claimed = self.jobs.claim_jobs(
@@ -360,13 +389,31 @@ class DocumentProcessingWorker:
                     total=3,
                 ):
                     raise DocumentProcessingError("stale_processing_job_fence")
-                assert self.processing is not None
-                result = self.processing.process(
+                run = self.documents.get_processing_run(run_id)
+                if run is None:
+                    raise DocumentProcessingError("processing_run_missing")
+                try:
+                    route = ProcessingRoute(str(run.get("route") or ""))
+                except ValueError as exc:
+                    raise DocumentProcessingError("processing_route_invalid") from exc
+                processing = self.processing_services.get(route)
+                if processing is None:
+                    raise DocumentProcessingError("processing_route_unavailable")
+                result = processing.process(
                     document_id=document_id,
                     source_version_id=source_version_id,
                     run_id=run_id,
                     fencing_token=token,
                 )
+                if (
+                    route == ProcessingRoute.NATIVE_DOCLING
+                    and result.get("status") in {"needs_review", "processing_incomplete"}
+                    and ProcessingRoute.CONVENTIONAL_OCR in self.processing_services
+                ):
+                    result["fallback"] = self._enqueue_conventional_fallback(
+                        document_id=document_id,
+                        fallback_from_run_id=run_id,
+                    )
                 if not self.jobs.complete_job(
                     job_id=job_id,
                     worker_id=self.worker_id,
@@ -420,6 +467,46 @@ class DocumentProcessingWorker:
                     self._fail_processing_run(run_id=run_id, fencing_token=token, code=code)
                 results.append({"status": "dead_letter" if terminal else "retry", "error_code": code})
         return results
+
+    def _enqueue_conventional_fallback(
+        self,
+        *,
+        document_id: str,
+        fallback_from_run_id: str,
+    ) -> dict[str, Any]:
+        processing = self.processing_services[ProcessingRoute.CONVENTIONAL_OCR]
+        metadata = self.processing_route_metadata.get(ProcessingRoute.CONVENTIONAL_OCR, {})
+        try:
+            run = self.documents.create_processing_run(
+                document_id=document_id,
+                route=ProcessingRoute.CONVENTIONAL_OCR,
+                parser_name=processing.parser.provider_name,
+                parser_version=processing.parser.provider_version,
+                parser_image_digest=str(metadata.get("image_digest") or "")[:160] or None,
+                configuration_sha256=str(metadata.get("configuration_sha256") or ""),
+                artifact_schema_version="2",
+                resource_lane=str(metadata.get("resource_lane") or "cpu_ocr")[:40],
+                fallback_from_run_id=fallback_from_run_id,
+            )
+        except Exception as exc:
+            return {"status": "not_queued", "error_code": type(exc).__name__}
+        enqueue_confirmed = True
+        try:
+            assert self.processing_enqueuer is not None
+            job_id = self.processing_enqueuer.enqueue_processing(
+                document_id=document_id,
+                source_version_id=str(run["source_version_id"]),
+                run_id=str(run["run_id"]),
+            )
+        except Exception:
+            enqueue_confirmed = False
+            job_id = None
+        return {
+            "status": "queued" if enqueue_confirmed else "awaiting_enqueue_recovery",
+            "route": ProcessingRoute.CONVENTIONAL_OCR.value,
+            "run_id": str(run["run_id"]),
+            "job_id": job_id,
+        }
 
     def _acknowledge_processing_cancel(
         self,
@@ -511,10 +598,17 @@ def main() -> int:
     ingestion = DocumentIngestionService(repository=documents, spool=spool, enqueuer=enqueuer)
     reviews_repository: HumanReviewRepository | None = None
     docling_client: DoclingClient | None = None
-    processing: DocumentProcessingService | None = None
-    processing_config_hash: str | None = None
-    if settings.documents_processing_enabled and settings.documents_docling_enabled:
+    paddleocr_client: PaddleOCRClient | None = None
+    processing_services: dict[ProcessingRoute, DocumentProcessingService] = {}
+    route_metadata: dict[ProcessingRoute, dict[str, str | None]] = {}
+    artifact_store = ContentAddressedArtifactStore(settings.documents_artifacts_path)
+    review_service: HumanReviewService | None = None
+    if settings.documents_processing_enabled and (
+        settings.documents_docling_enabled or settings.documents_paddleocr_enabled
+    ):
         reviews_repository = HumanReviewRepository(settings.database_path)
+        review_service = HumanReviewService(reviews_repository)
+    if settings.documents_processing_enabled and settings.documents_docling_enabled:
         docling_client = DoclingClient(
             base_url=settings.docling_base_url,
             api_key_path=settings.docling_api_key_path,
@@ -523,15 +617,46 @@ def main() -> int:
             max_response_bytes=settings.docling_max_response_bytes,
         )
         parser = DoclingParserAdapter(docling_client, provider_version=settings.docling_server_version)
-        processing = DocumentProcessingService(
+        processing_services[ProcessingRoute.NATIVE_DOCLING] = DocumentProcessingService(
             repository=documents,
             archive=archive,
             parser=parser,
-            artifact_store=ContentAddressedArtifactStore(settings.documents_artifacts_path),
-            reviews=HumanReviewService(reviews_repository),
+            artifact_store=artifact_store,
+            reviews=(None if settings.documents_paddleocr_enabled else review_service),
             max_provider_json_bytes=settings.docling_max_response_bytes,
         )
-        processing_config_hash = native_docling_configuration_sha256(settings)
+        route_metadata[ProcessingRoute.NATIVE_DOCLING] = {
+            "image_digest": settings.docling_image_digest,
+            "configuration_sha256": native_docling_configuration_sha256(settings),
+            "resource_lane": "cpu_large",
+        }
+    if settings.documents_processing_enabled and settings.documents_paddleocr_enabled:
+        paddleocr_client = PaddleOCRClient(
+            base_url=settings.paddleocr_base_url,
+            api_key_path=settings.paddleocr_api_key_path,
+            server_version=settings.paddleocr_server_version,
+            timeout_seconds=settings.paddleocr_timeout_seconds,
+            max_input_bytes=settings.documents_max_upload_bytes,
+            max_response_bytes=settings.paddleocr_max_response_bytes,
+        )
+        parser = PaddleOCRParserAdapter(
+            paddleocr_client,
+            provider_version=settings.paddleocr_server_version,
+        )
+        processing_services[ProcessingRoute.CONVENTIONAL_OCR] = DocumentProcessingService(
+            repository=documents,
+            archive=archive,
+            parser=parser,
+            artifact_store=artifact_store,
+            reviews=review_service,
+            max_provider_json_bytes=settings.paddleocr_max_response_bytes,
+            quality_evaluator=evaluate_conventional_ocr_artifact,
+        )
+        route_metadata[ProcessingRoute.CONVENTIONAL_OCR] = {
+            "image_digest": settings.paddleocr_image_digest,
+            "configuration_sha256": conventional_ocr_configuration_sha256(settings),
+            "resource_lane": "cpu_ocr",
+        }
     scanner = (
         WatchedDocumentScanner(
             root=settings.documents_watch_path,
@@ -561,10 +686,10 @@ def main() -> int:
         spool=spool,
         archive=archive,
         ingestion=ingestion,
-        processing=processing,
-        processing_enqueuer=enqueuer if processing is not None else None,
+        processing_services=processing_services,
+        processing_route_metadata=route_metadata,
+        processing_enqueuer=enqueuer if processing_services else None,
         parser_image_digest=settings.docling_image_digest,
-        processing_configuration_sha256=processing_config_hash,
         scanner=scanner,
         reconciler=reconciler,
         process_lease_seconds=settings.document_process_lease_seconds,
@@ -578,6 +703,8 @@ def main() -> int:
         enqueue_server.close()
         if docling_client is not None:
             docling_client.close()
+        if paddleocr_client is not None:
+            paddleocr_client.close()
         if reviews_repository is not None:
             reviews_repository.close()
         archive_client.close()

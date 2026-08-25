@@ -48,6 +48,19 @@ def test_document_compose_profile_is_digest_pinned_segmented_and_least_privilege
     assert docling["environment"]["DOCLING_SERVE_ALLOW_EXTERNAL_PLUGINS"] == "false"
     assert docling["environment"]["DOCLING_SERVE_ALLOWED_SOURCE_TYPES"] == "file"
     assert docling["environment"]["DOCLING_SERVE_ALLOWED_TARGET_TYPES"] == "inbody"
+    paddleocr = services["paddleocr-serve"]
+    assert paddleocr["profiles"] == ["documents-phase4"]
+    assert "ports" not in paddleocr
+    assert paddleocr["networks"] == ["documents-inference"]
+    assert paddleocr["read_only"] is True
+    assert paddleocr["cap_drop"] == ["ALL"]
+    assert paddleocr["environment"]["HF_HUB_OFFLINE"] == "1"
+    assert paddleocr["environment"]["PADDLEOCR_MODEL_ROOT"] == "/models/official_models"
+    assert paddleocr["environment"]["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] == "True"
+    assert "paperless" not in str(paddleocr.get("volumes", [])).casefold()
+    paddle_dockerfile = (REPO_ROOT / "deploy" / "docker" / "Dockerfile.paddleocr").read_text(encoding="utf-8")
+    assert "paddlepaddle/paddle:3.2.0@sha256:" in paddle_dockerfile
+    assert "paddleocr==3.7.0" in paddle_dockerfile
     assert services["paperless-db"]["networks"] == ["paperless-data"]
     assert all(compose["networks"][name]["internal"] for name in (
         "documents-control",

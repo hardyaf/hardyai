@@ -42,3 +42,50 @@ def evaluate_native_artifact(artifact: DocumentArtifact) -> DocumentArtifact:
         review_reasons=tuple(reasons),
     )
     return replace(artifact, quality=quality)
+
+
+def evaluate_conventional_ocr_artifact(artifact: DocumentArtifact) -> DocumentArtifact:
+    text = "\n".join(block.text for block in artifact.blocks)
+    invalid = text.count("\ufffd") + sum(1 for character in text if ord(character) == 0)
+    invalid_rate = invalid / max(1, len(text))
+    confidences = [
+        float(block.confidence)
+        for block in artifact.blocks
+        if block.confidence is not None
+    ]
+    mean_confidence = sum(confidences) / len(confidences) if confidences else 0.0
+    low_confidence = sum(1 for value in confidences if value < 0.55)
+    low_ratio = low_confidence / max(1, len(confidences))
+    page_numbers = {page.page_number for page in artifact.pages}
+    referenced_pages = {block.page_number for block in artifact.blocks}
+    ordered = all(
+        left.reading_order <= right.reading_order
+        for left, right in zip(artifact.blocks, artifact.blocks[1:])
+        if left.page_number == right.page_number
+    )
+    reasons: list[str] = []
+    if len(text.strip()) < 8:
+        reasons.append("ocr_text_near_empty")
+    if confidences and mean_confidence < 0.65:
+        reasons.append("ocr_low_mean_confidence")
+    if confidences and low_ratio > 0.4:
+        reasons.append("ocr_many_low_confidence_lines")
+    if invalid_rate > 0.02:
+        reasons.append("invalid_character_rate")
+    if not artifact.pages or not artifact.blocks:
+        reasons.append("layout_missing")
+    if referenced_pages - page_numbers:
+        reasons.append("evidence_page_missing")
+    if not ordered:
+        reasons.append("reading_order_invalid")
+    quality = QualityReport(
+        text_characters=len(text),
+        page_count=len(artifact.pages),
+        block_count=len(artifact.blocks),
+        invalid_character_rate=invalid_rate,
+        text_coverage_score=min(1.0, len(text.strip()) / max(8.0, len(artifact.pages) * 120.0)),
+        reading_order_complete=ordered and not bool(referenced_pages - page_numbers),
+        processing_complete=not reasons,
+        review_reasons=tuple(reasons),
+    )
+    return replace(artifact, quality=quality)

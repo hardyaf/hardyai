@@ -421,6 +421,14 @@ services:
       DOCLING_IMAGE_DIGEST: "${DOCLING_IMAGE_DIGEST:-sha256:0244089785d5ccb7570dfaa593cdc81ec64a1aadc63ffa9dce065064b0a6a807}"
       DOCLING_TIMEOUT_SECONDS: "${DOCLING_TIMEOUT_SECONDS:-300}"
       DOCLING_MAX_RESPONSE_BYTES: "${DOCLING_MAX_RESPONSE_BYTES:-67108864}"
+      DOCUMENTS_PADDLEOCR_ENABLED: "${DOCUMENTS_PADDLEOCR_ENABLED:-false}"
+      PADDLEOCR_BASE_URL: http://paddleocr-serve:8030
+      PADDLEOCR_API_KEY_PATH: /run/secrets/paddleocr_api_key
+      PADDLEOCR_SERVER_VERSION: "${PADDLEOCR_SERVER_VERSION:-3.7.0}"
+      PADDLEOCR_IMAGE_DIGEST: "${PADDLEOCR_IMAGE_DIGEST:-local-build-required}"
+      PADDLEOCR_MODEL_TIER: "${PADDLEOCR_MODEL_TIER:-small}"
+      PADDLEOCR_TIMEOUT_SECONDS: "${PADDLEOCR_TIMEOUT_SECONDS:-300}"
+      PADDLEOCR_MAX_RESPONSE_BYTES: "${PADDLEOCR_MAX_RESPONSE_BYTES:-67108864}"
       PAPERLESS_BASE_URL: http://paperless-webserver:8000
       PAPERLESS_ARCHIVE_TOKEN_PATH: /run/secrets/paperless_archive_token
       PAPERLESS_READ_USER_ID_PATH: /run/secrets/paperless_read_user_id
@@ -458,6 +466,12 @@ services:
       - type: bind
         source: ${DOCUMENTS_SECRETS_ROOT:-/etc/hardyai/documents-required}/docling_api_key
         target: /run/secrets/docling_api_key
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${DOCUMENTS_SECRETS_ROOT:-/etc/hardyai/documents-required}/paddleocr_api_key
+        target: /run/secrets/paddleocr_api_key
         read_only: true
         bind:
           create_host_path: false
@@ -508,6 +522,10 @@ services:
       DOCUMENTS_DOCLING_ENABLED: "${DOCUMENTS_DOCLING_ENABLED:-false}"
       DOCLING_SERVER_VERSION: "${DOCLING_SERVER_VERSION:-1.30.0}"
       DOCLING_IMAGE_DIGEST: "${DOCLING_IMAGE_DIGEST:-sha256:0244089785d5ccb7570dfaa593cdc81ec64a1aadc63ffa9dce065064b0a6a807}"
+      DOCUMENTS_PADDLEOCR_ENABLED: "${DOCUMENTS_PADDLEOCR_ENABLED:-false}"
+      PADDLEOCR_SERVER_VERSION: "${PADDLEOCR_SERVER_VERSION:-3.7.0}"
+      PADDLEOCR_IMAGE_DIGEST: "${PADDLEOCR_IMAGE_DIGEST:-local-build-required}"
+      PADDLEOCR_MODEL_TIER: "${PADDLEOCR_MODEL_TIER:-small}"
       PAPERLESS_BASE_URL: http://paperless-webserver:8000
       PAPERLESS_READ_TOKEN_PATH: /run/secrets/paperless_read_token
       JARVIS_OPERATOR_API_KEY: ""
@@ -725,6 +743,62 @@ services:
       timeout: 8s
       retries: 24
       start_period: 120s
+
+  paddleocr-serve:
+    image: hardyai-paddleocr:3.7.0
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.paddleocr
+    profiles: ["documents-phase4"]
+    restart: unless-stopped
+    init: true
+    user: "${JARVIS_UID:-1001}:${JARVIS_GID:-1001}"
+    mem_limit: 4g
+    cpus: 4.0
+    pids_limit: 512
+    environment:
+      HOME: /tmp/home
+      PADDLEOCR_API_KEY_PATH: /run/secrets/paddleocr_api_key
+      PADDLEOCR_MODEL_ROOT: /models/official_models
+      PADDLEOCR_MODEL_TIER: "${PADDLEOCR_MODEL_TIER:-small}"
+      PADDLEOCR_CPU_THREADS: "${PADDLEOCR_CPU_THREADS:-4}"
+      PADDLEOCR_MAX_INPUT_BYTES: "${DOCUMENTS_MAX_UPLOAD_BYTES:-52428800}"
+      PADDLEOCR_MAX_IMAGE_PIXELS: "${DOCUMENTS_MAX_IMAGE_PIXELS:-64000000}"
+      PADDLEOCR_MAX_PAGES: "${PADDLEOCR_MAX_PAGES:-100}"
+      PADDLE_PDX_CACHE_HOME: /models
+      PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK: "True"
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      DO_NOT_TRACK: "1"
+    volumes:
+      - type: bind
+        source: ${DOCUMENTS_STORAGE_ROOT:-/mnt/hardyai-documents-required}/models/paddleocr
+        target: /models
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${DOCUMENTS_SECRETS_ROOT:-/etc/hardyai/documents-required}/paddleocr_api_key
+        target: /run/secrets/paddleocr_api_key
+        read_only: true
+        bind:
+          create_host_path: false
+    read_only: true
+    tmpfs:
+      - /tmp:exec,mode=0700,uid=${JARVIS_UID:-1001},gid=${JARVIS_GID:-1001}
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks: [documents-inference]
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import pathlib,urllib.request; key=pathlib.Path('/run/secrets/paddleocr_api_key').read_text().strip(); request=urllib.request.Request('http://127.0.0.1:8030/ready',headers={'X-Api-Key':key}); urllib.request.urlopen(request,timeout=5).read(1)"
+      interval: 15s
+      timeout: 8s
+      retries: 30
+      start_period: 180s
 
 volumes:
   ollama-data:

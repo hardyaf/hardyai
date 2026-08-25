@@ -9,7 +9,10 @@ from typing import Any
 from app.integrations.paperless.adapter import PaperlessReadAdapter
 from app.integrations.paperless.client import PaperlessClient
 from app.jobs.enqueue_ipc import UnixDocumentEnqueueClient
-from app.skills.domains.documents.configuration import native_docling_configuration_sha256
+from app.skills.domains.documents.configuration import (
+    conventional_ocr_configuration_sha256,
+    native_docling_configuration_sha256,
+)
 from app.skills.domains.documents.ingestion import TransientDocumentSpool
 from app.skills.domains.documents.service import DocumentIngestionService
 from app.skills.domains.documents.reprocessing import DocumentReprocessingService
@@ -60,12 +63,27 @@ class DocumentGatewayContainer:
                 DocumentReprocessingService(
                     repository=repository,
                     enqueuer=enqueuer,
-                    parser_name="docling",
-                    parser_version=settings.docling_server_version,
-                    parser_image_digest=settings.docling_image_digest,
-                    configuration_sha256=native_docling_configuration_sha256(settings),
+                    parser_name="docling" if settings.documents_docling_enabled else "",
+                    parser_version=(settings.docling_server_version if settings.documents_docling_enabled else ""),
+                    parser_image_digest=(settings.docling_image_digest if settings.documents_docling_enabled else ""),
+                    configuration_sha256=(
+                        native_docling_configuration_sha256(settings)
+                        if settings.documents_docling_enabled
+                        else ""
+                    ),
+                    conventional_parser_name=(
+                        "paddleocr" if settings.documents_paddleocr_enabled else None
+                    ),
+                    conventional_parser_version=settings.paddleocr_server_version,
+                    conventional_parser_image_digest=settings.paddleocr_image_digest,
+                    conventional_configuration_sha256=(
+                        conventional_ocr_configuration_sha256(settings)
+                        if settings.documents_paddleocr_enabled
+                        else None
+                    ),
                 )
-                if settings.documents_processing_enabled and settings.documents_docling_enabled
+                if settings.documents_processing_enabled
+                and (settings.documents_docling_enabled or settings.documents_paddleocr_enabled)
                 else None
             ),
         )

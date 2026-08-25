@@ -101,3 +101,32 @@ def test_document_reprocess_is_main_operator_only_and_idempotency_bound_to_reque
     assert result["status"] == "queued"
     assert result["run_id"] == "run-2"
     assert result["_persistence_policy"] == "restricted_read"
+
+
+def test_discord_reads_only_the_recent_scoped_attachment_id() -> None:
+    service = DocumentQueryService(gateway=Gateway())
+    context = {
+        "principal_kind": "discord_adapter",
+        "source": "discord",
+        "document_attachment_ids": ["doc-private-1"],
+    }
+    allowed = service.execute(
+        intent="documents.get",
+        entities={"document_id": "doc-private-1"},
+        context=context,
+    )
+    assert allowed["status"] == "ok"
+    assert allowed["evidence"]["evidence"][0]["literal_text"] == "account balance 12345"
+
+    wrong_id = service.execute(
+        intent="documents.get",
+        entities={"document_id": "doc-private-2"},
+        context=context,
+    )
+    search = service.execute(
+        intent="documents.find",
+        entities={"query": "balance"},
+        context=context,
+    )
+    assert wrong_id["status"] == "denied"
+    assert search["status"] == "denied"

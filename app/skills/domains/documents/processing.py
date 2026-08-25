@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import hashlib
 from dataclasses import asdict
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 from app.reviews.service import HumanReviewService
@@ -40,6 +40,7 @@ class DocumentProcessingService:
         reviews: HumanReviewService | None = None,
         max_provider_json_bytes: int = 64 * 1024 * 1024,
         max_markdown_bytes: int = 16 * 1024 * 1024,
+        quality_evaluator: Callable[[Any], Any] = evaluate_native_artifact,
     ) -> None:
         self.repository = repository
         self.archive = archive
@@ -48,6 +49,7 @@ class DocumentProcessingService:
         self.reviews = reviews
         self.max_provider_json_bytes = max(1024, int(max_provider_json_bytes))
         self.max_markdown_bytes = max(1024, int(max_markdown_bytes))
+        self.quality_evaluator = quality_evaluator
 
     def process(
         self,
@@ -118,7 +120,7 @@ class DocumentProcessingService:
             raise DocumentProcessingError(operation.error_code or "parser_failed")
 
         try:
-            artifact = evaluate_native_artifact(
+            artifact = self.quality_evaluator(
                 self.parser.result(
                     operation_ref=operation_ref,
                     document_id=document_id,

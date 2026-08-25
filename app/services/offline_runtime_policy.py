@@ -64,6 +64,10 @@ def validate_offline_runtime(settings: Any, *, entrypoint: str) -> None:
         getattr(settings, "documents_docling_enabled", False)
     ) and not _local_url(str(getattr(settings, "docling_base_url", ""))):
         violations.append("docling_base_url")
+    if bool(getattr(settings, "documents_processing_enabled", False)) and bool(
+        getattr(settings, "documents_paddleocr_enabled", False)
+    ) and not _local_url(str(getattr(settings, "paddleocr_base_url", ""))):
+        violations.append("paddleocr_base_url")
     if bool(getattr(settings, "documents_enabled", False)) and not _local_url(
         str(getattr(settings, "document_gateway_base_url", ""))
     ):

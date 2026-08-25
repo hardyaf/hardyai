@@ -1,8 +1,8 @@
 {
   "artifact": "micro_skills",
-  "compiled_at": "2026-08-25T02:16:57.152706+00:00",
+  "compiled_at": "2026-08-25T15:29:01.199423+00:00",
   "content_hash": "dd2d45b8896231125ba808608d6dfacb50e529ee73a5fe92a041712729e7330c",
   "output_path": "app/prompts/micro_jarvis_skills.md",
   "skill_count": 3,
-  "source_hash": "4b161ea0c043780d4160d9809f3f7516759c47de3248906e5a6acda9553f51f9"
+  "source_hash": "5ad1ee0d50c6a82fc915354af84dacf46b9ac1a26e3ecff6cda71b2e7a42f9de"
 }

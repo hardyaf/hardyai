@@ -445,6 +445,7 @@ def build_ask_request_payload(
     display_name: str | None = None,
     message_id: int | str | None = None,
     skill_scopes: list[str] | None = None,
+    document_attachment_ids: list[str] | None = None,
     micro_command_explicit: bool = False,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
@@ -474,6 +475,12 @@ def build_ask_request_payload(
         payload["context"]["skill_scopes"] = [
             str(item).strip().casefold()
             for item in skill_scopes
+            if str(item).strip()
+        ]
+    if document_attachment_ids:
+        payload["context"]["document_attachment_ids"] = [
+            str(item).strip()
+            for item in document_attachment_ids[:4]
             if str(item).strip()
         ]
     session_value = str(session_id).strip() if isinstance(session_id, str) else ""
@@ -570,6 +577,8 @@ if discord is not None:
             self._attachment_ingress = attachment_ingress
             self._attachment_max_bytes = max(1024, min(int(attachment_max_bytes), 104857600))
             self._attachment_max_per_message = max(1, min(int(attachment_max_per_message), 10))
+            self._attachment_context_ttl_seconds = 1800.0
+            self._attachment_context: dict[tuple[str, str, str], list[tuple[str, float]]] = {}
             self._private_notes_poll_seconds = max(5.0, float(private_notes_poll_seconds))
             self._private_notes_digest_task: asyncio.Task[None] | None = None
             self._private_notes_channels: dict[tuple[str, str], PrivateNotesChannelConfig] = {}
@@ -774,6 +783,7 @@ if discord is not None:
                         title=Path(filename).stem,
                     )
                     receipt = await self._attachment_ingress.submit(descriptor)
+                    self._remember_document_attachment(message=message, document_id=receipt.document_id)
                     if receipt.duplicate:
                         outcomes.append(f"Already received `{receipt.filename}`.")
                     elif receipt.enqueue_confirmed:
@@ -802,6 +812,43 @@ if discord is not None:
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
             return True
+
+        @staticmethod
+        def _attachment_context_key(message: discord.Message) -> tuple[str, str, str]:
+            return (
+                str(message.guild.id) if message.guild else "dm",
+                str(message.channel.id),
+                str(message.author.id),
+            )
+
+        def _remember_document_attachment(self, *, message: discord.Message, document_id: str) -> None:
+            normalized = str(document_id or "").strip()
+            if not normalized:
+                return
+            now = asyncio.get_running_loop().time()
+            expires_at = now + self._attachment_context_ttl_seconds
+            key = self._attachment_context_key(message)
+            current = [
+                (item_id, expiry)
+                for item_id, expiry in self._attachment_context.get(key, [])
+                if expiry > now and item_id != normalized
+            ]
+            current.append((normalized, expires_at))
+            self._attachment_context[key] = current[-4:]
+
+        def _active_document_attachment_ids(self, message: discord.Message) -> list[str]:
+            now = asyncio.get_running_loop().time()
+            key = self._attachment_context_key(message)
+            current = [
+                (document_id, expiry)
+                for document_id, expiry in self._attachment_context.get(key, [])
+                if expiry > now
+            ]
+            if current:
+                self._attachment_context[key] = current
+            else:
+                self._attachment_context.pop(key, None)
+            return [document_id for document_id, _expiry in current]
 
         async def on_message(self, message: discord.Message) -> None:
             if message.author.bot:
@@ -989,6 +1036,7 @@ if discord is not None:
                 ),
                 message_id=message.id,
                 skill_scopes=skill_scopes,
+                document_attachment_ids=self._active_document_attachment_ids(message),
                 micro_command_explicit=command_envelope.micro_command_explicit,
             )
 

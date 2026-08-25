@@ -1791,7 +1791,8 @@ Documents store and are treated as untrusted evidence, never as instructions or 
 
 ## Execution Steps
 
-1. Verify an operator/test principal in the dashboard, web, or test source context.
+1. Verify an operator/test principal, or a Discord adapter read scoped to a recent attachment ID minted for
+   that exact user and channel.
 2. Resolve the registry-authorized Documents handler and bounded gateway port.
 3. Execute only short query/control calls; upload, parsing, and reprocessing run asynchronously.
 4. Return bounded evidence with source references and apply restricted-read persistence suppression.
@@ -1821,7 +1822,10 @@ Documents store and are treated as untrusted evidence, never as instructions or 
 ## Authorization and Persistence
 
 - Main-only. Micro has no document functions and receives no document content.
-- Initially limited to an authenticated operator/dashboard session. Discord and child contexts fail closed.
+- Operator controls remain limited to authenticated dashboard/web sessions. Discord may perform only
+  `documents.status` and `documents.get`, and only for a recent attachment ID supplied by the trusted
+  in-process adapter for that user/channel. Discord cannot search, enumerate, reprocess, show source,
+  list reviews, or propose metadata. Child-policy checks remain authoritative.
 - All content-bearing results use the restricted-read persistence policy: no generic recent-turn,
   conversation-history, memory, ticket, or Plane copy.
 - Generic session context may retain only an opaque document ID, sensitivity label, and generated neutral
@@ -1830,8 +1834,9 @@ Documents store and are treated as untrusted evidence, never as instructions or 
 ## Processing and Review
 
 - Upload, parsing, and reprocessing are asynchronous and never run inside `/ask`.
-- Phase 3 native parsing is local Docling and PDF-only. Images retain the Paperless Phase 1 baseline until
-  the conventional OCR phase is explicitly enabled.
+- Phase 3 native parsing remains local Docling for PDFs. Phase 4 routes JPEG and PNG originals through a
+  separate CPU-only PaddleOCR service with fixed local PP-OCRv6 weights, confidence-aware normalization,
+  and the same immutable artifact/review pipeline. No GPU/VLM fallback is enabled.
 - Reprocessing is idempotent by request ID and creates a new append-only run.
 - Metadata changes and quality failures resolve through the shared HumanReviewService. A proposal is not an
   applied archive change, and no model may approve it.

@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 
 
-DOCUMENT_SCHEMA_VERSION = 7
+DOCUMENT_SCHEMA_VERSION = 8
 
 
 def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -402,6 +402,18 @@ def _migrate_ingress_receipts(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_ocr_block_metadata(conn: sqlite3.Connection) -> None:
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'document_blocks'"
+    ).fetchone() is None:
+        return
+    columns = _columns(conn, "document_blocks")
+    if "confidence" not in columns:
+        conn.execute("ALTER TABLE document_blocks ADD COLUMN confidence REAL")
+    if "language" not in columns:
+        conn.execute("ALTER TABLE document_blocks ADD COLUMN language TEXT")
+
+
 def initialize_document_schema(conn: sqlite3.Connection) -> int:
     """Initialize the private Documents ledger; this DB is never mounted by core Jarvis."""
 
@@ -490,5 +502,10 @@ def initialize_document_schema(conn: sqlite3.Connection) -> int:
     if current < 7:
         _migrate_ingress_receipts(conn)
         conn.execute("PRAGMA user_version = 7")
+        conn.commit()
+        current = 7
+    if current < 8:
+        _migrate_ocr_block_metadata(conn)
+        conn.execute("PRAGMA user_version = 8")
         conn.commit()
     return DOCUMENT_SCHEMA_VERSION

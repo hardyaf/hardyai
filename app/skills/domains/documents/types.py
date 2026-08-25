@@ -119,6 +119,8 @@ class NormalizedBlock:
     bbox: tuple[float, float, float, float] | None
     char_span: tuple[int, int] | None
     provider_ref: str | None
+    confidence: float | None = None
+    language: str | None = None
 
 
 @dataclass(frozen=True)

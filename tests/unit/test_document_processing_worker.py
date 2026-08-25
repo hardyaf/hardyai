@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 
@@ -10,6 +11,7 @@ from app.skills.domains.documents.ingestion import TransientDocumentSpool
 from app.skills.domains.documents.ports import ArchiveTask
 from app.skills.domains.documents.service import DocumentIngestionService
 from app.skills.domains.documents.storage import DocumentRepository
+from app.skills.domains.documents.types import ProcessingRoute, ProcessingState
 from app.workers.document_processing_worker import DocumentProcessingWorker
 
 
@@ -109,6 +111,60 @@ def test_worker_verifies_original_before_ready_and_removes_spool(tmp_path) -> No
     assert jobs.list_jobs(job_type="document.archive.v1")[0]["status"] == "completed"
     jobs.close()
     documents.close()
+
+
+def test_worker_routes_images_to_conventional_ocr_without_changing_pdf_route() -> None:
+    class DocumentsStub:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def create_processing_run(self, **kwargs):
+            self.calls.append(kwargs)
+            return {"run_id": "ocr-run", "source_version_id": "source-1"}
+
+    class EnqueuerStub:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def enqueue_processing(self, **kwargs):
+            self.calls.append(kwargs)
+            return "job-1"
+
+    parser = SimpleNamespace(provider_name="paddleocr", provider_version="3.7.0")
+    processor = SimpleNamespace(parser=parser)
+    documents = DocumentsStub()
+    enqueuer = EnqueuerStub()
+    worker = DocumentProcessingWorker(
+        jobs=SimpleNamespace(),
+        documents=documents,
+        spool=SimpleNamespace(),
+        archive=SimpleNamespace(),
+        processing_services={ProcessingRoute.CONVENTIONAL_OCR: processor},
+        processing_route_metadata={
+            ProcessingRoute.CONVENTIONAL_OCR: {
+                "image_digest": "sha256:" + "a" * 64,
+                "configuration_sha256": "b" * 64,
+                "resource_lane": "cpu_ocr",
+            }
+        },
+        processing_enqueuer=enqueuer,
+    )
+    worker._ensure_processing_queued(
+        SimpleNamespace(
+            document_id="document-1",
+            source_version_id="source-1",
+            media_type="image/jpeg",
+            processing_state=ProcessingState.NOT_REQUESTED,
+        )
+    )
+
+    assert documents.calls[0]["route"] == ProcessingRoute.CONVENTIONAL_OCR
+    assert documents.calls[0]["resource_lane"] == "cpu_ocr"
+    assert enqueuer.calls == [{
+        "document_id": "document-1",
+        "source_version_id": "source-1",
+        "run_id": "ocr-run",
+    }]
 
 
 def test_ready_job_recovery_removes_spool_after_crash_window(tmp_path) -> None:

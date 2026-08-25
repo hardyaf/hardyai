@@ -254,6 +254,14 @@ class Settings:
     docling_image_digest: str
     docling_timeout_seconds: float
     docling_max_response_bytes: int
+    documents_paddleocr_enabled: bool
+    paddleocr_base_url: str
+    paddleocr_api_key_path: str
+    paddleocr_server_version: str
+    paddleocr_image_digest: str
+    paddleocr_model_tier: str
+    paddleocr_timeout_seconds: float
+    paddleocr_max_response_bytes: int
     document_gateway_base_url: str
     document_gateway_operator_key_path: str
     paperless_base_url: str
@@ -696,6 +704,26 @@ settings = Settings(
     docling_max_response_bytes=max(
         1024,
         min(_as_int("DOCLING_MAX_RESPONSE_BYTES", 67108864), 268435456),
+    ),
+    documents_paddleocr_enabled=_as_bool("DOCUMENTS_PADDLEOCR_ENABLED", False),
+    paddleocr_base_url=os.getenv(
+        "PADDLEOCR_BASE_URL",
+        "http://paddleocr-serve:8030",
+    ).rstrip("/"),
+    paddleocr_api_key_path=os.getenv(
+        "PADDLEOCR_API_KEY_PATH",
+        "/run/secrets/paddleocr_api_key",
+    ),
+    paddleocr_server_version=os.getenv("PADDLEOCR_SERVER_VERSION", "3.7.0").strip(),
+    paddleocr_image_digest=os.getenv("PADDLEOCR_IMAGE_DIGEST", "local-build-required").strip(),
+    paddleocr_model_tier=os.getenv("PADDLEOCR_MODEL_TIER", "small").strip().casefold(),
+    paddleocr_timeout_seconds=max(
+        1.0,
+        min(_as_float("PADDLEOCR_TIMEOUT_SECONDS", 300.0), 900.0),
+    ),
+    paddleocr_max_response_bytes=max(
+        1024,
+        min(_as_int("PADDLEOCR_MAX_RESPONSE_BYTES", 67108864), 268435456),
     ),
     document_gateway_base_url=os.getenv(
         "DOCUMENT_GATEWAY_BASE_URL",

@@ -49,7 +49,7 @@ def test_v5_artifact_storage_key_migration_preserves_links_and_allows_run_reuse(
         """
     )
 
-    assert initialize_document_schema(connection) == DOCUMENT_SCHEMA_VERSION == 7
+    assert initialize_document_schema(connection) == DOCUMENT_SCHEMA_VERSION == 8
     connection.execute(
         """
         INSERT INTO document_artifacts VALUES (
@@ -74,10 +74,22 @@ def test_v6_migration_adds_durable_channel_ingress_receipts(tmp_path) -> None:
     connection.execute("PRAGMA user_version = 6")
     connection.commit()
 
-    assert initialize_document_schema(connection) == 7
+    assert initialize_document_schema(connection) == 8
     columns = {
         row[1] for row in connection.execute("PRAGMA table_info(document_ingress_receipts)")
     }
     assert columns == {"ingress_source", "external_id", "owner_id", "document_id", "created_at"}
     assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+    connection.close()
+
+
+def test_v7_migration_adds_ocr_confidence_and_language_columns(tmp_path) -> None:
+    connection = sqlite3.connect(tmp_path / "documents.db")
+    initialize_document_schema(connection)
+    connection.execute("PRAGMA user_version = 7")
+    connection.commit()
+
+    assert initialize_document_schema(connection) == 8
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(document_blocks)")}
+    assert {"confidence", "language"} <= columns
     connection.close()

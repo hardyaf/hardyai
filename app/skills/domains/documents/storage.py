@@ -224,6 +224,20 @@ class DocumentRepository:
             ).fetchall()
         return [self._record(row) for row in rows]
 
+    def ready_unprocessed(self, *, limit: int = 100) -> list[DocumentRecord]:
+        with self._lock:
+            rows = self._conn.execute(
+                self._select_sql()
+                + " WHERE d.state = ? AND d.processing_state = ? "
+                "ORDER BY d.created_at LIMIT ?",
+                (
+                    DocumentState.READY.value,
+                    ProcessingState.NOT_REQUESTED.value,
+                    max(1, min(int(limit), 1000)),
+                ),
+            ).fetchall()
+        return [self._record(row) for row in rows]
+
     def state_counts(self) -> dict[str, int]:
         with self._lock:
             rows = self._conn.execute(
@@ -1040,8 +1054,9 @@ class DocumentRepository:
                     INSERT INTO document_blocks (
                         run_id, block_id, document_id, source_version_id,
                         page_number, block_kind, reading_order, literal_text,
-                        bbox_json, char_span_json, provider_ref, sensitivity
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        bbox_json, char_span_json, provider_ref, sensitivity,
+                        confidence, language
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         run_id,
@@ -1056,6 +1071,12 @@ class DocumentRepository:
                         json.dumps(block.get("char_span")) if block.get("char_span") is not None else None,
                         str(block.get("provider_ref"))[:240] if block.get("provider_ref") else None,
                         Sensitivity(sensitivity).value,
+                        (
+                            max(0.0, min(float(block["confidence"]), 1.0))
+                            if block.get("confidence") is not None
+                            else None
+                        ),
+                        str(block.get("language"))[:40] if block.get("language") else None,
                     ),
                 )
 

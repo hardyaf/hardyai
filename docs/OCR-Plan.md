@@ -1,6 +1,6 @@
 # HardyAI Document Intelligence Implementation Plan
 
-Status: Phases 1-3 implemented and deployed on the CPU-only path; Phase 4 and later are not started
+Status: Phases 1-4 implemented and deployed on the CPU-only path; Phase 5 and later are not started
 
 Prepared: 2026-08-24
 
@@ -9,11 +9,12 @@ Updated: 2026-08-25
 Requirements: `docs/OCR-Req.md`
 Repository baseline: HardyAI commit `0ab682d77256989772b07a432ce7c24698f82678`
 
-Implementation checkpoint: Phase 1 is closed, and the Phase 2 platform seams plus the Phase 3
-born-digital-PDF/Docling route have passed deployed acceptance. See
-`docs/OCR-Phase2-3-Checkpoint.md` for the exact release, tests, benchmark, restore drill, and remaining
-boundaries. JPEG/PNG still use the Paperless baseline. Office parsing, PP-OCRv6, PP-Structure,
-PaddleOCR-VL, GPU scheduling/fallback, extraction/classification, and downstream actions remain disabled.
+Implementation checkpoint: Phase 1 is closed, the Phase 2 platform seams plus the Phase 3
+born-digital-PDF/Docling route have passed deployed acceptance, and the Phase 4 CPU-only PP-OCRv6 route
+is deployed for JPEG/PNG. See `docs/OCR-Phase2-3-Checkpoint.md` and
+`docs/OCR-Phase4-Checkpoint.md` for exact releases, tests, benchmarks, restore/rollback evidence, and
+remaining boundaries. Office parsing, PP-Structure, PaddleOCR-VL, document GPU use and arbitration,
+extraction/classification, and downstream actions remain disabled.
 
 ## Executive decision
 
@@ -1451,6 +1452,11 @@ Office/PDF parsers substantially expand parser risk. Start with PDF only if sand
 All extracted metadata changes and downstream proposals. Source-grounded read-only answers require normal access authorization, not separate approval.
 
 ### Phase 4 - PP-OCRv6 conventional OCR and routing benchmark
+
+Implementation status (2026-08-25): deployed on `hardybot` using the selected PP-OCRv6 tiny CPU route.
+Tiny, small, and medium CPU tiers passed the synthetic canary corpus; tiny was both the smallest and the
+fastest. GPU benchmarking and all GPU-backed document processing were deliberately deferred to Phase 5,
+where shared accelerator admission is a prerequisite. See `docs/OCR-Phase4-Checkpoint.md`.
 
 **Objective**
 

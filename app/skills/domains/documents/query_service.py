@@ -36,22 +36,59 @@ class DocumentQueryService:
     def _authorized(context: dict[str, Any]) -> bool:
         principal_kind = str(context.get("principal_kind") or "").strip().casefold()
         source = str(context.get("source") or context.get("request_source") or "dashboard").casefold()
-        return principal_kind in {"operator", "test"} and source in {
+        operator_authorized = principal_kind in {"operator", "test"} and source in {
             "dashboard",
             "web",
             "test",
         }
+        discord_ids = DocumentQueryService._discord_document_ids(context)
+        return operator_authorized or (
+            principal_kind == "discord_adapter" and source == "discord" and bool(discord_ids)
+        )
+
+    @staticmethod
+    def _discord_document_ids(context: dict[str, Any]) -> frozenset[str]:
+        raw = context.get("document_attachment_ids")
+        if not isinstance(raw, list):
+            return frozenset()
+        return frozenset(
+            str(item).strip()
+            for item in raw[:4]
+            if isinstance(item, str) and str(item).strip()
+        )
+
+    @classmethod
+    def _intent_authorized(
+        cls,
+        *,
+        intent: str,
+        document_id: str,
+        context: dict[str, Any],
+    ) -> bool:
+        principal_kind = str(context.get("principal_kind") or "").strip().casefold()
+        if principal_kind != "discord_adapter":
+            return cls._authorized(context)
+        return (
+            intent in {"documents.status", "documents.get"}
+            and bool(document_id)
+            and document_id in cls._discord_document_ids(context)
+        )
 
     def capability_access(self, *, context: dict[str, Any]) -> dict[str, Any]:
         authorized = self._authorized(context)
         configured = bool(self.gateway)
         available = configured and authorized and self.gateway.ready()
+        discord_scoped = str(context.get("principal_kind") or "").strip().casefold() == "discord_adapter"
         return {
             "configured": configured,
             "authorized_here": authorized,
             "availability": "available" if available else "restricted" if configured else "disabled",
             "access_note": (
-                "Document search and controls are available in this operator session."
+                (
+                    "The recent Discord attachment can be read in this user/channel context."
+                    if discord_scoped
+                    else "Document search and controls are available in this operator session."
+                )
                 if available
                 else "Documents require an authenticated operator session and a ready local gateway."
             ),
@@ -67,11 +104,19 @@ class DocumentQueryService:
         normalized_intent = str(intent or "").strip().casefold()
         if normalized_intent not in DOCUMENT_INTENTS:
             return self._restricted({"status": "unsupported", "message": "Unsupported document action."})
-        if not self._authorized(context):
+        document_id = str(entities.get("document_id") or entities.get("id") or "").strip()
+        if not self._intent_authorized(
+            intent=normalized_intent,
+            document_id=document_id,
+            context=context,
+        ):
             return self._restricted(
                 {
                     "status": "denied",
-                    "message": "Documents are available only in an authenticated operator session.",
+                    "message": (
+                        "Discord can read only a recent attachment from this user and channel; "
+                        "document controls require an authenticated operator session."
+                    ),
                 }
             )
         try:

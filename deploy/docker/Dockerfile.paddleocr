@@ -1,0 +1,27 @@
+FROM paddlepaddle/paddle:3.2.0@sha256:15e9870bce02d059a53da1e676fa9f9aa3e22b672a4d05cffddda0e6a720eb5b
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+WORKDIR /opt/hardyai-ocr
+
+RUN python -m pip uninstall --yes PyGObject \
+    && python -m pip install --no-cache-dir \
+      paddleocr==3.7.0 \
+      fastapi==0.141.1 \
+      starlette==1.3.1 \
+      uvicorn==0.35.0 \
+      pydantic==2.11.9 \
+      pypdf==6.0.0 \
+    && python -m pip check
+
+COPY app/api/__init__.py /opt/hardyai-ocr/app/api/__init__.py
+COPY app/api/paddleocr_app.py /opt/hardyai-ocr/app/api/paddleocr_app.py
+COPY scripts/provision_paddleocr_models.py /opt/hardyai-ocr/scripts/provision_paddleocr_models.py
+COPY scripts/generate_phase4_ocr_fixtures.py /opt/hardyai-ocr/scripts/generate_phase4_ocr_fixtures.py
+COPY scripts/benchmark_paddleocr.py /opt/hardyai-ocr/scripts/benchmark_paddleocr.py
+RUN touch /opt/hardyai-ocr/app/__init__.py \
+    && chmod -R a+rX /opt/hardyai-ocr/app /opt/hardyai-ocr/scripts
+
+CMD ["python", "-m", "uvicorn", "app.api.paddleocr_app:app", "--host", "0.0.0.0", "--port", "8030", "--workers", "1", "--no-access-log"]

@@ -648,3 +648,68 @@ def test_unauthorized_channel_never_submits_attachment(tmp_path):
 
     ingress.submit.assert_not_awaited()
     channel.send.assert_not_awaited()
+
+
+def test_attachment_caption_carries_only_recent_user_channel_document_ids(tmp_path):
+    class AttachmentIngressStub:
+        async def submit(self, descriptor):
+            return DiscordAttachmentReceipt(
+                filename=descriptor.filename,
+                document_id="doc-caption-1",
+                intake_id="intake-caption-1",
+                state="queued",
+                duplicate=False,
+                enqueue_confirmed=True,
+            )
+
+    class TurnServiceStub:
+        def __init__(self) -> None:
+            self.requests = []
+
+        async def route(self, request, **_kwargs):
+            self.requests.append(request)
+            return {
+                "intent": "documents.get",
+                "route": "main_jarvis_commitment",
+                "result": {"status": "ok", "message": "I can read the attachment."},
+                "dialog": {},
+            }
+
+    permissions = tmp_path / "discord_permissions.yaml"
+    permissions.write_text(
+        "version: 1\ndefaults:\n  command_prefix: \"!\"\n  require_prefix: false\n"
+        "  allowed_guild_ids: [100]\nguilds:\n  - guild_id: 100\n"
+        "    allowed_channel_ids: [200]\n    allowed_user_ids: [300]\n",
+        encoding="utf-8",
+    )
+    turn_service = TurnServiceStub()
+    bot = DiscordJarvisBot(
+        command_prefix="!",
+        permissions_path=str(permissions),
+        turn_service=turn_service,
+        attachment_ingress=AttachmentIngressStub(),
+        attachment_max_bytes=1024,
+    )
+    channel = SimpleNamespace(id=200, send=AsyncMock())
+    message = SimpleNamespace(
+        id=401,
+        author=SimpleNamespace(
+            bot=False, id=300, roles=[], display_name="Taylor", global_name=None, name="taylor"
+        ),
+        guild=SimpleNamespace(id=100),
+        channel=channel,
+        content="what is in this image?",
+        attachments=[SimpleNamespace(
+            id=500,
+            filename="receipt.png",
+            content_type="image/png",
+            size=512,
+            url="https://cdn.discordapp.com/attachments/200/500/receipt.png",
+        )],
+    )
+
+    asyncio.run(bot.on_message(message))
+
+    assert turn_service.requests[0].context["document_attachment_ids"] == ["doc-caption-1"]
+    assert "doc-caption-1" not in turn_service.requests[0].text
+    assert channel.send.await_count == 3

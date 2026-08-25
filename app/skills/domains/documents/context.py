@@ -46,6 +46,51 @@ class DocumentsContextContract:
         rows = result.get("document_context_entities")
         return [dict(item) for item in rows if isinstance(item, dict)] if isinstance(rows, list) else []
 
+    def enrich_working_context(
+        self,
+        *,
+        request_context: dict[str, Any],
+        working_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        raw_ids = request_context.get("document_attachment_ids")
+        if not isinstance(raw_ids, list):
+            return {}
+        ids = [
+            str(item).strip()
+            for item in raw_ids[:4]
+            if isinstance(item, str) and str(item).strip()
+        ]
+        if not ids:
+            return {}
+        existing = working_context.get("entity_hints")
+        hints = [dict(item) for item in existing if isinstance(item, dict)] if isinstance(existing, list) else []
+        known = {
+            str(item.get("entity_id") or "").strip()
+            for item in hints
+            if str(item.get("domain") or "").casefold() == "documents"
+        }
+        for index, document_id in enumerate(ids):
+            if document_id in known:
+                continue
+            hints.append(
+                {
+                    "domain": "documents",
+                    "entity_type": "document",
+                    "entity_id": document_id,
+                    "display_name": "recent Discord attachment",
+                    "aliases": ["this image", "this attachment", "the image"],
+                    "salience": max(0.7, 1.0 - (index * 0.1)),
+                    "resolution_hints": {"document_id": document_id, "source": "discord_attachment"},
+                }
+            )
+        return {
+            "entity_hints": hints,
+            "active_skill_context": {
+                "attached_document_ids": ids,
+                "last_document_id": ids[-1],
+            },
+        }
+
     def resolve_followup(
         self,
         *,
