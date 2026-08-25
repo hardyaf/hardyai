@@ -10,6 +10,11 @@ from app.context.summarizer import SessionSummaryManager
 from app.core.assistant_response import build_assistant_payload
 from app.core.session_store import SessionRecord, SessionStore
 from app.core.pending_interaction import PendingInteractionCoordinator
+from app.core.persistence_policy import (
+    PersistencePolicy,
+    most_restrictive_persistence_policy,
+    persistence_policy_for_intent,
+)
 from app.core.state_machine import RuntimePowerController
 from app.core.types import (
     EMAIL_AGENT_INTENTS,
@@ -30,9 +35,11 @@ class TurnFinalizationOptions:
     """Select optional history work without changing response/ticket semantics."""
 
     record_context_history: bool = True
+    record_recent_turns: bool = True
     record_conversation_history: bool = True
     record_memory: bool = True
     capture_ticket: bool = True
+    persistence_policy: PersistencePolicy | None = None
 
 
 class TurnFinalizer:
@@ -92,7 +99,13 @@ class TurnFinalizer:
         finalization = options or TurnFinalizationOptions()
         effective_request_id = str(request_id or uuid4())
         internal_result_payload = dict(result)
-        if finalization.record_context_history:
+        declared_policy = internal_result_payload.pop("_persistence_policy", None)
+        policy = most_restrictive_persistence_policy(
+            persistence_policy_for_intent(intent.value),
+            declared_policy,
+            finalization.persistence_policy,
+        )
+        if finalization.record_context_history and policy.record_entity_context:
             self._update_session_context_from_result(
                 session=session,
                 intent=intent,
@@ -185,7 +198,11 @@ class TurnFinalizer:
             },
         }
 
-        if self._action_ticket_service is not None and finalization.capture_ticket:
+        if (
+            self._action_ticket_service is not None
+            and finalization.capture_ticket
+            and policy.capture_ticket
+        ):
             capture = self._action_ticket_service.capture_response(
                 request_id=effective_request_id,
                 session_id=session.session_id,
@@ -220,8 +237,11 @@ class TurnFinalizer:
             delivery["ticket"] = {"status": "not_applicable"}
 
         result_status = str(result_payload.get("status") or "").strip().lower() or None
-        sensitive_email_turn = intent in EMAIL_AGENT_INTENTS
-        if finalization.record_context_history and not sensitive_email_turn:
+        if (
+            finalization.record_context_history
+            and finalization.record_recent_turns
+            and policy.record_recent_turns
+        ):
             self._record_recent_turn_exchange(
                 session=session,
                 request_text=request_text,
@@ -237,7 +257,7 @@ class TurnFinalizer:
                 route=route,
                 result_status=result_status,
             )
-        if finalization.record_conversation_history and not sensitive_email_turn:
+        if finalization.record_conversation_history and policy.record_conversation_history:
             self._record_conversation_topic_turn(
                 session=session,
                 skill=skill,
@@ -255,7 +275,7 @@ class TurnFinalizer:
         if (
             finalization.record_memory
             and self._memory_service is not None
-            and not sensitive_email_turn
+            and policy.record_memory
         ):
             delivery["memory"] = self._record_memory_interaction(
                 request_id=effective_request_id,
@@ -631,8 +651,8 @@ class TurnFinalizer:
         ambiguity_flags_raw = classification.get("ambiguity_flags")
         ambiguity_flags = {
             str(item).strip().lower()
-            for item in ambiguity_flags_raw
-            if isinstance(ambiguity_flags_raw, list) and str(item).strip()
+            for item in (ambiguity_flags_raw if isinstance(ambiguity_flags_raw, list) else [])
+            if str(item).strip()
         }
         if {"clarification_pending", "clarification_completed", "cancelled_pending_clarification"} & ambiguity_flags:
             return True

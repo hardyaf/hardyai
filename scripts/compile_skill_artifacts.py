@@ -23,7 +23,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--micro-output",
-        default="app/prompts/skills/micro_jarvis_skills.md",
+        default="app/prompts/micro_jarvis_skills.md",
         help="Output path for compiled micro allowlist markdown.",
     )
     parser.add_argument(

@@ -11,6 +11,10 @@ import uuid
 
 from app.api.principals import discord_adapter_principal
 from app.core.assistant_response import build_assistant_payload
+from app.integrations.discord_attachment.types import (
+    DiscordAttachmentDescriptor,
+    DiscordAttachmentIngressPort,
+)
 from app.schemas.api import AskRequest
 from app.skills.domains.private_notes.service import PrivateNotesChannelConfig
 
@@ -551,6 +555,9 @@ if discord is not None:
             private_notes_service: Any | None = None,
             private_notes_poll_seconds: float = 30.0,
             turn_service: Any | None = None,
+            attachment_ingress: DiscordAttachmentIngressPort | None = None,
+            attachment_max_bytes: int = 52428800,
+            attachment_max_per_message: int = 4,
         ) -> None:
             intents = discord.Intents.default()
             intents.message_content = True
@@ -560,6 +567,9 @@ if discord is not None:
             self._permissions_policy = load_discord_permissions_policy(self._permissions_path)
             self._private_notes_service = private_notes_service
             self._turn_service = turn_service
+            self._attachment_ingress = attachment_ingress
+            self._attachment_max_bytes = max(1024, min(int(attachment_max_bytes), 104857600))
+            self._attachment_max_per_message = max(1, min(int(attachment_max_per_message), 10))
             self._private_notes_poll_seconds = max(5.0, float(private_notes_poll_seconds))
             self._private_notes_digest_task: asyncio.Task[None] | None = None
             self._private_notes_channels: dict[tuple[str, str], PrivateNotesChannelConfig] = {}
@@ -706,6 +716,93 @@ if discord is not None:
                         error=error_summary,
                     )
 
+        async def _handle_document_attachments(self, message: discord.Message) -> bool:
+            attachments = list(getattr(message, "attachments", None) or [])
+            if not attachments:
+                return False
+            if self._attachment_ingress is None:
+                await message.channel.send(
+                    "Document attachment intake is not enabled yet.",
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                return True
+
+            accepted_extensions = {".pdf", ".jpg", ".jpeg", ".png"}
+            candidates: list[Any] = []
+            rejected: list[str] = []
+            for attachment in attachments[: self._attachment_max_per_message]:
+                filename = str(getattr(attachment, "filename", "") or "").strip()
+                size = getattr(attachment, "size", 0)
+                try:
+                    size_bytes = int(size)
+                except (TypeError, ValueError):
+                    size_bytes = 0
+                if Path(filename).suffix.casefold() not in accepted_extensions:
+                    rejected.append(filename or "unnamed attachment")
+                    continue
+                if size_bytes <= 0 or size_bytes > self._attachment_max_bytes:
+                    rejected.append(filename or "unnamed attachment")
+                    continue
+                candidates.append(attachment)
+
+            if len(attachments) > self._attachment_max_per_message:
+                rejected.extend(
+                    str(getattr(item, "filename", "") or "additional attachment")
+                    for item in attachments[self._attachment_max_per_message :]
+                )
+            if candidates:
+                await message.channel.send(
+                    f"Securely submitting {len(candidates)} document attachment"
+                    f"{'s' if len(candidates) != 1 else ''}…",
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+
+            outcomes: list[str] = []
+            for attachment in candidates:
+                filename = str(getattr(attachment, "filename", "") or "").strip()
+                try:
+                    descriptor = DiscordAttachmentDescriptor(
+                        guild_id=str(message.guild.id) if message.guild else None,
+                        channel_id=str(message.channel.id),
+                        user_id=str(message.author.id),
+                        message_id=str(message.id),
+                        attachment_id=str(attachment.id),
+                        filename=filename,
+                        content_type=str(getattr(attachment, "content_type", "") or ""),
+                        size_bytes=int(attachment.size),
+                        source_url=str(attachment.url),
+                        title=Path(filename).stem,
+                    )
+                    receipt = await self._attachment_ingress.submit(descriptor)
+                    if receipt.duplicate:
+                        outcomes.append(f"Already received `{receipt.filename}`.")
+                    elif receipt.enqueue_confirmed:
+                        outcomes.append(f"Queued `{receipt.filename}` for secure local archiving.")
+                    else:
+                        outcomes.append(
+                            f"Accepted `{receipt.filename}` securely; archival enqueue recovery is pending."
+                        )
+                except Exception as exc:
+                    print(
+                        "[discord] attachment intake failed "
+                        f"guild={getattr(message.guild, 'id', None)} "
+                        f"channel={getattr(message.channel, 'id', None)} "
+                        f"error={summarize_discord_api_error(exc)}"
+                    )
+                    outcomes.append(f"Could not accept `{filename or 'attachment'}`.")
+            if rejected:
+                outcomes.append(
+                    "Skipped unsupported, empty, oversized, or excess attachments: "
+                    + ", ".join(f"`{name}`" for name in rejected[:10])
+                    + ". PDF, JPEG, and PNG are accepted."
+                )
+            if outcomes:
+                await message.channel.send(
+                    "\n".join(outcomes),
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            return True
+
         async def on_message(self, message: discord.Message) -> None:
             if message.author.bot:
                 return
@@ -735,6 +832,7 @@ if discord is not None:
             if private_notes_config is not None:
                 if str(user_id) not in private_notes_config.allowed_user_ids:
                     return
+                await self._handle_document_attachments(message)
                 if self._private_notes_service is None:
                     print(
                         f"[discord] private notes capture unavailable guild={guild_id} channel={channel_id}"
@@ -838,6 +936,10 @@ if discord is not None:
                 elif not (role_ids & allowed_role_ids):
                     return
 
+            attachments_handled = await self._handle_document_attachments(message)
+            if attachments_handled and not str(getattr(message, "content", "") or "").strip():
+                return
+
             command_envelope = parse_discord_message_envelope(
                 content=message.content,
                 prefix=self._command_prefix,
@@ -924,10 +1026,16 @@ else:
             private_notes_service: Any | None = None,
             private_notes_poll_seconds: float = 30.0,
             turn_service: Any | None = None,
+            attachment_ingress: DiscordAttachmentIngressPort | None = None,
+            attachment_max_bytes: int = 52428800,
+            attachment_max_per_message: int = 4,
         ) -> None:
             del private_notes_service
             del private_notes_poll_seconds
             del turn_service
+            del attachment_ingress
+            del attachment_max_bytes
+            del attachment_max_per_message
             raise RuntimeError(
                 "discord.py is not installed. Install dependencies with `pip install -r requirements.txt`."
             )

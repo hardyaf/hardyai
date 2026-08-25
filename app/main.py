@@ -14,11 +14,15 @@ from app.api.routes.house import router as house_router
 from app.api.routes.tickets import router as tickets_router
 from app.api.routes.identities import router as identities_router
 from app.api.routes.operator_session import router as operator_session_router
+from app.api.routes.jobs import router as jobs_router
+from app.api.routes.reviews import router as reviews_router
 from app.api.operator_auth import validate_security_configuration
 from app.api.security_headers import SECURITY_HEADERS
 from app.container import ApplicationContainer
+from app.integrations.discord_attachment.client import DiscordAttachmentIngressClient
 from app.services.clock_scheduler import BoundedClockScheduler, ClockJob
 from app.services.discord.bot import DiscordJarvisBot
+from app.services.offline_runtime_policy import validate_offline_runtime
 
 
 def _report_discord_task_result(task: asyncio.Task[None]) -> None:
@@ -42,7 +46,9 @@ async def _lifespan(application: FastAPI):
     container: ApplicationContainer = application.state.container
     settings = container.settings
     validate_security_configuration()
+    validate_offline_runtime(settings, entrypoint="core-api")
     discord_bot: DiscordJarvisBot | None = None
+    discord_attachment_ingress: DiscordAttachmentIngressClient | None = None
     discord_task: asyncio.Task[None] | None = None
     clock_task: asyncio.Task[None] | None = None
     durable_write_task: asyncio.Task[None] | None = None
@@ -83,6 +89,12 @@ async def _lifespan(application: FastAPI):
         token = settings.discord_bot_token.strip()
         if not token:
             raise RuntimeError("DISCORD_ENABLED=true but DISCORD_BOT_TOKEN is empty.")
+        if bool(getattr(settings, "discord_attachment_ingress_enabled", False)):
+            discord_attachment_ingress = DiscordAttachmentIngressClient(
+                base_url=settings.discord_attachment_ingress_base_url,
+                operator_key_path=settings.document_gateway_operator_key_path,
+                timeout_seconds=settings.discord_attachment_ingress_timeout_seconds,
+            )
         discord_bot = DiscordJarvisBot(
             command_prefix=settings.discord_command_prefix,
             command_channel_id=settings.discord_command_channel_id,
@@ -90,6 +102,9 @@ async def _lifespan(application: FastAPI):
             permissions_path=settings.discord_permissions_path,
             private_notes_service=container.private_notes_service,
             turn_service=container.turn_service,
+            attachment_ingress=discord_attachment_ingress,
+            attachment_max_bytes=settings.documents_max_upload_bytes,
+            attachment_max_per_message=settings.discord_attachment_max_per_message,
         )
         await discord_bot.login(token)
         discord_task = asyncio.create_task(discord_bot.connect(reconnect=True))
@@ -107,6 +122,9 @@ async def _lifespan(application: FastAPI):
             discord_task.cancel()
             with suppress(asyncio.CancelledError, Exception):
                 await discord_task
+        if discord_attachment_ingress is not None:
+            with suppress(Exception):
+                await discord_attachment_ingress.close()
         if clock_task is not None:
             clock_task.cancel()
             with suppress(asyncio.CancelledError, Exception):
@@ -142,6 +160,8 @@ def create_app(container: ApplicationContainer | None = None) -> FastAPI:
     application.include_router(tickets_router)
     application.include_router(identities_router)
     application.include_router(operator_session_router)
+    application.include_router(jobs_router)
+    application.include_router(reviews_router)
     application.include_router(dashboard_router)
     return application
 

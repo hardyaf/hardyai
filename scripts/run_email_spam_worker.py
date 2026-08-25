@@ -16,6 +16,7 @@ from app.services.google.gmail_spam_writer import GoogleGmailSpamWriter
 from app.skills.domains.email_agent.config import EmailAgentPermissions
 from app.skills.domains.email_agent.spam_worker import EmailSpamWorker, EmailSpamWorkerConfig
 from app.skills.domains.email_agent.storage import EmailAgentSQLiteStorage
+from app.services.offline_runtime_policy import validate_offline_runtime
 
 
 def main() -> int:
@@ -23,6 +24,7 @@ def main() -> int:
         description="Run one bounded claim cycle for explicit Jarvis Gmail mailbox operations."
     )
     parser.parse_args()
+    validate_offline_runtime(settings, entrypoint="email-mailbox-worker")
     if not settings.email_agent_enabled or not (
         settings.email_agent_spam_writes_enabled
         or settings.email_agent_label_writes_enabled

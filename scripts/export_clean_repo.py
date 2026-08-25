@@ -13,6 +13,7 @@ SOURCE_ROOT = Path(__file__).resolve().parents[1]
 PUBLIC_FILES = {
     ".dockerignore",
     ".env.example",
+    ".gitattributes",
     ".gitignore",
     ".pre-commit-config.yaml",
     "README.md",
@@ -21,7 +22,7 @@ PUBLIC_FILES = {
     "requirements-dev.txt",
     "requirements.txt",
 }
-PUBLIC_DIRECTORIES = {".github", "app", "deploy", "docs", "scripts", "tests"}
+PUBLIC_DIRECTORIES = {".github", "app", "benchmarks", "deploy", "docs", "scripts", "tests"}
 EXCLUDED_RELATIVE_PATHS = {
     Path("docs/runtime-authority-and-windows-decommission.md"),
     Path("docs/ubuntu-24.04-first-install.md"),

@@ -118,6 +118,9 @@ class JarvisRouter:
         action_ticket_service: "ActionTicketService | None" = None,
         identity_service: "ExternalIdentityService | None" = None,
         email_agent_service: Any | None = None,
+        documents_service: Any | None = None,
+        skill_service_bindings: dict[str, Any] | None = None,
+        skill_context_contracts: list[Any] | None = None,
         durable_write_service: DurableWriteService | None = None,
     ) -> None:
         self._micro_jarvis = micro_jarvis
@@ -149,6 +152,10 @@ class JarvisRouter:
             calendar_service=calendar_service,
             home_service=home_service,
             email_agent_service=email_agent_service,
+            service_bindings={
+                **(skill_service_bindings or {}),
+                **({"documents_service": documents_service} if documents_service is not None else {}),
+            },
         )
         self._authorized_skill_executor = AuthorizedSkillExecutor(
             skill_registry=skill_registry,
@@ -206,8 +213,11 @@ class JarvisRouter:
         )
         self._entity_registry_manager = EntityRegistryManager()
         self._reference_resolver = ReferenceResolver()
-        self._skill_context_contracts = default_skill_context_contracts(
-            email_agent_service=email_agent_service
+        self._skill_context_contracts = list(skill_context_contracts) if skill_context_contracts else (
+            default_skill_context_contracts(
+                email_agent_service=email_agent_service,
+                documents_enabled=documents_service is not None,
+            )
         )
         self._domain_context = DomainContextService(
             contracts=self._skill_context_contracts,

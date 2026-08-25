@@ -112,17 +112,25 @@ class SkillContextContract(Protocol):
         ...
 
 
-def default_skill_context_contracts(*, email_agent_service: Any | None = None) -> list[SkillContextContract]:
+def default_skill_context_contracts(
+    *,
+    email_agent_service: Any | None = None,
+    documents_enabled: bool = False,
+) -> list[SkillContextContract]:
     from app.skills.domains.calendar.context import CalendarContextContract
     from app.skills.domains.conversation.context import ConversationContextContract
     from app.skills.domains.lights.context import LightsContextContract
     from app.skills.domains.lists.context import ListsContextContract
     from app.skills.domains.email_agent.context import EmailAgentContextContract
+    from app.skills.domains.documents.context import DocumentsContextContract
 
-    return [
+    contracts: list[SkillContextContract] = [
         ListsContextContract(),
         LightsContextContract(),
         CalendarContextContract(),
         EmailAgentContextContract(email_agent_service=email_agent_service),
-        ConversationContextContract(),
     ]
+    if documents_enabled:
+        contracts.append(DocumentsContextContract())
+    contracts.append(ConversationContextContract())
+    return contracts

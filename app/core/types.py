@@ -54,6 +54,14 @@ class Intent(str, Enum):
     EMAIL_PROMOTE_TO_CALENDAR = "email.promote_to_calendar"
     EMAIL_PROMOTE_TO_TASK = "email.promote_to_task"
     EMAIL_PROMOTE_TO_WAVE = "email.promote_to_wave"
+    DOCUMENTS_INGEST = "documents.ingest"
+    DOCUMENTS_STATUS = "documents.status"
+    DOCUMENTS_FIND = "documents.find"
+    DOCUMENTS_GET = "documents.get"
+    DOCUMENTS_SHOW_SOURCE = "documents.show_source"
+    DOCUMENTS_REPROCESS = "documents.reprocess"
+    DOCUMENTS_LIST_REVIEWS = "documents.list_reviews"
+    DOCUMENTS_PROPOSE_METADATA = "documents.propose_metadata"
     SYSTEM_WAKE = "system.wake"
     SYSTEM_SLEEP = "system.sleep"
     CONVERSATIONAL = "conversation.general"
@@ -98,7 +106,19 @@ EMAIL_AGENT_INTENTS = {
 }
 
 
+DOCUMENT_INTENTS = {
+    Intent.DOCUMENTS_INGEST,
+    Intent.DOCUMENTS_STATUS,
+    Intent.DOCUMENTS_FIND,
+    Intent.DOCUMENTS_GET,
+    Intent.DOCUMENTS_SHOW_SOURCE,
+    Intent.DOCUMENTS_REPROCESS,
+    Intent.DOCUMENTS_LIST_REVIEWS,
+    Intent.DOCUMENTS_PROPOSE_METADATA,
+}
+
+
 # Main may semantically repair both the low-latency household commands and
 # Main-owned domain actions.  Keep this separate from FAST_COMMAND_INTENTS so
 # adding a Main-owned skill does not accidentally authorize Micro execution.
-MAIN_ACTION_INTENTS = FAST_COMMAND_INTENTS | EMAIL_AGENT_INTENTS
+MAIN_ACTION_INTENTS = FAST_COMMAND_INTENTS | EMAIL_AGENT_INTENTS | DOCUMENT_INTENTS

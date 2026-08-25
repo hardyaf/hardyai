@@ -8,10 +8,11 @@ class SkillExecutionDispatcher:
     def __init__(
         self,
         *,
-        lists_service: Any,
-        calendar_service: Any,
-        home_service: Any,
+        lists_service: Any = None,
+        calendar_service: Any = None,
+        home_service: Any = None,
         email_agent_service: Any | None = None,
+        service_bindings: dict[str, Any] | None = None,
     ) -> None:
         self._services = {
             "lists_service": lists_service,
@@ -19,6 +20,11 @@ class SkillExecutionDispatcher:
             "home_service": home_service,
             "email_agent_service": email_agent_service,
         }
+        for name, service in (service_bindings or {}).items():
+            normalized = str(name or "").strip()
+            if not normalized or not normalized.endswith("_service"):
+                raise ValueError("skill service binding names must end with _service")
+            self._services[normalized] = service
         self._callable_cache: dict[str, Callable[..., Any]] = {}
 
     @staticmethod

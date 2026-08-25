@@ -4,9 +4,10 @@ import sqlite3
 from collections.abc import Callable
 
 from app.db.core_schema import ensure_core_schema
+from app.db.review_schema import ensure_review_schema
 
 
-LATEST_SCHEMA_VERSION = 4
+LATEST_SCHEMA_VERSION = 6
 
 
 def configure_sqlite_connection(conn: sqlite3.Connection) -> None:
@@ -238,11 +239,49 @@ def _migration_004_memory_operation_ids(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_005_durable_job_control_plane(conn: sqlite3.Connection) -> None:
+    columns = {
+        str(row[1]).strip().lower()
+        for row in conn.execute("PRAGMA table_info(durable_jobs)").fetchall()
+    }
+    additions = {
+        "lease_fencing_token": "INTEGER NOT NULL DEFAULT 0",
+        "progress_current": "INTEGER NOT NULL DEFAULT 0",
+        "progress_total": "INTEGER",
+        "current_stage": "TEXT",
+        "stage_started_at": "TEXT",
+        "cancel_requested_at": "TEXT",
+        "cancelled_at": "TEXT",
+        "priority": "INTEGER NOT NULL DEFAULT 100",
+        "resource_class": "TEXT NOT NULL DEFAULT 'cpu_small'",
+        "provider_operation_ref": "TEXT",
+        "provider_reconcile_state": "TEXT",
+        "total_deadline_at": "TEXT",
+    }
+    for name, declaration in additions.items():
+        if name not in columns:
+            conn.execute(f"ALTER TABLE durable_jobs ADD COLUMN {name} {declaration}")
+    conn.executescript(
+        """
+        CREATE INDEX IF NOT EXISTS idx_durable_jobs_priority_claim
+            ON durable_jobs(job_type, status, priority, available_at);
+        CREATE INDEX IF NOT EXISTS idx_durable_jobs_cancel
+            ON durable_jobs(status, cancel_requested_at);
+        """
+    )
+
+
+def _migration_006_shared_human_reviews(conn: sqlite3.Connection) -> None:
+    ensure_review_schema(conn)
+
+
 _MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migration_001_action_ticket_ledger,
     2: _migration_002_list_operation_ids,
     3: _migration_003_worker_heartbeats,
     4: _migration_004_memory_operation_ids,
+    5: _migration_005_durable_job_control_plane,
+    6: _migration_006_shared_human_reviews,
 }
 
 

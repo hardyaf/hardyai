@@ -64,6 +64,10 @@ from app.tickets.verifiers.home import SimulatedHomeSourceVerifier
 from app.tickets.verifiers.calendar import GoogleCalendarSourceVerifier
 from app.integrations.plane.client import PlaneClient
 from app.integrations.plane.sync_service import PlaneSyncService
+from app.integrations.document_gateway.client import DocumentGatewayClient
+from app.reviews.repository import HumanReviewRepository
+from app.reviews.service import HumanReviewService
+from app.skills.domains.documents.query_service import DocumentQueryService
 from app.research.decision_backend import OllamaResearchDecisionBackend
 from app.research.searxng import SearxngSearchProvider
 from app.research.service import WebResearchService
@@ -94,6 +98,9 @@ def _record_ollama_call(metrics: dict[str, Any]) -> None:
 
 
 ticket_repository = TicketRepository(database_path=sqlite_store.database_path)
+job_repository = ticket_repository.job_repository
+human_review_repository = HumanReviewRepository(database_path=settings.database_path)
+human_review_service = HumanReviewService(human_review_repository)
 action_ticket_service = ActionTicketService(
     repository=ticket_repository,
     enabled=settings.action_tickets_enabled,
@@ -380,6 +387,19 @@ home_service = HomeService(
     default_switch_names=settings.house_switch_names,
 )
 
+document_gateway_client = None
+documents_service = None
+if settings.documents_enabled:
+    document_gateway_client = DocumentGatewayClient(
+        base_url=settings.document_gateway_base_url,
+        operator_key_path=settings.document_gateway_operator_key_path,
+        timeout_seconds=min(settings.paperless_timeout_seconds, 30.0),
+    )
+    documents_service = DocumentQueryService(
+        gateway=document_gateway_client,
+        reviews=human_review_service,
+    )
+
 ticket_verifier_registry = VerifierRegistry()
 ticket_verifier_registry.register(ListsSourceVerifier(lists_service=lists_service))
 ticket_verifier_registry.register(SimulatedHomeSourceVerifier(home_service=home_service))
@@ -465,6 +485,7 @@ router = JarvisRouter(
     action_ticket_service=action_ticket_service,
     identity_service=external_identity_service,
     email_agent_service=email_agent_service,
+    documents_service=documents_service,
     durable_write_service=durable_write_service,
 )
 action_execution_service = router.action_execution_service

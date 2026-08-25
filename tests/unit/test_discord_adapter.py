@@ -23,6 +23,7 @@ from app.services.discord.bot import (
     discord_policy_has_allow_scope,
     split_discord_message,
 )
+from app.integrations.discord_attachment.types import DiscordAttachmentReceipt
 
 
 def test_extract_command_text():
@@ -522,3 +523,128 @@ def test_summarize_discord_api_error_with_empty_message_uses_type():
             return ""
 
     assert summarize_discord_api_error(SilentError()) == "SilentError"
+
+
+def test_authorized_attachment_only_message_queues_document_without_entering_ask(tmp_path):
+    class AttachmentIngressStub:
+        def __init__(self) -> None:
+            self.descriptors = []
+
+        async def submit(self, descriptor):
+            self.descriptors.append(descriptor)
+            return DiscordAttachmentReceipt(
+                filename=descriptor.filename,
+                document_id="doc-1",
+                intake_id="intake-1",
+                state="queued",
+                duplicate=False,
+                enqueue_confirmed=True,
+            )
+
+    class TurnServiceStub:
+        async def route(self, *_args, **_kwargs):
+            raise AssertionError("attachment-only messages must not enter /ask")
+
+    permissions = tmp_path / "discord_permissions.yaml"
+    permissions.write_text(
+        (
+            "version: 1\n"
+            "defaults:\n"
+            "  command_prefix: \"!\"\n"
+            "  require_prefix: false\n"
+            "  allowed_guild_ids: [100]\n"
+            "guilds:\n"
+            "  - guild_id: 100\n"
+            "    allowed_channel_ids: [200, 201]\n"
+            "    allowed_user_ids: [300]\n"
+        ),
+        encoding="utf-8",
+    )
+    ingress = AttachmentIngressStub()
+    bot = DiscordJarvisBot(
+        command_prefix="!",
+        permissions_path=str(permissions),
+        turn_service=TurnServiceStub(),
+        attachment_ingress=ingress,
+        attachment_max_bytes=1024,
+    )
+
+    async def exercise() -> None:
+        for channel_id, attachment_id in ((200, 500), (201, 501)):
+            channel = SimpleNamespace(id=channel_id, send=AsyncMock())
+            message = SimpleNamespace(
+                id=400 + channel_id,
+                author=SimpleNamespace(
+                    bot=False,
+                    id=300,
+                    roles=[],
+                    display_name="Taylor",
+                    global_name=None,
+                    name="taylor",
+                ),
+                guild=SimpleNamespace(id=100),
+                channel=channel,
+                content="",
+                attachments=[
+                    SimpleNamespace(
+                        id=attachment_id,
+                        filename="receipt.png",
+                        content_type="image/png",
+                        size=512,
+                        url=(
+                            f"https://cdn.discordapp.com/attachments/{channel_id}/"
+                            f"{attachment_id}/receipt.png?ex=test"
+                        ),
+                    )
+                ],
+            )
+            await bot.on_message(message)
+            assert channel.send.await_count == 2
+            assert "Securely submitting" in channel.send.await_args_list[0].args[0]
+            assert "Queued `receipt.png`" in channel.send.await_args_list[1].args[0]
+
+    asyncio.run(exercise())
+    assert [item.channel_id for item in ingress.descriptors] == ["200", "201"]
+    assert all(item.filename == "receipt.png" for item in ingress.descriptors)
+
+
+def test_unauthorized_channel_never_submits_attachment(tmp_path):
+    ingress = SimpleNamespace(submit=AsyncMock())
+    permissions = tmp_path / "discord_permissions.yaml"
+    permissions.write_text(
+        (
+            "version: 1\n"
+            "defaults:\n"
+            "  allowed_guild_ids: [100]\n"
+            "guilds:\n"
+            "  - guild_id: 100\n"
+            "    allowed_channel_ids: [200]\n"
+        ),
+        encoding="utf-8",
+    )
+    bot = DiscordJarvisBot(
+        permissions_path=str(permissions),
+        attachment_ingress=ingress,
+    )
+    channel = SimpleNamespace(id=999, send=AsyncMock())
+    message = SimpleNamespace(
+        id=400,
+        author=SimpleNamespace(bot=False, id=300, roles=[]),
+        guild=SimpleNamespace(id=100),
+        channel=channel,
+        content="",
+        attachments=[
+            SimpleNamespace(
+                id=500,
+                filename="receipt.png",
+                content_type="image/png",
+                size=512,
+                url="https://cdn.discordapp.com/attachments/999/500/receipt.png",
+            )
+        ],
+    )
+
+    asyncio.run(bot.on_message(message))
+
+    ingress.submit.assert_not_awaited()
+    channel.send.assert_not_awaited()

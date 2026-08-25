@@ -46,4 +46,7 @@ def run(
             "status": "disabled",
             "message": "The email agent is not enabled or configured yet.",
         }
-    return service.execute(intent=intent, entities=entities, context=context)
+    result = service.execute(intent=intent, entities=entities, context=context)
+    if isinstance(result, dict):
+        result.setdefault("_persistence_policy", "sensitive_domain")
+    return result

@@ -23,6 +23,7 @@ class AuthorizedSkillExecutor:
     ) -> dict[str, Any]:
         context: dict[str, Any] = {
             "source_interface": source_interface,
+            "source": source_interface,
             "requested_by_user_id": requested_by_user_id,
             "agent_id": agent_id,
             "request_id": str(request_id or ""),
@@ -34,6 +35,8 @@ class AuthorizedSkillExecutor:
                 "external_user_id",
                 "identity_bound",
                 "skill_scopes",
+                "principal_kind",
+                "principal_subject",
             ):
                 if key in request_context:
                     context[key] = request_context[key]

@@ -8,6 +8,7 @@ from uuid import uuid4
 from app.config import settings
 from app.integrations.plane.sync_service import PlaneSyncService
 from app.tickets.repository import TicketRepository
+from app.services.offline_runtime_policy import validate_offline_runtime
 
 
 class PlaneSyncWorker:
@@ -90,6 +91,7 @@ class PlaneSyncWorker:
 def main() -> int:
     if not settings.plane_enabled:
         raise RuntimeError("PLANE_ENABLED must be true to run the Plane sync worker.")
+    validate_offline_runtime(settings, entrypoint="plane-sync-worker")
     from app.runtime import plane_sync_service, ticket_repository
 
     if plane_sync_service is None:

@@ -71,6 +71,19 @@ def _as_csv_list(name: str, default: list[str]) -> list[str]:
     return [item for item in items if item]
 
 
+def _secret_value(value_name: str, file_name: str) -> str:
+    direct = str(os.getenv(value_name, "") or "").strip()
+    if direct:
+        return direct
+    secret_path = str(os.getenv(file_name, "") or "").strip()
+    if not secret_path:
+        return ""
+    try:
+        return Path(secret_path).read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
 @dataclass(frozen=True)
 class Settings:
     app_env: str
@@ -128,6 +141,10 @@ class Settings:
     discord_command_channel_id: str
     discord_command_guild_id: str
     discord_permissions_path: str
+    discord_attachment_ingress_enabled: bool
+    discord_attachment_ingress_base_url: str
+    discord_attachment_ingress_timeout_seconds: float
+    discord_attachment_max_per_message: int
     memory_mode: str
     memory_markdown_path: str
     house_switch_names: list[str]
@@ -203,6 +220,49 @@ class Settings:
     turn_max_concurrency: int
     turn_queue_capacity: int
     turn_timeout_seconds: float
+    offline_mode: bool
+    documents_enabled: bool
+    documents_local_only: bool
+    documents_database_path: str
+    documents_spool_path: str
+    documents_max_upload_bytes: int
+    documents_max_request_overhead_bytes: int
+    documents_spool_quota_bytes: int
+    documents_min_free_bytes: int
+    documents_max_image_pixels: int
+    documents_body_timeout_seconds: float
+    documents_global_concurrency: int
+    documents_per_principal_concurrency: int
+    document_job_socket_path: str
+    document_archive_poll_seconds: float
+    document_archive_max_attempts: int
+    documents_processing_enabled: bool
+    documents_artifacts_path: str
+    document_process_max_attempts: int
+    document_process_lease_seconds: float
+    documents_watch_enabled: bool
+    documents_watch_path: str
+    documents_watch_owner_id: str
+    documents_watch_stable_seconds: float
+    documents_origin_reconciliation_enabled: bool
+    documents_origin_owner_id: str
+    documents_origin_reconciliation_limit: int
+    documents_docling_enabled: bool
+    docling_base_url: str
+    docling_api_key_path: str
+    docling_server_version: str
+    docling_image_digest: str
+    docling_timeout_seconds: float
+    docling_max_response_bytes: int
+    document_gateway_base_url: str
+    document_gateway_operator_key_path: str
+    paperless_base_url: str
+    paperless_read_token_path: str
+    paperless_read_user_id_path: str
+    paperless_archive_token_path: str
+    paperless_api_version: int
+    paperless_server_version: str
+    paperless_timeout_seconds: float
 
 
 settings = Settings(
@@ -320,6 +380,22 @@ settings = Settings(
     discord_permissions_path=os.getenv(
         "DISCORD_PERMISSIONS_PATH",
         "secrets/live/discord_permissions.yaml",
+    ),
+    discord_attachment_ingress_enabled=_as_bool(
+        "DISCORD_ATTACHMENT_INGRESS_ENABLED",
+        False,
+    ),
+    discord_attachment_ingress_base_url=os.getenv(
+        "DISCORD_ATTACHMENT_INGRESS_BASE_URL",
+        "http://discord-attachment-ingress:8020",
+    ).rstrip("/"),
+    discord_attachment_ingress_timeout_seconds=max(
+        5.0,
+        min(_as_float("DISCORD_ATTACHMENT_INGRESS_TIMEOUT_SECONDS", 180.0), 600.0),
+    ),
+    discord_attachment_max_per_message=max(
+        1,
+        min(_as_int("DISCORD_ATTACHMENT_MAX_PER_MESSAGE", 4), 10),
     ),
     memory_mode=os.getenv("MEMORY_MODE", "sqlite"),
     memory_markdown_path=os.getenv("MEMORY_MARKDOWN_PATH", "./data/memory_markdown"),
@@ -522,7 +598,7 @@ settings = Settings(
     plane_project_id=os.getenv("PLANE_PROJECT_ID", ""),
     plane_sync_raw_transcript=_as_bool("PLANE_SYNC_RAW_TRANSCRIPT", False),
     plane_api_timeout_seconds=max(1.0, _as_float("PLANE_API_TIMEOUT_SECONDS", 30.0)),
-    operator_api_key=os.getenv("JARVIS_OPERATOR_API_KEY", ""),
+    operator_api_key=_secret_value("JARVIS_OPERATOR_API_KEY", "JARVIS_OPERATOR_API_KEY_FILE"),
     operator_session_ttl_seconds=max(
         300,
         min(_as_int("JARVIS_OPERATOR_SESSION_TTL_SECONDS", 3600), 86400),
@@ -530,4 +606,122 @@ settings = Settings(
     turn_max_concurrency=max(1, min(_as_int("TURN_MAX_CONCURRENCY", 1), 8)),
     turn_queue_capacity=max(0, min(_as_int("TURN_QUEUE_CAPACITY", 8), 100)),
     turn_timeout_seconds=max(5.0, min(_as_float("TURN_TIMEOUT_SECONDS", 240.0), 900.0)),
+    offline_mode=_as_bool("OFFLINE_MODE", False),
+    documents_enabled=_as_bool("DOCUMENTS_ENABLED", False),
+    documents_local_only=_as_bool("DOCUMENTS_LOCAL_ONLY", True),
+    documents_database_path=os.getenv("DOCUMENTS_DATABASE_PATH", "data/documents/documents.db"),
+    documents_spool_path=os.getenv("DOCUMENTS_SPOOL_PATH", "data/documents/spool"),
+    documents_max_upload_bytes=max(
+        1024,
+        min(_as_int("DOCUMENTS_MAX_UPLOAD_BYTES", 52428800), 104857600),
+    ),
+    documents_max_request_overhead_bytes=max(
+        65536,
+        min(_as_int("DOCUMENTS_MAX_REQUEST_OVERHEAD_BYTES", 1048576), 8388608),
+    ),
+    documents_spool_quota_bytes=max(
+        52428800,
+        _as_int("DOCUMENTS_SPOOL_QUOTA_BYTES", 2147483648),
+    ),
+    documents_min_free_bytes=max(
+        0,
+        _as_int("DOCUMENTS_MIN_FREE_BYTES", 1073741824),
+    ),
+    documents_max_image_pixels=max(
+        1000000,
+        min(_as_int("DOCUMENTS_MAX_IMAGE_PIXELS", 64000000), 100000000),
+    ),
+    documents_body_timeout_seconds=max(
+        5.0,
+        min(_as_float("DOCUMENTS_BODY_TIMEOUT_SECONDS", 120.0), 600.0),
+    ),
+    documents_global_concurrency=max(
+        1,
+        min(_as_int("DOCUMENTS_GLOBAL_CONCURRENCY", 2), 16),
+    ),
+    documents_per_principal_concurrency=max(
+        1,
+        min(_as_int("DOCUMENTS_PER_PRINCIPAL_CONCURRENCY", 1), 4),
+    ),
+    document_job_socket_path=os.getenv("DOCUMENT_JOB_SOCKET_PATH", "/run/jarvis-documents/enqueue.sock"),
+    document_archive_poll_seconds=max(
+        1.0,
+        min(_as_float("DOCUMENT_ARCHIVE_POLL_SECONDS", 5.0), 300.0),
+    ),
+    document_archive_max_attempts=max(
+        3,
+        min(_as_int("DOCUMENT_ARCHIVE_MAX_ATTEMPTS", 30), 100),
+    ),
+    documents_processing_enabled=_as_bool("DOCUMENTS_PROCESSING_ENABLED", False),
+    documents_artifacts_path=os.getenv(
+        "DOCUMENTS_ARTIFACTS_PATH",
+        "data/documents/artifacts",
+    ),
+    document_process_max_attempts=max(
+        3,
+        min(_as_int("DOCUMENT_PROCESS_MAX_ATTEMPTS", 60), 200),
+    ),
+    document_process_lease_seconds=max(
+        30.0,
+        min(_as_float("DOCUMENT_PROCESS_LEASE_SECONDS", 300.0), 1800.0),
+    ),
+    documents_watch_enabled=_as_bool("DOCUMENTS_WATCH_ENABLED", False),
+    documents_watch_path=os.getenv("DOCUMENTS_WATCH_PATH", "data/documents/import"),
+    documents_watch_owner_id=os.getenv("DOCUMENTS_WATCH_OWNER_ID", "").strip(),
+    documents_watch_stable_seconds=max(
+        0.5,
+        min(_as_float("DOCUMENTS_WATCH_STABLE_SECONDS", 5.0), 300.0),
+    ),
+    documents_origin_reconciliation_enabled=_as_bool(
+        "DOCUMENTS_ORIGIN_RECONCILIATION_ENABLED",
+        False,
+    ),
+    documents_origin_owner_id=os.getenv("DOCUMENTS_ORIGIN_OWNER_ID", "").strip(),
+    documents_origin_reconciliation_limit=max(
+        1,
+        min(_as_int("DOCUMENTS_ORIGIN_RECONCILIATION_LIMIT", 50), 100),
+    ),
+    documents_docling_enabled=_as_bool("DOCUMENTS_DOCLING_ENABLED", False),
+    docling_base_url=os.getenv("DOCLING_BASE_URL", "http://docling-serve:5001").rstrip("/"),
+    docling_api_key_path=os.getenv("DOCLING_API_KEY_PATH", "/run/secrets/docling_api_key"),
+    docling_server_version=os.getenv("DOCLING_SERVER_VERSION", "1.30.0").strip(),
+    docling_image_digest=os.getenv(
+        "DOCLING_IMAGE_DIGEST",
+        "sha256:0244089785d5ccb7570dfaa593cdc81ec64a1aadc63ffa9dce065064b0a6a807",
+    ).strip(),
+    docling_timeout_seconds=max(
+        1.0,
+        min(_as_float("DOCLING_TIMEOUT_SECONDS", 300.0), 900.0),
+    ),
+    docling_max_response_bytes=max(
+        1024,
+        min(_as_int("DOCLING_MAX_RESPONSE_BYTES", 67108864), 268435456),
+    ),
+    document_gateway_base_url=os.getenv(
+        "DOCUMENT_GATEWAY_BASE_URL",
+        "http://document-gateway:8010",
+    ).rstrip("/"),
+    document_gateway_operator_key_path=os.getenv(
+        "DOCUMENT_GATEWAY_OPERATOR_KEY_PATH",
+        "/run/secrets/jarvis_operator_api_key",
+    ),
+    paperless_base_url=os.getenv("PAPERLESS_BASE_URL", "http://paperless-webserver:8000").rstrip("/"),
+    paperless_read_token_path=os.getenv(
+        "PAPERLESS_READ_TOKEN_PATH",
+        "/run/secrets/paperless_read_token",
+    ),
+    paperless_read_user_id_path=os.getenv(
+        "PAPERLESS_READ_USER_ID_PATH",
+        "/run/secrets/paperless_read_user_id",
+    ),
+    paperless_archive_token_path=os.getenv(
+        "PAPERLESS_ARCHIVE_TOKEN_PATH",
+        "/run/secrets/paperless_archive_token",
+    ),
+    paperless_api_version=max(1, min(_as_int("PAPERLESS_API_VERSION", 10), 99)),
+    paperless_server_version=os.getenv("PAPERLESS_SERVER_VERSION", "3.0.5").strip(),
+    paperless_timeout_seconds=max(
+        1.0,
+        min(_as_float("PAPERLESS_TIMEOUT_SECONDS", 60.0), 300.0),
+    ),
 )

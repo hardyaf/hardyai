@@ -28,6 +28,10 @@ This folder contains machine-loadable and human-readable skill instructions.
   - handler: `app/skills/domains/conversation/handler.py`
   - storage: `app/skills/domains/conversation/storage.py`
   - conversation model path: `app/core/main_jarvis.py` and `app/core/main_backend.py`
+- `documents_skill.md`
+  - execution ref: `app.skills.domains.documents.handler:run`
+  - Main-only bounded query/control surface over the isolated local Document Gateway
+  - restricted-read persistence; Micro receives no document content or functions
 - `critical_skills.md`
   - compiled bundle generated from SQL `skills` rows where `critical_level >= 1`
   - currently refreshed by scheduled job `job.system.compile_critical_skills_on_main_idle`

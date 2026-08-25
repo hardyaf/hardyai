@@ -4,6 +4,7 @@ from uuid import uuid4
 
 from app.core.main_jarvis import MainJarvis
 from app.core.micro_jarvis import MicroJarvis
+from app.core.types import Intent, SessionOwner, SessionState
 from tests.router_support import RegistryBackedTestRouter as JarvisRouter
 from app.core.session_store import SessionStore
 from app.core.state_machine import RuntimePowerController
@@ -67,6 +68,13 @@ def test_router_persists_sessions_events_and_memory():
         events = store.recent_events(limit=20)
         assert any(item["event_type"] == "input.received" for item in events)
         assert any(item["event_type"] == "tool.executed" for item in events)
+        received = next(item for item in events if item["event_type"] == "input.received")
+        assert "text" not in received["payload"]
+        assert "normalized_text" not in received["payload"]
+        assert received["payload"]["text_chars"] == len("add milk to groceries")
+        micro = next(item for item in events if item["event_type"] == "micro.decision")
+        assert "entities" not in micro["payload"]
+        assert micro["payload"]["entity_fields"]
 
         memories = store.recent_memory_entries(limit=20)
         assert len(memories) == 1
@@ -74,5 +82,64 @@ def test_router_persists_sessions_events_and_memory():
 
         markdown_files = list(md_path.rglob("*.md"))
         assert markdown_files, "Expected markdown memory mirror files to be written."
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+def test_document_intent_fails_closed_when_skill_error_loses_policy_marker():
+    data_root = (Path.cwd() / "data").resolve()
+    data_root.mkdir(parents=True, exist_ok=True)
+    scratch = data_root / f"jarvis-test-{uuid4().hex[:8]}"
+    scratch.mkdir(parents=True, exist_ok=True)
+    canary = "DOCUMENT-QUERY-MUST-NOT-PERSIST"
+
+    try:
+        store = SQLiteStore(database_path=str(scratch / "jarvis_test.db"))
+        memory_chain = CompositeMemoryStore(
+            stores=[
+                SQLiteMemoryStore(store),
+                MarkdownMemoryStore(base_dir=str(scratch / "memory_md")),
+            ]
+        )
+        router = JarvisRouter(
+            micro_jarvis=MicroJarvis(),
+            main_jarvis=MainJarvis(),
+            session_store=SessionStore(persistence=store),
+            runtime_power=RuntimePowerController(),
+            event_log=EventLogService(persistence=store),
+            memory_service=MemoryService(store=memory_chain),
+            lists_service=ListsService(),
+            calendar_service=CalendarService(),
+            home_service=HomeService(),
+        )
+        session = router._session_store.get_or_create(
+            "document-policy-failure",
+            "operator",
+            "web",
+        )
+        session.owner = SessionOwner.MAIN
+        session.state = SessionState.IDLE
+
+        response = router._build_response(
+            session=session,
+            intent=Intent.DOCUMENTS_FIND,
+            classification={
+                "intent": "documents.find",
+                "confidence": 1.0,
+                "entities": {"query": canary},
+                "recommended_owner": "main_jarvis",
+            },
+            route="main_jarvis_repair",
+            result={"status": "error", "message": "Skill execution failed."},
+            request_text=f"search documents for {canary}",
+            user_id="operator",
+        )
+
+        assert response["delivery"]["memory"]["status"] == "not_applicable"
+        assert response["delivery"]["conversation_history"]["status"] == "not_applicable"
+        assert response["delivery"]["ticket"]["status"] == "not_applicable"
+        assert not store.recent_memory_entries(limit=20)
+        persisted_session = store.get_session("document-policy-failure")
+        assert canary not in str(persisted_session)
     finally:
         shutil.rmtree(scratch, ignore_errors=True)

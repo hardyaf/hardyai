@@ -12,6 +12,7 @@ It runs:
 - optional internal-only SearXNG conversational research profile
 - optional delayed ticket-review and Plane projection worker profiles
 - optional one-cycle manual Gmail mailbox worker profile for an external scheduler
+- optional isolated Phase 1 Documents/Paperless profile (default off)
 
 The dashboard binds to loopback unless `JARVIS_BIND_ADDRESS` is explicitly set in the root `.env`.
 Only use a private LAN address for this POC. Operator routes are authenticated, but the deployment is
@@ -27,6 +28,7 @@ JARVIS_MICRO_MODEL=qwen2.5:7b
 JARVIS_MAIN_MODEL=gpt-oss:20b
 JARVIS_MODELS_ENABLED=false
 JARVIS_DISCORD_ENABLED=false
+DISCORD_ATTACHMENT_INGRESS_ENABLED=false
 JARVIS_OPERATOR_API_KEY=replace-with-a-strong-random-value
 CALENDAR_GOOGLE_ENABLED=false
 WEB_RESEARCH_ENABLED=false
@@ -61,6 +63,28 @@ Discord uses an explicit model-entry boundary. With the production
 Allowed unprefixed messages still receive a response, but they bypass Micro and
 go to Main for conversation, action repair, or typed planning. The adapter records
 the distinction as `micro_command_explicit`; a missing value fails closed to Main.
+
+Discord PDF/JPEG/PNG attachment intake is separately isolated. Core sends only a bounded
+Discord attachment descriptor to `discord-attachment-ingress`; that sidecar validates an
+allowlisted Discord CDN URL and streams the bytes directly into DocumentGateway. Core,
+`/ask`, prompts, memory, and logs never receive the file bytes. Attachment intake applies
+in every channel already authorized by `discord_permissions.yaml`, accepts up to the
+configured `DISCORD_ATTACHMENT_MAX_PER_MESSAGE`, and stores an opaque durable receipt so
+Discord retries do not redownload or duplicate an accepted document. Enable it with
+`DISCORD_ATTACHMENT_INGRESS_ENABLED=true` and include `--profile discord-attachments`
+alongside the Documents profiles.
+
+The Ollama health check validates both `nvidia-smi` and `ollama list`. If Compose reports
+Ollama unhealthy while host `nvidia-smi` works, the container has a stale NVIDIA/NVML
+binding and may silently run Main on CPU. Recreate only Ollama, then verify residency:
+
+```bash
+docker compose --env-file .env -f deploy/docker/compose.yaml up -d --no-deps --force-recreate ollama
+docker exec jarvis-poc-ollama-1 ollama ps
+```
+
+The production `gpt-oss:20b` row must report `100% GPU`; do not treat a successful CPU
+fallback as healthy.
 
 To enable conversational web research, generate a `SEARXNG_SECRET_KEY`, set
 `WEB_RESEARCH_ENABLED=true`, and start the `research` profile:
@@ -173,12 +197,62 @@ docker compose --env-file .env -f deploy/docker/compose.yaml --profile plane up 
 See `docs/action-ticket-verification.md` for rollout order, Plane privacy defaults,
 operator authentication, and backup/restore commands.
 
-After the model-backed smoke test passes, set
-`JARVIS_DISCORD_ENABLED=true` and recreate Jarvis:
+The `documents` profile is intentionally not a one-command default. It requires a pre-existing
+LUKS-backed storage tree, five protected secret files plus a protected Paperless read-user ID,
+distinct least-privilege Paperless users/tokens, and a clean restore drill. Paperless and the no-egress
+document gateway have no published ports; the Ubuntu host reaches the gateway through its internal
+bridge address with a loopback Host header. Follow `docs/OCR-Phase1-Runbook.md` and run
+`python scripts/verify_install.py --documents-only` before enabling it.
+
+Phase 2 adds the generic long-job/review controls, optional watched-folder intake, and optional
+Paperless-origin reconciliation. Keep each ingress route independently disabled until its operator and
+scope are configured. The scanner reads only the top level of the encrypted import directory, ignores
+symlinks/hidden/nested entries, waits for stable size and modification time, and moves a claimed failure
+to `.rejected`.
+
+Phase 3 is CPU-only and PDF-only at this checkpoint. Put a random, non-whitespace API key in
+`${DOCUMENTS_SECRETS_ROOT}/docling_api_key` with mode `0400`, create the encrypted
+`${DOCUMENTS_STORAGE_ROOT}/jarvis/artifacts` and `import` directories, and set:
+
+```dotenv
+DOCUMENTS_PROCESSING_ENABLED=true
+DOCUMENTS_DOCLING_ENABLED=true
+DOCLING_SERVER_VERSION=1.30.0
+DOCLING_IMAGE_DIGEST=sha256:0244089785d5ccb7570dfaa593cdc81ec64a1aadc63ffa9dce065064b0a6a807
+```
+
+Validate and start both profiles with the required environment file:
 
 ```bash
-docker compose --env-file .env -f deploy/docker/compose.yaml up -d jarvis
-docker compose --env-file .env -f deploy/docker/compose.yaml logs --tail=100 jarvis
+docker compose --env-file .env -f deploy/docker/compose.yaml \
+  --profile documents --profile documents-phase3 config --quiet
+docker compose --env-file .env -f deploy/docker/compose.yaml \
+  --profile documents --profile documents-phase3 up -d
+docker compose --env-file .env -f deploy/docker/compose.yaml \
+  --profile documents --profile documents-phase3 ps
+```
+
+Docling has no published port, no public network, no GPU, and receives only a bounded PDF upload from
+the document worker. Remote services, plugins, custom pipelines, URL conversion, telemetry, and lazy
+model downloads are disabled. Office parsing remains disabled pending a separate converter sandbox
+review. PP-OCR/Paddle and every GPU route remain out of scope until the Phase 4/5 benchmark/admission
+gates. See `docs/OCR-Phase2-3-Checkpoint.md` for verification and rollback.
+
+For a synthetic native-PDF provider smoke from a container on `documents-inference`, use
+`scripts/generate_synthetic_native_pdf.py` and `scripts/smoke_test_docling.py`. The smoke output contains
+only hashes, versions, counts, evidence coverage, and quality codes—not extracted text.
+
+After the model-backed smoke test passes, set
+`JARVIS_DISCORD_ENABLED=true`, optionally set
+`DISCORD_ATTACHMENT_INGRESS_ENABLED=true`, and recreate the enabled services:
+
+```bash
+docker compose --env-file .env -f deploy/docker/compose.yaml \
+  --profile documents --profile documents-phase3 --profile discord-attachments \
+  up -d jarvis discord-attachment-ingress
+docker compose --env-file .env -f deploy/docker/compose.yaml \
+  --profile documents --profile documents-phase3 --profile discord-attachments \
+  logs --tail=100 jarvis discord-attachment-ingress
 ```
 
 Run the preflight inside the same container/network context:

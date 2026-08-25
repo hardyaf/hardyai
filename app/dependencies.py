@@ -17,6 +17,9 @@ from app.services.identity_service import ExternalIdentityService
 from app.skills.domains.private_notes.service import PrivateNotesDigestService
 from app.skills.domains.calendar_inbox.service import CalendarInboxService
 from app.skills.domains.email_agent.service import EmailAgentService
+from app.jobs.repository import DurableJobRepository
+from app.reviews.repository import HumanReviewRepository
+from app.reviews.service import HumanReviewService
 
 
 def get_container(request: Request) -> ApplicationContainer:
@@ -80,3 +83,15 @@ def get_email_agent_service(request: Request) -> EmailAgentService | None:
 
 def get_runtime_power(request: Request) -> RuntimePowerController:
     return get_container(request).runtime_power
+
+
+def get_job_repository(request: Request) -> DurableJobRepository:
+    return get_container(request).job_repository
+
+
+def get_human_review_repository(request: Request) -> HumanReviewRepository:
+    return get_container(request).human_review_repository
+
+
+def get_human_review_service(request: Request) -> HumanReviewService:
+    return get_container(request).human_review_service

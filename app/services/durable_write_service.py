@@ -6,7 +6,7 @@ from typing import Any
 from uuid import uuid4
 
 from app.services.memory_service import MemoryService
-from app.tickets.repository import TicketRepository
+from app.jobs.types import DurableJobStore
 
 
 MEMORY_WRITE_JOB = "write.memory_interaction.v1"
@@ -26,7 +26,7 @@ class DurableWriteService:
     def __init__(
         self,
         *,
-        repository: TicketRepository,
+        repository: DurableJobStore,
         memory_service: MemoryService,
         config: DurableWriteConfig | None = None,
         worker_id: str | None = None,

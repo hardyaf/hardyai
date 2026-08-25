@@ -18,7 +18,7 @@ services:
               count: 1
               capabilities: [gpu]
     healthcheck:
-      test: ["CMD", "ollama", "list"]
+      test: ["CMD-SHELL", "nvidia-smi -L >/dev/null && ollama list >/dev/null"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -105,12 +105,27 @@ services:
       EMAIL_AGENT_SPAM_TOKEN_PATH: /opt/jarvis/secrets/email-spam-worker/token.json
       DISCORD_ENABLED: "${JARVIS_DISCORD_ENABLED:-false}"
       DISCORD_PERMISSIONS_PATH: /opt/jarvis/secrets/live/discord_permissions.yaml
+      DISCORD_ATTACHMENT_INGRESS_ENABLED: "${DISCORD_ATTACHMENT_INGRESS_ENABLED:-false}"
+      DISCORD_ATTACHMENT_INGRESS_BASE_URL: http://discord-attachment-ingress:8020
+      DISCORD_ATTACHMENT_INGRESS_TIMEOUT_SECONDS: "${DISCORD_ATTACHMENT_INGRESS_TIMEOUT_SECONDS:-180}"
+      DISCORD_ATTACHMENT_MAX_PER_MESSAGE: "${DISCORD_ATTACHMENT_MAX_PER_MESSAGE:-4}"
+      DOCUMENTS_ENABLED: "${DOCUMENTS_ENABLED:-false}"
+      DOCUMENTS_LOCAL_ONLY: "true"
+      DOCUMENT_GATEWAY_BASE_URL: http://document-gateway:8010
+      DOCUMENT_GATEWAY_OPERATOR_KEY_PATH: /run/secrets/jarvis_operator_api_key
     ports:
       - "${JARVIS_BIND_ADDRESS:-127.0.0.1}:8000:8000"
+    networks: [default, documents-control, discord-ingress-control]
     volumes:
       - ../../.env:/opt/jarvis/.env:ro
       - ../../data:/opt/jarvis/data
       - ../../secrets/live:/opt/jarvis/secrets/live:ro
+      - type: bind
+        source: ${DOCUMENTS_SECRETS_ROOT:-/etc/hardyai/documents-required}/jarvis_operator_api_key
+        target: /run/secrets/jarvis_operator_api_key
+        read_only: true
+        bind:
+          create_host_path: false
     read_only: true
     tmpfs:
       - /tmp
@@ -225,5 +240,505 @@ services:
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
 
+  paperless-broker:
+    image: valkey/valkey@sha256:f0ba225266310efba5fb33383e21c64fbd07907304224786c780606e7ebd7327
+    profiles: ["documents"]
+    restart: unless-stopped
+    user: "${PAPERLESS_VALKEY_UID:-999}:${JARVIS_GID:-1001}"
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 128
+    command: ["valkey-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes:
+      - type: bind
+        source: ${DOCUMENTS_STORAGE_ROOT:-/mnt/hardyai-documents-required}/paperless/valkey
+        target: /data
+        bind:
+          create_host_path: false
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks: [paperless-data]
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  paperless-db:
+    image: postgres@sha256:06cad38a5d9f5d24b4d83d86def30795d5e4b757fedbf5281172b576dedcd941
+    profiles: ["documents"]
+    restart: unless-stopped
+    user: "${PAPERLESS_POSTGRES_UID:-999}:${JARVIS_GID:-1001}"
+    mem_limit: 2g
+    cpus: 2.0
+    pids_limit: 256
+    environment:
+      POSTGRES_DB: paperless
+      POSTGRES_USER: paperless
+      POSTGRES_PASSWORD_FILE: /run/secrets/paperless_db_password
+    volumes:
+      - type: bind
+        source: ${DOCUMENTS_STORAGE_ROOT:-/mnt/hardyai-documents-required}/paperless/postgres
+        target: /var/lib/postgresql
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${DOCUMENTS_SECRETS_ROOT:-/etc/hardyai/documents-required}/paperless_db_password
+        target: /run/secrets/paperless_db_password
+        read_only: true
+        bind:
+          create_host_path: false
+    shm_size: 256mb
+    read_only: true
+    tmpfs: [/tmp, /run/postgresql]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks: [paperless-data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U paperless -d paperless"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  paperless-webserver:
+    image: ghcr.io/paperless-ngx/paperless-ngx@sha256:65a4cabf0169ea7fbd90ab7bb28ba3f8b5909613635acda1a03ad606f34b456b
+    profiles: ["documents"]
+    restart: unless-stopped
+    mem_limit: 6g
+    cpus: 4.0
+    pids_limit: 512
+    user: "${JARVIS_UID:-1001}:${JARVIS_GID:-1001}"
+    depends_on:
+      paperless-db:
+        condition: service_healthy
+      paperless-broker:
+        condition: service_healthy
+    environment:
+      PAPERLESS_REDIS: redis://paperless-broker:6379
+      PAPERLESS_DBHOST: paperless-db
+      PAPERLESS_DBENGINE: postgresql
+      PAPERLESS_DBNAME: paperless
+      PAPERLESS_DBUSER: paperless
+      PAPERLESS_DBPASS_FILE: /run/secrets/paperless_db_password
+      PAPERLESS_SECRET_KEY_FILE: /run/secrets/paperless_secret_key
+      PAPERLESS_TIME_ZONE: "${DOCUMENTS_TIME_ZONE:-America/New_York}"
+      PAPERLESS_OCR_LANGUAGE: "${PAPERLESS_OCR_LANGUAGE:-eng}"
+      PAPERLESS_OCR_MODE: auto
+      PAPERLESS_CONSUMER_DELETE_DUPLICATES: "true"
+      PAPERLESS_URL: http://paperless-webserver:8000
+    volumes:
+      - type: bind
+        source: ${DOCUMENTS_STORAGE_ROOT:-/mnt/hardyai-documents-required}/paperless/data
+        target: /usr/src/paperless/data
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${DOCUMENTS_STORAGE_ROOT:-/mnt/hardyai-documents-required}/paperless/media
+        target: /usr/src/paperless/media
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${DOCUMENTS_STORAGE_ROOT:-/mnt/hardyai-documents-required}/paperless/export
+        target: /usr/src/paperless/export
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${DOCUMENTS_SECRETS_ROOT:-/etc/hardyai/documents-required}/paperless_db_password
+        target: /run/secrets/paperless_db_password
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${DOCUMENTS_SECRETS_ROOT:-/etc/hardyai/documents-required}/paperless_secret_key
+        target: /run/secrets/paperless_secret_key
+        read_only: true
+        bind:
+          create_host_path: false
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /run:exec,mode=0755,uid=${JARVIS_UID:-1001},gid=${JARVIS_GID:-1001}
+      - /usr/src/paperless/consume:mode=0700,uid=${JARVIS_UID:-1001},gid=${JARVIS_GID:-1001}
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks: [documents-edge, paperless-data]
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8000/', timeout=3).read(1)
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 45s
+
+  document-worker:
+    image: jarvis-poc-app:local
+    profiles: ["documents"]
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 128
+    init: true
+    user: "${JARVIS_UID:-1001}:${JARVIS_GID:-1001}"
+    depends_on:
+      paperless-webserver:
+        condition: service_healthy
+    env_file:
+      - ../../.env
+    environment:
+      APP_ENV: production
+      OFFLINE_MODE: "true"
+      DOCUMENTS_ENABLED: "true"
+      DOCUMENTS_LOCAL_ONLY: "true"
+      DATABASE_PATH: /opt/jarvis/data/jarvis_v2.db
+      DOCUMENTS_DATABASE_PATH: /opt/jarvis/documents/documents.db
+      DOCUMENTS_SPOOL_PATH: /opt/jarvis/documents/spool
+      DOCUMENTS_ARTIFACTS_PATH: /opt/jarvis/documents/artifacts
+      DOCUMENTS_MIN_FREE_BYTES: "${DOCUMENTS_MIN_FREE_BYTES:-1073741824}"
+      DOCUMENTS_MAX_IMAGE_PIXELS: "${DOCUMENTS_MAX_IMAGE_PIXELS:-64000000}"
+      DOCUMENT_JOB_SOCKET_PATH: /run/jarvis-documents/enqueue.sock
+      DOCUMENTS_PROCESSING_ENABLED: "${DOCUMENTS_PROCESSING_ENABLED:-false}"
+      DOCUMENT_PROCESS_MAX_ATTEMPTS: "${DOCUMENT_PROCESS_MAX_ATTEMPTS:-60}"
+      DOCUMENT_PROCESS_LEASE_SECONDS: "${DOCUMENT_PROCESS_LEASE_SECONDS:-300}"
+      DOCUMENTS_WATCH_ENABLED: "${DOCUMENTS_WATCH_ENABLED:-false}"
+      DOCUMENTS_WATCH_PATH: /opt/jarvis/documents/import
+      DOCUMENTS_WATCH_OWNER_ID: "${DOCUMENTS_WATCH_OWNER_ID:-}"
+      DOCUMENTS_WATCH_STABLE_SECONDS: "${DOCUMENTS_WATCH_STABLE_SECONDS:-5}"
+      DOCUMENTS_ORIGIN_RECONCILIATION_ENABLED: "${DOCUMENTS_ORIGIN_RECONCILIATION_ENABLED:-false}"
+      DOCUMENTS_ORIGIN_OWNER_ID: "${DOCUMENTS_ORIGIN_OWNER_ID:-}"
+      DOCUMENTS_ORIGIN_RECONCILIATION_LIMIT: "${DOCUMENTS_ORIGIN_RECONCILIATION_LIMIT:-50}"
+      DOCUMENTS_DOCLING_ENABLED: "${DOCUMENTS_DOCLING_ENABLED:-false}"
+      DOCLING_BASE_URL: http://docling-serve:5001
+      DOCLING_API_KEY_PATH: /run/secrets/docling_api_key
+      DOCLING_SERVER_VERSION: "${DOCLING_SERVER_VERSION:-1.30.0}"
+      DOCLING_IMAGE_DIGEST: "${DOCLING_IMAGE_DIGEST:-sha256:0244089785d5ccb7570dfaa593cdc81ec64a1aadc63ffa9dce065064b0a6a807}"
+      DOCLING_TIMEOUT_SECONDS: "${DOCLING_TIMEOUT_SECONDS:-300}"
+      DOCLING_MAX_RESPONSE_BYTES: "${DOCLING_MAX_RESPONSE_BYTES:-67108864}"
+      PAPERLESS_BASE_URL: http://paperless-webserver:8000
+      PAPERLESS_ARCHIVE_TOKEN_PATH: /run/secrets/paperless_archive_token
+      PAPERLESS_READ_USER_ID_PATH: /run/secrets/paperless_read_user_id
+      DISCORD_ENABLED: "false"
+      DISCORD_ATTACHMENT_INGRESS_ENABLED: "false"
+      CALENDAR_GOOGLE_ENABLED: "false"
+      CALENDAR_INBOX_ENABLED: "false"
+      EMAIL_AGENT_ENABLED: "false"
+      EMAIL_AGENT_SYNC_ENABLED: "false"
+      PLANE_ENABLED: "false"
+      WEB_RESEARCH_ENABLED: "false"
+      MICRO_MODEL_ENABLED: "false"
+      MAIN_REPAIR_MODEL_ENABLED: "false"
+      ACTION_TICKET_REVIEW_ENABLED: "false"
+    command: ["python", "-m", "app.workers.document_processing_worker"]
+    volumes:
+      - ../../data:/opt/jarvis/data
+      - type: bind
+        source: ${DOCUMENTS_STORAGE_ROOT:-/mnt/hardyai-documents-required}/jarvis
+        target: /opt/jarvis/documents
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${DOCUMENTS_SECRETS_ROOT:-/etc/hardyai/documents-required}/paperless_archive_token
+        target: /run/secrets/paperless_archive_token
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${DOCUMENTS_SECRETS_ROOT:-/etc/hardyai/documents-required}/paperless_read_user_id
+        target: /run/secrets/paperless_read_user_id
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${DOCUMENTS_SECRETS_ROOT:-/etc/hardyai/documents-required}/docling_api_key
+        target: /run/secrets/docling_api_key
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${DOCUMENTS_STORAGE_ROOT:-/mnt/hardyai-documents-required}/control
+        target: /run/jarvis-documents
+        bind:
+          create_host_path: false
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks: [documents-edge, documents-inference]
+    healthcheck:
+      test: ["CMD", "python", "-c", "from pathlib import Path; raise SystemExit(0 if Path('/run/jarvis-documents/enqueue.sock').is_socket() else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  document-gateway:
+    image: jarvis-poc-app:local
+    profiles: ["documents"]
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 128
+    init: true
+    user: "${JARVIS_UID:-1001}:${JARVIS_GID:-1001}"
+    depends_on:
+      paperless-webserver:
+        condition: service_healthy
+      document-worker:
+        condition: service_healthy
+    env_file:
+      - ../../.env
+    environment:
+      APP_ENV: production
+      OFFLINE_MODE: "true"
+      DOCUMENTS_ENABLED: "true"
+      DOCUMENTS_LOCAL_ONLY: "true"
+      DOCUMENTS_DATABASE_PATH: /opt/jarvis/documents/documents.db
+      DOCUMENTS_SPOOL_PATH: /opt/jarvis/documents/spool
+      DOCUMENTS_MIN_FREE_BYTES: "${DOCUMENTS_MIN_FREE_BYTES:-1073741824}"
+      DOCUMENTS_MAX_IMAGE_PIXELS: "${DOCUMENTS_MAX_IMAGE_PIXELS:-64000000}"
+      DOCUMENT_JOB_SOCKET_PATH: /run/jarvis-documents/enqueue.sock
+      DOCUMENTS_PROCESSING_ENABLED: "${DOCUMENTS_PROCESSING_ENABLED:-false}"
+      DOCUMENTS_DOCLING_ENABLED: "${DOCUMENTS_DOCLING_ENABLED:-false}"
+      DOCLING_SERVER_VERSION: "${DOCLING_SERVER_VERSION:-1.30.0}"
+      DOCLING_IMAGE_DIGEST: "${DOCLING_IMAGE_DIGEST:-sha256:0244089785d5ccb7570dfaa593cdc81ec64a1aadc63ffa9dce065064b0a6a807}"
+      PAPERLESS_BASE_URL: http://paperless-webserver:8000
+      PAPERLESS_READ_TOKEN_PATH: /run/secrets/paperless_read_token
+      JARVIS_OPERATOR_API_KEY: ""
+      JARVIS_OPERATOR_API_KEY_FILE: /run/secrets/jarvis_operator_api_key
+      DISCORD_ENABLED: "false"
+      DISCORD_ATTACHMENT_INGRESS_ENABLED: "false"
+      CALENDAR_GOOGLE_ENABLED: "false"
+      CALENDAR_INBOX_ENABLED: "false"
+      EMAIL_AGENT_ENABLED: "false"
+      EMAIL_AGENT_SYNC_ENABLED: "false"
+      PLANE_ENABLED: "false"
+      WEB_RESEARCH_ENABLED: "false"
+      MICRO_MODEL_ENABLED: "false"
+      MAIN_REPAIR_MODEL_ENABLED: "false"
+      ACTION_TICKET_REVIEW_ENABLED: "false"
+    command:
+      - python
+      - -m
+      - uvicorn
+      - app.api.document_app:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8010"
+      - --workers
+      - "1"
+      - --no-access-log
+    volumes:
+      - type: bind
+        source: ${DOCUMENTS_STORAGE_ROOT:-/mnt/hardyai-documents-required}/jarvis
+        target: /opt/jarvis/documents
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${DOCUMENTS_SECRETS_ROOT:-/etc/hardyai/documents-required}/paperless_read_token
+        target: /run/secrets/paperless_read_token
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${DOCUMENTS_SECRETS_ROOT:-/etc/hardyai/documents-required}/jarvis_operator_api_key
+        target: /run/secrets/jarvis_operator_api_key
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${DOCUMENTS_STORAGE_ROOT:-/mnt/hardyai-documents-required}/control
+        target: /run/jarvis-documents
+        bind:
+          create_host_path: false
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks: [documents-control, documents-edge]
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import json, urllib.request;
+          payload=json.load(urllib.request.urlopen('http://127.0.0.1:8010/documents/ready', timeout=3));
+          raise SystemExit(0 if payload.get('status') == 'ready' else 1)
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 30s
+
+  discord-attachment-ingress:
+    image: jarvis-poc-app:local
+    profiles: ["discord-attachments"]
+    restart: unless-stopped
+    init: true
+    user: "${JARVIS_UID:-1001}:${JARVIS_GID:-1001}"
+    depends_on:
+      document-gateway:
+        condition: service_healthy
+    env_file:
+      - ../../.env
+    environment:
+      APP_ENV: production
+      OFFLINE_MODE: "false"
+      DISCORD_ATTACHMENT_INGRESS_ENABLED: "true"
+      DISCORD_ATTACHMENT_INGRESS_TIMEOUT_SECONDS: "${DISCORD_ATTACHMENT_INGRESS_TIMEOUT_SECONDS:-180}"
+      DOCUMENTS_ENABLED: "false"
+      DOCUMENTS_MAX_UPLOAD_BYTES: "${DOCUMENTS_MAX_UPLOAD_BYTES:-52428800}"
+      DOCUMENT_GATEWAY_BASE_URL: http://document-gateway:8010
+      DOCUMENT_GATEWAY_OPERATOR_KEY_PATH: /run/secrets/jarvis_operator_api_key
+      JARVIS_OPERATOR_API_KEY: ""
+      JARVIS_OPERATOR_API_KEY_FILE: /run/secrets/jarvis_operator_api_key
+      DISCORD_ENABLED: "false"
+      CALENDAR_GOOGLE_ENABLED: "false"
+      CALENDAR_INBOX_ENABLED: "false"
+      EMAIL_AGENT_ENABLED: "false"
+      EMAIL_AGENT_SYNC_ENABLED: "false"
+      PLANE_ENABLED: "false"
+      WEB_RESEARCH_ENABLED: "false"
+      MICRO_MODEL_ENABLED: "false"
+      MAIN_REPAIR_MODEL_ENABLED: "false"
+      ACTION_TICKET_REVIEW_ENABLED: "false"
+    command:
+      - python
+      - -m
+      - uvicorn
+      - app.api.discord_attachment_app:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8020"
+      - --workers
+      - "1"
+      - --no-access-log
+    volumes:
+      - type: bind
+        source: ${DOCUMENTS_SECRETS_ROOT:-/etc/hardyai/documents-required}/jarvis_operator_api_key
+        target: /run/secrets/jarvis_operator_api_key
+        read_only: true
+        bind:
+          create_host_path: false
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 96
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks: [discord-ingress-control, documents-control, discord-attachment-egress]
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import json, urllib.request;
+          payload=json.load(urllib.request.urlopen('http://127.0.0.1:8020/health', timeout=3));
+          raise SystemExit(0 if payload.get('status') == 'ok' else 1)
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  docling-serve:
+    image: ghcr.io/docling-project/docling-serve@sha256:0244089785d5ccb7570dfaa593cdc81ec64a1aadc63ffa9dce065064b0a6a807
+    profiles: ["documents-phase3"]
+    restart: unless-stopped
+    init: true
+    user: "${JARVIS_UID:-1001}:${JARVIS_GID:-1001}"
+    mem_limit: 8g
+    cpus: 4.0
+    pids_limit: 512
+    environment:
+      UVICORN_HOST: 0.0.0.0
+      UVICORN_PORT: "5001"
+      UVICORN_WORKERS: "1"
+      UVICORN_PROXY_HEADERS: "false"
+      DOCLING_SERVE_ENABLE_UI: "false"
+      DOCLING_SERVE_SHOW_VERSION_INFO: "true"
+      DOCLING_SERVE_ENABLE_MANAGEMENT_ENDPOINTS: "false"
+      DOCLING_SERVE_DEBUG_ERROR_DETAILS: "false"
+      DOCLING_SERVE_ENABLE_REMOTE_SERVICES: "false"
+      DOCLING_SERVE_ALLOW_EXTERNAL_PLUGINS: "false"
+      DOCLING_SERVE_ALLOW_CUSTOM_VLM_CONFIG: "false"
+      DOCLING_SERVE_ALLOW_CUSTOM_PICTURE_DESCRIPTION_CONFIG: "false"
+      DOCLING_SERVE_ALLOW_CUSTOM_CODE_FORMULA_CONFIG: "false"
+      DOCLING_SERVE_ALLOW_CUSTOM_TABLE_STRUCTURE_CONFIG: "false"
+      DOCLING_SERVE_ALLOW_CUSTOM_LAYOUT_CONFIG: "false"
+      DOCLING_SERVE_ALLOW_CUSTOM_PICTURE_CLASSIFICATION_CONFIG: "false"
+      DOCLING_SERVE_ALLOW_CUSTOM_OCR_CONFIG: "false"
+      DOCLING_SERVE_ALLOWED_SOURCE_TYPES: file
+      DOCLING_SERVE_ALLOWED_TARGET_TYPES: inbody
+      DOCLING_SERVE_ALLOWED_IMAGE_EXPORT_MODES: placeholder
+      DOCLING_SERVE_MAX_DOCUMENT_TIMEOUT: "900"
+      DOCLING_SERVE_MAX_NUM_PAGES: "100"
+      DOCLING_SERVE_MAX_FILE_SIZE: "52428800"
+      DOCLING_SERVE_MAX_SOURCES_PER_REQUEST: "1"
+      DOCLING_SERVE_SINGLE_USE_RESULTS: "true"
+      DOCLING_SERVE_OPTIONS_CACHE_SIZE: "1"
+      DOCLING_SERVE_ENG_KIND: local
+      DOCLING_SERVE_ENG_LOC_NUM_WORKERS: "1"
+      DOCLING_DEVICE: cpu
+      DOCLING_NUM_THREADS: "4"
+      DOCLING_SERVE_CORS_ORIGINS: "[]"
+      DOCLING_SERVE_CORS_METHODS: "[]"
+      DOCLING_SERVE_CORS_HEADERS: "[]"
+      DOCLING_SERVE_OTEL_ENABLE_METRICS: "false"
+      DOCLING_SERVE_OTEL_ENABLE_PROMETHEUS: "false"
+      DOCLING_SERVE_OTEL_ENABLE_TRACES: "false"
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      DO_NOT_TRACK: "1"
+      DOCLING_SERVE_SCRATCH_PATH: /tmp/docling
+    entrypoint: ["/bin/sh", "/opt/hardyai/docling-entrypoint.sh"]
+    volumes:
+      - ./docling-entrypoint.sh:/opt/hardyai/docling-entrypoint.sh:ro
+      - type: bind
+        source: ${DOCUMENTS_SECRETS_ROOT:-/etc/hardyai/documents-required}/docling_api_key
+        target: /run/secrets/docling_api_key
+        read_only: true
+        bind:
+          create_host_path: false
+    read_only: true
+    tmpfs:
+      - /tmp:exec,mode=0700,uid=${JARVIS_UID:-1001},gid=${JARVIS_GID:-1001}
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks: [documents-inference]
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import pathlib,urllib.request; key=pathlib.Path('/run/secrets/docling_api_key').read_text().strip(); request=urllib.request.Request('http://127.0.0.1:5001/ready',headers={'X-Api-Key':key}); urllib.request.urlopen(request,timeout=5).read(1)"
+      interval: 15s
+      timeout: 8s
+      retries: 24
+      start_period: 120s
+
 volumes:
   ollama-data:
+
+networks:
+  default:
+  documents-control:
+    internal: true
+  documents-edge:
+    internal: true
+  paperless-data:
+    internal: true
+  documents-inference:
+    internal: true
+  discord-ingress-control:
+    internal: true
+  discord-attachment-egress:

@@ -195,7 +195,7 @@ def _check_platform(checks: InstallChecks) -> None:
 
 
 def _check_dependencies(checks: InstallChecks) -> None:
-    modules = ("fastapi", "uvicorn", "pydantic", "httpx", "discord", "yaml")
+    modules = ("fastapi", "uvicorn", "pydantic", "httpx", "discord", "yaml", "python_multipart")
     missing = [name for name in modules if importlib.util.find_spec(name) is None]
     if missing:
         checks.fail("python_dependencies", f"missing: {', '.join(missing)}")
@@ -343,6 +343,179 @@ def _check_filesystem(checks: InstallChecks, settings: Any) -> None:
         )
     else:
         checks.pass_("skill_artifacts", "runtime auto-compile is disabled")
+
+
+def _linux_mount_source(path: Path) -> tuple[Path, str] | None:
+    try:
+        candidates: list[tuple[int, Path, str]] = []
+        for line in Path("/proc/self/mountinfo").read_text(encoding="utf-8").splitlines():
+            left, right = line.split(" - ", 1)
+            left_fields = left.split()
+            right_fields = right.split()
+            mount_path = Path(left_fields[4].replace("\\040", " ")).resolve()
+            try:
+                path.relative_to(mount_path)
+            except ValueError:
+                continue
+            candidates.append((len(mount_path.parts), mount_path, right_fields[1]))
+        if not candidates:
+            return None
+        _, mount_path, source = max(candidates, key=lambda item: item[0])
+        return mount_path, source
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _check_documents(checks: InstallChecks, settings: Any, *, require_documents: bool) -> None:
+    enabled = bool(getattr(settings, "documents_enabled", False))
+    if not enabled:
+        if require_documents:
+            checks.fail("documents", "DOCUMENTS_ENABLED is false")
+        else:
+            checks.pass_("documents", "disabled")
+        return
+    if not bool(getattr(settings, "documents_local_only", False)):
+        checks.fail("documents_local_only", "DOCUMENTS_LOCAL_ONLY must remain true")
+    else:
+        checks.pass_("documents_local_only", "local-only document policy enabled")
+    if not str(getattr(settings, "operator_api_key", "") or "").strip():
+        checks.fail("documents_operator_auth", "operator key file/value is unavailable")
+    else:
+        checks.pass_("documents_operator_auth", "configured (value hidden)")
+
+    storage_root = Path(os.getenv("DOCUMENTS_STORAGE_ROOT", "")).expanduser()
+    if not str(storage_root) or not storage_root.is_absolute() or not storage_root.is_dir():
+        checks.fail("documents_storage", "DOCUMENTS_STORAGE_ROOT must name an existing absolute directory")
+    else:
+        resolved_storage = storage_root.resolve()
+        required_directories = (
+            "paperless/valkey",
+            "paperless/postgres",
+            "paperless/data",
+            "paperless/media",
+            "paperless/export",
+            "jarvis",
+            "jarvis/spool",
+            "control",
+            "backups",
+            "restore-drills",
+        )
+        if bool(getattr(settings, "documents_processing_enabled", False)):
+            required_directories += ("jarvis/artifacts", "jarvis/import")
+        missing = [name for name in required_directories if not (resolved_storage / name).is_dir()]
+        operator_writable = (
+            "paperless/data",
+            "paperless/media",
+            "paperless/export",
+            "jarvis",
+            "jarvis/spool",
+            "control",
+            "backups",
+            "restore-drills",
+        )
+        if bool(getattr(settings, "documents_processing_enabled", False)):
+            operator_writable += ("jarvis/artifacts", "jarvis/import")
+        if missing:
+            checks.fail("documents_storage", f"missing pre-created directories: {', '.join(missing)}")
+        elif not all(os.access(resolved_storage / name, os.W_OK) for name in operator_writable):
+            checks.fail("documents_storage", "one or more operator-owned document directories are not writable")
+        else:
+            checks.pass_("documents_storage", f"pre-created with operator-owned paths writable: {resolved_storage}")
+        if platform.system() == "Linux":
+            mount = _linux_mount_source(resolved_storage)
+            if mount is None:
+                checks.fail("documents_encryption", "could not resolve the backing mount")
+            else:
+                mount_path, source = mount
+                device_name = Path(source).resolve().name if source.startswith("/dev/") else ""
+                dm_uuid_path = Path("/sys/class/block") / device_name / "dm" / "uuid"
+                try:
+                    dm_uuid = dm_uuid_path.read_text(encoding="utf-8").strip()
+                except OSError:
+                    dm_uuid = ""
+                if not dm_uuid.startswith("CRYPT-LUKS"):
+                    checks.fail(
+                        "documents_encryption",
+                        f"backing mount {mount_path} ({source}) is not verified as LUKS",
+                    )
+                else:
+                    checks.pass_("documents_encryption", f"LUKS backing device verified for {mount_path}")
+        else:
+            checks.warn("documents_encryption", "LUKS verification is available only on the Ubuntu runtime")
+
+    secrets_root = Path(os.getenv("DOCUMENTS_SECRETS_ROOT", "")).expanduser()
+    secret_names = (
+        "paperless_db_password",
+        "paperless_secret_key",
+        "paperless_archive_token",
+        "paperless_read_token",
+        "paperless_read_user_id",
+        "jarvis_operator_api_key",
+    )
+    if bool(getattr(settings, "documents_docling_enabled", False)):
+        secret_names += ("docling_api_key",)
+    missing_secrets: list[str] = []
+    secret_values: dict[str, str] = {}
+    for name in secret_names:
+        path = secrets_root / name
+        if not path.is_file() or path.is_symlink():
+            missing_secrets.append(name)
+            continue
+        try:
+            secret_values[name] = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            missing_secrets.append(name)
+            continue
+        if not secret_values[name]:
+            missing_secrets.append(name)
+        if os.name == "posix" and stat.S_IMODE(path.stat().st_mode) & 0o027:
+            checks.fail("documents_secrets", f"{path} must not be group-writable or world-accessible")
+    if missing_secrets:
+        checks.fail("documents_secrets", f"missing, empty, or unsafe: {', '.join(sorted(set(missing_secrets)))}")
+    elif not secret_values["paperless_read_user_id"].isdigit() or int(secret_values["paperless_read_user_id"]) <= 0:
+        checks.fail("documents_read_user", "Paperless read-user ID must be a positive integer")
+    elif secret_values["paperless_archive_token"] == secret_values["paperless_read_token"]:
+        checks.fail("documents_tokens", "Paperless archive and read tokens must be distinct")
+    else:
+        checks.pass_("documents_secrets", "required files present (values hidden)")
+        checks.pass_("documents_tokens", "archive and read credentials are distinct")
+
+    compose_text = (REPO_ROOT / "deploy" / "docker" / "compose.yaml").read_text(encoding="utf-8")
+    required_controls = (
+        "PAPERLESS_OCR_MODE: auto",
+        'PAPERLESS_CONSUMER_DELETE_DUPLICATES: "true"',
+        "internal: true",
+    )
+    offline_document_processes = compose_text.count('OFFLINE_MODE: "true"') >= 2
+    if not all(control in compose_text for control in required_controls) or not offline_document_processes:
+        checks.fail("documents_compose", "required Paperless/offline network controls are missing")
+    else:
+        document_images = re.findall(
+            r"image:\s+(?:ghcr\.io/paperless-ngx/paperless-ngx|postgres|valkey/valkey)([^\s]*)",
+            compose_text,
+        )
+        if len(document_images) != 3 or any(not value.startswith("@sha256:") for value in document_images):
+            checks.fail("documents_images", "Paperless/PostgreSQL/Valkey images must be digest pinned")
+        else:
+            checks.pass_("documents_offline", "gateway and archive worker enforce fail-closed offline mode")
+            checks.pass_("documents_images", "Paperless stack images are digest pinned")
+            checks.pass_("documents_compose", "duplicate rejection, OCR mode, and internal networks configured")
+    if bool(getattr(settings, "documents_docling_enabled", False)):
+        expected_digest = str(getattr(settings, "docling_image_digest", "") or "").strip()
+        pinned = (
+            f"ghcr.io/docling-project/docling-serve@{expected_digest}" in compose_text
+            and expected_digest.startswith("sha256:")
+        )
+        controls = (
+            'DOCLING_SERVE_ENABLE_REMOTE_SERVICES: "false"',
+            'DOCLING_SERVE_ALLOW_EXTERNAL_PLUGINS: "false"',
+            "networks: [documents-inference]",
+            "DOCLING_DEVICE: cpu",
+        )
+        if not pinned or not all(value in compose_text for value in controls):
+            checks.fail("documents_docling", "Docling image pin or offline controls are invalid")
+        else:
+            checks.pass_("documents_docling", "digest pin and CPU-only no-egress controls verified")
 
 
 def _check_local_models(
@@ -834,6 +1007,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--probe-models", action="store_true", help="run a short direct inference against each configured Ollama model")
     parser.add_argument("--require-models", action="store_true", help="fail when local model lanes are disabled")
     parser.add_argument("--require-discord", action="store_true", help="fail when the Discord adapter is disabled")
+    parser.add_argument("--require-documents", action="store_true", help="fail unless the local document stack is provisioned")
+    parser.add_argument(
+        "--documents-only",
+        action="store_true",
+        help="run only host-side Phase 1 document storage, secret, and Compose checks",
+    )
     parser.add_argument("--timeout-seconds", type=float, default=120.0, help="bounded inference/API timeout (default: 120)")
     parser.add_argument("--strict", action="store_true", help="return a failure exit code for warnings as well as failures")
     parser.add_argument("--json", action="store_true", dest="json_output", help="emit machine-readable JSON")
@@ -851,30 +1030,34 @@ def main(argv: list[str] | None = None) -> int:
     from app.config import settings
 
     checks = InstallChecks()
-    _check_platform(checks)
-    _check_dependencies(checks)
-    _check_skill_artifacts(checks)
-    _check_filesystem(checks, settings)
-    _check_local_models(
-        checks,
-        settings,
-        require_models=args.require_models,
-        probe_models=args.probe_models,
-        timeout_seconds=args.timeout_seconds,
-    )
-    _check_web_research(checks, settings)
-    _check_discord(checks, settings, require_discord=args.require_discord)
-    _check_google_calendar(checks, settings)
-    _check_email_agent(checks, settings)
-    _check_action_tickets(checks, settings)
-    if args.api_url:
-        _check_live_api(
+    if args.documents_only:
+        _check_documents(checks, settings, require_documents=True)
+    else:
+        _check_platform(checks)
+        _check_dependencies(checks)
+        _check_skill_artifacts(checks)
+        _check_filesystem(checks, settings)
+        _check_local_models(
             checks,
             settings,
-            api_url=args.api_url,
-            smoke_turn=args.smoke_turn,
+            require_models=args.require_models,
+            probe_models=args.probe_models,
             timeout_seconds=args.timeout_seconds,
         )
+        _check_web_research(checks, settings)
+        _check_discord(checks, settings, require_discord=args.require_discord)
+        _check_google_calendar(checks, settings)
+        _check_email_agent(checks, settings)
+        _check_action_tickets(checks, settings)
+        _check_documents(checks, settings, require_documents=args.require_documents)
+        if args.api_url:
+            _check_live_api(
+                checks,
+                settings,
+                api_url=args.api_url,
+                smoke_turn=args.smoke_turn,
+                timeout_seconds=args.timeout_seconds,
+            )
 
     counts = {
         level: sum(result.level == level for result in checks.results)

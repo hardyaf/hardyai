@@ -18,6 +18,11 @@ from app.skills.registry_service import SkillRegistryService
 from app.tickets.repository import TicketRepository
 from app.tickets.service import ActionTicketService
 from app.tools.home_service import HomeService
+from app.jobs.repository import DurableJobRepository
+from app.reviews.repository import HumanReviewRepository
+from app.reviews.service import HumanReviewService
+from app.skills.domains.documents.query_service import DocumentQueryService
+from app.integrations.document_gateway.client import DocumentGatewayClient
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +43,11 @@ class ApplicationContainer:
     private_notes_service: PrivateNotesDigestService
     calendar_inbox_service: CalendarInboxService | None
     email_agent_service: EmailAgentService | None
+    documents_service: DocumentQueryService | None
+    document_gateway_client: DocumentGatewayClient | None
+    job_repository: DurableJobRepository
+    human_review_repository: HumanReviewRepository
+    human_review_service: HumanReviewService
     durable_write_service: DurableWriteService
     runtime_power: RuntimePowerController
 
@@ -61,6 +71,11 @@ class ApplicationContainer:
             private_notes_service=runtime.private_notes_service,
             calendar_inbox_service=runtime.calendar_inbox_service,
             email_agent_service=runtime.email_agent_service,
+            documents_service=runtime.documents_service,
+            document_gateway_client=runtime.document_gateway_client,
+            job_repository=runtime.job_repository,
+            human_review_repository=runtime.human_review_repository,
+            human_review_service=runtime.human_review_service,
             durable_write_service=runtime.durable_write_service,
             runtime_power=runtime.runtime_power,
         )

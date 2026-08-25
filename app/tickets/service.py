@@ -184,6 +184,17 @@ class ActionTicketService:
             return TicketCaptureResult(request_id=request_id, ticket=None, context_reference=context_reference)
         if normalized_intent.startswith("email."):
             return TicketCaptureResult(request_id=request_id, ticket=None, context_reference=context_reference)
+        if not ticket_is_eligible(
+            intent=normalized_intent,
+            route=route,
+            result={},
+            skill_id=skill_id,
+        ):
+            return TicketCaptureResult(
+                request_id=request_id,
+                ticket=None,
+                context_reference=context_reference,
+            )
 
         active = self._active_ticket(context_reference)
         active_ticket_id = str((active or {}).get("ticket_id") or "")

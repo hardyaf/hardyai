@@ -99,6 +99,10 @@ def test_execution_dispatcher_runs_email_only_through_domain_handler():
         context={"source_interface": "discord", "identity_bound": True},
     )
 
-    assert result == {"status": "ok", "message": "E1 - fixture"}
+    assert result == {
+        "status": "ok",
+        "message": "E1 - fixture",
+        "_persistence_policy": "sensitive_domain",
+    }
     assert email.calls[0]["intent"] == "email.list_recent"
     assert email.calls[0]["context"]["identity_bound"] is True

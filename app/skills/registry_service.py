@@ -1264,7 +1264,7 @@ class SkillRegistryService:
             return {
                 "status": "skipped",
                 "reason": "up_to_date",
-                "output_path": str(resolved_output),
+                "output_path": self._relative_repo_path(resolved_output),
                 "metadata_path": str(metadata_path),
                 "source_hash": source_hash,
                 "skill_count": len(selected_skills),
@@ -1333,7 +1333,7 @@ class SkillRegistryService:
                 "compiled_at": compiled_at,
                 "source_hash": source_hash,
                 "content_hash": content_hash,
-                "output_path": str(resolved_output),
+                "output_path": self._relative_repo_path(resolved_output),
                 "min_critical_level": critical_threshold,
                 "skill_count": len(selected_skills),
                 "missing_markdown_count": len({path for path in missing_markdown_paths if path}),
@@ -1462,7 +1462,7 @@ class SkillRegistryService:
                 "compiled_at": compiled_at,
                 "source_hash": source_hash,
                 "content_hash": content_hash,
-                "output_path": str(resolved_output),
+                "output_path": self._relative_repo_path(resolved_output),
                 "skill_count": len(selected),
             },
         )

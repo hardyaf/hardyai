@@ -38,7 +38,11 @@ def ticket_is_eligible(
 ) -> bool:
     normalized_intent = str(intent or "").strip().lower()
     normalized_skill = str(skill_id or "").strip().lower()
-    if normalized_skill == EMAIL_SKILL_ID or normalized_intent.startswith("email."):
+    if (
+        normalized_skill == EMAIL_SKILL_ID
+        or normalized_intent.startswith("email.")
+        or normalized_intent.startswith("documents.")
+    ):
         return False
     return not is_confirmed_conversation(
         intent=intent,

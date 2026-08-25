@@ -6,6 +6,8 @@ from enum import StrEnum
 from typing import Any
 from uuid import uuid4
 
+from app.jobs.types import JobStatus as JobStatus
+
 
 def utc_now() -> datetime:
     return datetime.now(UTC)
@@ -59,14 +61,6 @@ class TicketEntryType(StrEnum):
     REVIEW_RESULT = "review_result"
     REMEDIATION_CREATED = "remediation_created"
     PLANE_SYNC_RESULT = "plane_sync_result"
-
-
-class JobStatus(StrEnum):
-    PENDING = "pending"
-    RUNNING = "running"
-    RETRY = "retry"
-    COMPLETED = "completed"
-    DEAD_LETTER = "dead_letter"
 
 
 class JobType(StrEnum):

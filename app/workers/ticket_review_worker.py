@@ -9,6 +9,7 @@ from app.config import settings
 from app.tickets.repository import TicketRepository
 from app.tickets.review_service import TicketReviewService
 from app.tickets.types import TicketStatus
+from app.services.offline_runtime_policy import validate_offline_runtime
 
 
 class TicketReviewWorker:
@@ -149,6 +150,7 @@ class TicketReviewWorker:
 def main() -> int:
     if not settings.action_ticket_review_enabled:
         raise RuntimeError("ACTION_TICKET_REVIEW_ENABLED must be true to run the review worker.")
+    validate_offline_runtime(settings, entrypoint="ticket-review-worker")
     from app.runtime import ticket_repository, ticket_review_service
 
     worker = TicketReviewWorker(

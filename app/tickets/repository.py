@@ -10,7 +10,8 @@ from typing import Any, ContextManager
 from app.db.connection import open_sqlite_connection
 from app.db.migrations import initialize_schema
 from app.db.transaction import sqlite_transaction
-from app.tickets.types import JobStatus, TicketKind, TicketStatus, iso_utc, new_id, utc_now
+from app.jobs.repository import DurableJobRepository
+from app.tickets.types import TicketKind, TicketStatus, iso_utc, new_id, utc_now
 
 
 def _json_dump(value: Any) -> str:
@@ -87,10 +88,15 @@ class TicketRepository:
         self._database_path, self._conn = open_sqlite_connection(database_path)
         self._lock = RLock()
         initialize_schema(self._conn)
+        self._jobs = DurableJobRepository(connection=self._conn, lock=self._lock)
 
     @property
     def database_path(self) -> str:
         return str(self._database_path)
+
+    @property
+    def job_repository(self) -> DurableJobRepository:
+        return self._jobs
 
     def _transaction(self, *, immediate: bool = False) -> ContextManager[sqlite3.Cursor]:
         return sqlite_transaction(
@@ -491,41 +497,15 @@ class TicketRepository:
         max_attempts: int = 3,
         cursor: sqlite3.Cursor | None = None,
     ) -> dict[str, Any]:
-        now = iso_utc()
-        job_id = new_id()
-        values = (
-            job_id,
-            job_type,
-            aggregate_id,
-            idempotency_key,
-            _json_dump(payload),
-            JobStatus.PENDING.value,
-            available_at or now,
-            max(1, int(max_attempts)),
-            now,
-            now,
+        return self._jobs.enqueue_job(
+            job_type=job_type,
+            aggregate_id=aggregate_id,
+            idempotency_key=idempotency_key,
+            payload=payload,
+            available_at=available_at,
+            max_attempts=max_attempts,
+            cursor=cursor,
         )
-        sql = """
-            INSERT INTO durable_jobs (
-                job_id, job_type, aggregate_id, idempotency_key, payload_json,
-                status, available_at, max_attempts, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(idempotency_key) DO NOTHING
-        """
-        if cursor is not None:
-            cursor.execute(sql, values)
-            row = cursor.execute(
-                "SELECT * FROM durable_jobs WHERE idempotency_key = ?",
-                (idempotency_key,),
-            ).fetchone()
-            return self._job_row(row)
-        with self._transaction(immediate=True) as cur:
-            cur.execute(sql, values)
-            row = cur.execute(
-                "SELECT * FROM durable_jobs WHERE idempotency_key = ?",
-                (idempotency_key,),
-            ).fetchone()
-        return self._job_row(row)
 
     def schedule_verification(
         self,
@@ -579,88 +559,16 @@ class TicketRepository:
         lease_seconds: float,
         now: datetime | None = None,
     ) -> list[dict[str, Any]]:
-        current = now or utc_now()
-        current_text = iso_utc(current)
-        lease_text = iso_utc(current + timedelta(seconds=max(1.0, float(lease_seconds))))
-        bounded = max(1, min(int(limit), 100))
-        claimed: list[sqlite3.Row] = []
-        with self._transaction(immediate=True) as cur:
-            cur.execute(
-                """
-                UPDATE durable_jobs
-                SET status = CASE WHEN attempt_count >= max_attempts THEN ? ELSE ? END,
-                    lease_owner = NULL,
-                    lease_expires_at = NULL,
-                    available_at = ?,
-                    updated_at = ?,
-                    last_error_code = 'lease_expired'
-                WHERE status = ? AND lease_expires_at <= ?
-                """,
-                (
-                    JobStatus.DEAD_LETTER.value,
-                    JobStatus.RETRY.value,
-                    current_text,
-                    current_text,
-                    JobStatus.RUNNING.value,
-                    current_text,
-                ),
-            )
-            rows = cur.execute(
-                """
-                SELECT job_id FROM durable_jobs
-                WHERE job_type = ?
-                  AND status IN (?, ?)
-                  AND available_at <= ?
-                  AND attempt_count < max_attempts
-                ORDER BY available_at, created_at
-                LIMIT ?
-                """,
-                (
-                    job_type,
-                    JobStatus.PENDING.value,
-                    JobStatus.RETRY.value,
-                    current_text,
-                    bounded,
-                ),
-            ).fetchall()
-            for row in rows:
-                cur.execute(
-                    """
-                    UPDATE durable_jobs
-                    SET status = ?, lease_owner = ?, lease_expires_at = ?,
-                        attempt_count = attempt_count + 1, updated_at = ?
-                    WHERE job_id = ? AND status IN (?, ?)
-                    """,
-                    (
-                        JobStatus.RUNNING.value,
-                        worker_id,
-                        lease_text,
-                        current_text,
-                        row["job_id"],
-                        JobStatus.PENDING.value,
-                        JobStatus.RETRY.value,
-                    ),
-                )
-                if int(cur.rowcount or 0) == 1:
-                    claimed_row = cur.execute(
-                        "SELECT * FROM durable_jobs WHERE job_id = ?",
-                        (row["job_id"],),
-                    ).fetchone()
-                    if claimed_row is not None:
-                        claimed.append(claimed_row)
-        return [self._job_row(row) for row in claimed]
+        return self._jobs.claim_jobs(
+            job_type=job_type,
+            worker_id=worker_id,
+            limit=limit,
+            lease_seconds=lease_seconds,
+            now=now,
+        )
 
     def complete_job(self, *, job_id: str, worker_id: str) -> bool:
-        with self._transaction(immediate=True) as cur:
-            cur.execute(
-                """
-                UPDATE durable_jobs
-                SET status = ?, lease_owner = NULL, lease_expires_at = NULL, updated_at = ?
-                WHERE job_id = ? AND status = ? AND lease_owner = ?
-                """,
-                (JobStatus.COMPLETED.value, iso_utc(), job_id, JobStatus.RUNNING.value, worker_id),
-            )
-            return int(cur.rowcount or 0) == 1
+        return self._jobs.complete_job(job_id=job_id, worker_id=worker_id)
 
     def retry_job(
         self,
@@ -670,56 +578,18 @@ class TicketRepository:
         error_code: str,
         delay_seconds: float,
     ) -> bool:
-        now = utc_now()
-        with self._transaction(immediate=True) as cur:
-            row = cur.execute(
-                "SELECT attempt_count, max_attempts FROM durable_jobs WHERE job_id = ? AND lease_owner = ?",
-                (job_id, worker_id),
-            ).fetchone()
-            if row is None:
-                return False
-            status = (
-                JobStatus.DEAD_LETTER.value
-                if int(row["attempt_count"]) >= int(row["max_attempts"])
-                else JobStatus.RETRY.value
-            )
-            cur.execute(
-                """
-                UPDATE durable_jobs
-                SET status = ?, available_at = ?, lease_owner = NULL,
-                    lease_expires_at = NULL, last_error_code = ?, updated_at = ?
-                WHERE job_id = ? AND lease_owner = ?
-                """,
-                (
-                    status,
-                    iso_utc(now + timedelta(seconds=max(0.0, float(delay_seconds)))),
-                    error_code[:120],
-                    iso_utc(now),
-                    job_id,
-                    worker_id,
-                ),
-            )
-            return int(cur.rowcount or 0) == 1
+        return self._jobs.retry_job(
+            job_id=job_id,
+            worker_id=worker_id,
+            error_code=error_code,
+            delay_seconds=delay_seconds,
+        )
 
     def get_job(self, job_id: str) -> dict[str, Any] | None:
-        with self._lock:
-            row = self._conn.execute("SELECT * FROM durable_jobs WHERE job_id = ?", (job_id,)).fetchone()
-        return self._job_row(row) if row is not None else None
+        return self._jobs.get_job(job_id)
 
     def list_jobs(self, *, job_type: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
-        bounded = max(1, min(int(limit), 1000))
-        with self._lock:
-            if job_type:
-                rows = self._conn.execute(
-                    "SELECT * FROM durable_jobs WHERE job_type = ? ORDER BY created_at DESC LIMIT ?",
-                    (job_type, bounded),
-                ).fetchall()
-            else:
-                rows = self._conn.execute(
-                    "SELECT * FROM durable_jobs ORDER BY created_at DESC LIMIT ?",
-                    (bounded,),
-                ).fetchall()
-        return [self._job_row(row) for row in rows]
+        return self._jobs.list_jobs(job_type=job_type, limit=limit)
 
     def operations_summary(self) -> dict[str, Any]:
         with self._lock:
@@ -773,28 +643,13 @@ class TicketRepository:
         last_error_code: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        with self._transaction(immediate=True) as cur:
-            cur.execute(
-                """
-                INSERT INTO worker_heartbeats (
-                    worker_type, worker_id, status, last_seen_at,
-                    last_error_code, metadata_json
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(worker_type, worker_id) DO UPDATE SET
-                    status = excluded.status,
-                    last_seen_at = excluded.last_seen_at,
-                    last_error_code = excluded.last_error_code,
-                    metadata_json = excluded.metadata_json
-                """,
-                (
-                    worker_type,
-                    worker_id,
-                    status,
-                    iso_utc(),
-                    last_error_code,
-                    _json_dump(metadata or {}),
-                ),
-            )
+        self._jobs.record_worker_heartbeat(
+            worker_type=worker_type,
+            worker_id=worker_id,
+            status=status,
+            last_error_code=last_error_code,
+            metadata=metadata,
+        )
 
     def start_review_run(
         self,

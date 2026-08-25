@@ -80,3 +80,47 @@ def test_create_app_uses_explicit_application_container() -> None:
     )
     assert create_app.args.args[0].arg == "container"
     assert not _imports_module(main_path, "app.runtime")
+
+
+def test_document_domain_is_provider_neutral_and_core_does_not_mount_document_routes() -> None:
+    document_domain = _python_files(APP_ROOT / "skills" / "domains" / "documents")
+    forbidden_modules = ("app.integrations.paperless", "httpx", "fastapi")
+    offenders = {
+        module: [
+            path.relative_to(REPO_ROOT).as_posix()
+            for path in document_domain
+            if _imports_module(path, module)
+        ]
+        for module in forbidden_modules
+    }
+    assert offenders == {module: [] for module in forbidden_modules}
+
+    main_source = (APP_ROOT / "main.py").read_text(encoding="utf-8")
+    turn_source = (APP_ROOT / "services" / "turn_service.py").read_text(encoding="utf-8")
+    assert "routes.documents" not in main_source
+    assert "document.archive.v1" not in turn_source
+
+
+def test_document_gateway_never_opens_or_mounts_the_core_database() -> None:
+    gateway_files = [
+        APP_ROOT / "api" / "document_app.py",
+        APP_ROOT / "api" / "routes" / "documents.py",
+        APP_ROOT / "composition" / "documents.py",
+    ]
+    source = "\n".join(path.read_text(encoding="utf-8") for path in gateway_files)
+    assert "DurableJobRepository" not in source
+    assert "settings.database_path" not in source
+    assert "app.jobs.enqueue_ipc" in source
+
+
+def test_discord_core_adapter_passes_metadata_only_to_isolated_attachment_ingress() -> None:
+    bot_source = (APP_ROOT / "services" / "discord" / "bot.py").read_text(encoding="utf-8")
+    transfer_path = APP_ROOT / "integrations" / "discord_attachment" / "service.py"
+    transfer_source = transfer_path.read_text(encoding="utf-8")
+
+    assert "attachment.read(" not in bot_source
+    assert "attachment.save(" not in bot_source
+    assert "source_url=str(attachment.url)" in bot_source
+    assert "app.runtime" not in transfer_source
+    assert "sqlite" not in transfer_source.casefold()
+    assert "cdn.discordapp.com" in transfer_source

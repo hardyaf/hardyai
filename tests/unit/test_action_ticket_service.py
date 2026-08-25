@@ -80,6 +80,42 @@ def test_conversation_is_excluded_but_action_clarifications_share_one_ticket(tmp
         repo.close()
 
 
+def test_document_requests_never_open_action_tickets_even_when_forced(tmp_path):
+    path = tmp_path / "document-ticket-boundary.db"
+    SQLiteStore(database_path=str(path)).close()
+    repo = TicketRepository(database_path=str(path))
+    service = ActionTicketService(
+        repository=repo,
+        enabled=True,
+        review_delay_seconds=3600,
+        review_max_attempts=3,
+    )
+    try:
+        capture = service.begin_request(
+            request_id="document-request-1",
+            session_id="document-session-1",
+            context_reference={},
+            user_id="operator",
+            agent_id="jarvis",
+            source="web",
+            intent="documents.find",
+            skill_id="skill.documents.local",
+            route="main_jarvis_commitment",
+            request_text="search documents for a private phrase",
+            classification={
+                "intent": "documents.find",
+                "entities": {"query": "a private phrase"},
+            },
+            force=True,
+        )
+        assert capture.ticket is None
+        assert capture.context_reference == {}
+        assert repo.list_tickets(limit=20) == []
+        assert repo.list_jobs(limit=20) == []
+    finally:
+        repo.close()
+
+
 def test_duplicate_external_request_replays_without_second_domain_write(tmp_path):
     path = tmp_path / "dedupe.db"
     store = SQLiteStore(database_path=str(path))

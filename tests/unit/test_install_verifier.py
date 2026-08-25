@@ -8,6 +8,7 @@ from app.config import settings
 from scripts.configure_web_research import upsert_env_text
 from scripts.verify_install import (
     InstallChecks,
+    _check_documents,
     _check_email_agent,
     _check_skill_artifacts,
     _check_web_research,
@@ -17,6 +18,86 @@ from scripts.verify_install import (
     discord_policy_uses_example_ids,
     ollama_model_is_present,
 )
+
+
+def _provision_document_paths(tmp_path, monkeypatch) -> None:
+    storage = tmp_path / "storage"
+    for name in (
+        "paperless/valkey",
+        "paperless/postgres",
+        "paperless/data",
+        "paperless/media",
+        "paperless/export",
+        "jarvis",
+        "jarvis/spool",
+        "control",
+        "backups",
+        "restore-drills",
+    ):
+        (storage / name).mkdir(parents=True, exist_ok=True)
+    secrets = tmp_path / "secrets"
+    secrets.mkdir()
+    values = {
+        "paperless_db_password": "db-secret",
+        "paperless_secret_key": "app-secret",
+        "paperless_archive_token": "archive-token",
+        "paperless_read_token": "read-token",
+        "paperless_read_user_id": "7",
+        "jarvis_operator_api_key": "operator-key",
+    }
+    for name, value in values.items():
+        path = secrets / name
+        path.write_text(value, encoding="utf-8")
+        path.chmod(0o600)
+    monkeypatch.setenv("DOCUMENTS_STORAGE_ROOT", str(storage.resolve()))
+    monkeypatch.setenv("DOCUMENTS_SECRETS_ROOT", str(secrets.resolve()))
+    monkeypatch.setattr(verify_install.platform, "system", lambda: "Windows")
+
+
+def test_document_install_verifier_accepts_provisioned_local_contract(tmp_path, monkeypatch) -> None:
+    _provision_document_paths(tmp_path, monkeypatch)
+    checks = InstallChecks()
+    profile = SimpleNamespace(
+        documents_enabled=True,
+        documents_local_only=True,
+        offline_mode=True,
+        operator_api_key="operator-key",
+    )
+
+    _check_documents(checks, profile, require_documents=True)
+
+    assert not checks.failed, [result.detail for result in checks.results]
+    assert any(result.name == "documents_tokens" and result.level == "PASS" for result in checks.results)
+    assert any(result.name == "documents_images" and result.level == "PASS" for result in checks.results)
+
+
+def test_document_install_verifier_uses_service_scoped_offline_contract(tmp_path, monkeypatch) -> None:
+    _provision_document_paths(tmp_path, monkeypatch)
+    checks = InstallChecks()
+    profile = SimpleNamespace(
+        documents_enabled=True,
+        documents_local_only=True,
+        offline_mode=False,
+        operator_api_key="operator-key",
+    )
+
+    _check_documents(checks, profile, require_documents=True)
+
+    assert not checks.failed, [result.detail for result in checks.results]
+    assert any(result.name == "documents_offline" and result.level == "PASS" for result in checks.results)
+
+
+def test_document_install_verifier_fails_closed_when_required_profile_is_disabled() -> None:
+    checks = InstallChecks()
+
+    _check_documents(
+        checks,
+        SimpleNamespace(documents_enabled=False),
+        require_documents=True,
+    )
+
+    assert checks.failed
+    assert checks.results == [verify_install.CheckResult("FAIL", "documents", "DOCUMENTS_ENABLED is false")]
 
 
 def test_email_verifier_accepts_explicit_api_token_isolation(tmp_path) -> None:
