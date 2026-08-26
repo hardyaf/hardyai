@@ -145,6 +145,8 @@ class Settings:
     discord_attachment_ingress_base_url: str
     discord_attachment_ingress_timeout_seconds: float
     discord_attachment_max_per_message: int
+    discord_document_notifications_enabled: bool
+    discord_document_notification_poll_seconds: float
     memory_mode: str
     memory_markdown_path: str
     house_switch_names: list[str]
@@ -237,6 +239,13 @@ class Settings:
     document_archive_poll_seconds: float
     document_archive_max_attempts: int
     documents_processing_enabled: bool
+    documents_safe_extraction_enabled: bool
+    documents_note_proposals_enabled: bool
+    documents_contact_proposals_enabled: bool
+    documents_intelligence_enabled: bool
+    documents_restricted_workflow_enabled: bool
+    documents_restricted_security_review_id: str
+    documents_restricted_recovery_attestation_path: str
     documents_artifacts_path: str
     document_process_max_attempts: int
     document_process_lease_seconds: float
@@ -262,6 +271,14 @@ class Settings:
     paddleocr_model_tier: str
     paddleocr_timeout_seconds: float
     paddleocr_max_response_bytes: int
+    documents_paddleocr_vl_enabled: bool
+    paddleocr_vl_base_url: str
+    paddleocr_vl_framework_version: str
+    paddleocr_vl_pipeline_version: str
+    paddleocr_vl_image_digest: str
+    paddleocr_vl_timeout_seconds: float
+    paddleocr_vl_max_new_tokens: int
+    paddleocr_vl_max_response_bytes: int
     document_gateway_base_url: str
     document_gateway_operator_key_path: str
     paperless_base_url: str
@@ -404,6 +421,14 @@ settings = Settings(
     discord_attachment_max_per_message=max(
         1,
         min(_as_int("DISCORD_ATTACHMENT_MAX_PER_MESSAGE", 4), 10),
+    ),
+    discord_document_notifications_enabled=_as_bool(
+        "DISCORD_DOCUMENT_NOTIFICATIONS_ENABLED",
+        False,
+    ),
+    discord_document_notification_poll_seconds=max(
+        1.0,
+        min(_as_float("DISCORD_DOCUMENT_NOTIFICATION_POLL_SECONDS", 2.0), 60.0),
     ),
     memory_mode=os.getenv("MEMORY_MODE", "sqlite"),
     memory_markdown_path=os.getenv("MEMORY_MARKDOWN_PATH", "./data/memory_markdown"),
@@ -661,6 +686,15 @@ settings = Settings(
         min(_as_int("DOCUMENT_ARCHIVE_MAX_ATTEMPTS", 30), 100),
     ),
     documents_processing_enabled=_as_bool("DOCUMENTS_PROCESSING_ENABLED", False),
+    documents_safe_extraction_enabled=_as_bool("DOCUMENTS_SAFE_EXTRACTION_ENABLED", False),
+    documents_note_proposals_enabled=_as_bool("DOCUMENTS_NOTE_PROPOSALS_ENABLED", False),
+    documents_contact_proposals_enabled=_as_bool("DOCUMENTS_CONTACT_PROPOSALS_ENABLED", False),
+    documents_intelligence_enabled=_as_bool("DOCUMENTS_INTELLIGENCE_ENABLED", False),
+    documents_restricted_workflow_enabled=_as_bool("DOCUMENTS_RESTRICTED_WORKFLOW_ENABLED", False),
+    documents_restricted_security_review_id=os.getenv("DOCUMENTS_RESTRICTED_SECURITY_REVIEW_ID", ""),
+    documents_restricted_recovery_attestation_path=os.getenv(
+        "DOCUMENTS_RESTRICTED_RECOVERY_ATTESTATION_PATH", ""
+    ),
     documents_artifacts_path=os.getenv(
         "DOCUMENTS_ARTIFACTS_PATH",
         "data/documents/artifacts",
@@ -724,6 +758,35 @@ settings = Settings(
     paddleocr_max_response_bytes=max(
         1024,
         min(_as_int("PADDLEOCR_MAX_RESPONSE_BYTES", 67108864), 268435456),
+    ),
+    documents_paddleocr_vl_enabled=_as_bool("DOCUMENTS_PADDLEOCR_VL_ENABLED", False),
+    paddleocr_vl_base_url=os.getenv(
+        "PADDLEOCR_VL_BASE_URL",
+        "http://accelerator-admission:8040",
+    ).rstrip("/"),
+    paddleocr_vl_framework_version=os.getenv(
+        "PADDLEOCR_VL_FRAMEWORK_VERSION",
+        "3.6.0",
+    ).strip(),
+    paddleocr_vl_pipeline_version=os.getenv(
+        "PADDLEOCR_VL_PIPELINE_VERSION",
+        "1.6",
+    ).strip(),
+    paddleocr_vl_image_digest=os.getenv(
+        "PADDLEOCR_VL_IMAGE_DIGEST",
+        "sha256:6c735bdf9e758ffdd58ccc067db0c2d84e37e5e6a2cbd47156069d4d7ea5d709",
+    ).strip(),
+    paddleocr_vl_timeout_seconds=max(
+        5.0,
+        min(_as_float("PADDLEOCR_VL_TIMEOUT_SECONDS", 120.0), 900.0),
+    ),
+    paddleocr_vl_max_new_tokens=max(
+        64,
+        min(_as_int("PADDLEOCR_VL_MAX_NEW_TOKENS", 512), 4096),
+    ),
+    paddleocr_vl_max_response_bytes=max(
+        1024,
+        min(_as_int("PADDLEOCR_VL_MAX_RESPONSE_BYTES", 16777216), 67108864),
     ),
     document_gateway_base_url=os.getenv(
         "DOCUMENT_GATEWAY_BASE_URL",

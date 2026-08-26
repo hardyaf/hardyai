@@ -2,11 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
-import ipaddress
 
 import httpx
 
+from app.accelerator.client import accelerator_request_headers
 from app.config import settings
 from app.core.main_backend import OllamaMainConversationBackend, OllamaMainRepairBackend
 from app.core.micro_backend import OllamaMicroInferenceBackend
@@ -65,20 +64,21 @@ from app.tickets.verifiers.calendar import GoogleCalendarSourceVerifier
 from app.integrations.plane.client import PlaneClient
 from app.integrations.plane.sync_service import PlaneSyncService
 from app.integrations.document_gateway.client import DocumentGatewayClient
+from app.integrations.local_service import validate_local_http_service_url
 from app.reviews.repository import HumanReviewRepository
 from app.reviews.service import HumanReviewService
 from app.skills.domains.documents.query_service import DocumentQueryService
+from app.provenance.repository import ProvenanceRepository
+from app.services.document_proposal_execution_service import DocumentProposalExecutionService
 from app.research.decision_backend import OllamaResearchDecisionBackend
 from app.research.searxng import SearxngSearchProvider
 from app.research.service import WebResearchService
 
 
 def _is_local_model_url(value: str) -> bool:
-    host = str(urlparse(str(value or "")).hostname or "").strip().casefold()
-    if host in {"localhost", "host.docker.internal", "ollama"}:
-        return True
     try:
-        return ipaddress.ip_address(host).is_loopback or ipaddress.ip_address(host).is_private
+        validate_local_http_service_url(value, label="Local model URL")
+        return True
     except ValueError:
         return False
 
@@ -489,6 +489,17 @@ router = JarvisRouter(
     durable_write_service=durable_write_service,
 )
 action_execution_service = router.action_execution_service
+provenance_repository = ProvenanceRepository(settings.database_path)
+document_proposal_execution_service = (
+    DocumentProposalExecutionService(
+        gateway=document_gateway_client,
+        reviews=human_review_repository,
+        actions=action_execution_service,
+        provenance=provenance_repository,
+    )
+    if document_gateway_client is not None
+    else None
+)
 turn_finalizer = router.turn_finalizer
 turn_service = TurnService(
     router=router,
@@ -506,7 +517,11 @@ def model_backends_status() -> dict[str, Any]:
     ollama_reachable: bool | None = None
     if micro_ollama_configured or main_ollama_configured:
         try:
-            response = httpx.get(f"{settings.local_model_url.rstrip('/')}/api/tags", timeout=1.0)
+            response = httpx.get(
+                f"{settings.local_model_url.rstrip('/')}/api/tags",
+                headers=accelerator_request_headers("runtime_health"),
+                timeout=1.0,
+            )
             ollama_reachable = response.status_code < 500
         except Exception:
             ollama_reachable = False

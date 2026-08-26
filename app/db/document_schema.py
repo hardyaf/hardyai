@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 
 
-DOCUMENT_SCHEMA_VERSION = 8
+DOCUMENT_SCHEMA_VERSION = 14
 
 
 def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -414,6 +414,285 @@ def _migrate_ocr_block_metadata(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE document_blocks ADD COLUMN language TEXT")
 
 
+def _migrate_phase6_classification_and_extraction(conn: sqlite3.Connection) -> None:
+    columns = _columns(conn, "documents")
+    if "selected_document_class" not in columns:
+        conn.execute("ALTER TABLE documents ADD COLUMN selected_document_class TEXT")
+    if "classification_state" not in columns:
+        conn.execute("ALTER TABLE documents ADD COLUMN classification_state TEXT NOT NULL DEFAULT 'unclassified'")
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS document_classifications (
+            classification_id TEXT PRIMARY KEY,
+            document_id TEXT NOT NULL,
+            source_version_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            taxonomy_version TEXT NOT NULL,
+            label TEXT NOT NULL,
+            sensitivity TEXT NOT NULL,
+            confidence REAL NOT NULL,
+            classifier_name TEXT NOT NULL,
+            classifier_version TEXT NOT NULL,
+            evidence_json TEXT NOT NULL,
+            decision_source TEXT NOT NULL,
+            state TEXT NOT NULL,
+            selected INTEGER NOT NULL DEFAULT 0,
+            item_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(run_id, label, classifier_name, classifier_version, item_hash),
+            FOREIGN KEY (document_id) REFERENCES documents(document_id),
+            FOREIGN KEY (source_version_id) REFERENCES document_source_versions(source_version_id),
+            FOREIGN KEY (run_id) REFERENCES document_processing_runs(run_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS document_field_observations (
+            observation_id TEXT PRIMARY KEY,
+            document_id TEXT NOT NULL,
+            source_version_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            schema_name TEXT NOT NULL,
+            schema_version TEXT NOT NULL,
+            field_name TEXT NOT NULL,
+            value_json TEXT NOT NULL,
+            literal_text TEXT NOT NULL,
+            sensitivity TEXT NOT NULL,
+            confidence REAL NOT NULL,
+            evidence_json TEXT NOT NULL,
+            provider_name TEXT NOT NULL,
+            provider_version TEXT NOT NULL,
+            observation_state TEXT NOT NULL,
+            item_hash TEXT NOT NULL,
+            supersedes_observation_id TEXT,
+            created_at TEXT NOT NULL,
+            UNIQUE(run_id, schema_name, schema_version, field_name, item_hash),
+            FOREIGN KEY (document_id) REFERENCES documents(document_id),
+            FOREIGN KEY (source_version_id) REFERENCES document_source_versions(source_version_id),
+            FOREIGN KEY (run_id) REFERENCES document_processing_runs(run_id),
+            FOREIGN KEY (supersedes_observation_id) REFERENCES document_field_observations(observation_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS document_field_decisions (
+            field_decision_id TEXT PRIMARY KEY,
+            document_id TEXT NOT NULL,
+            source_version_id TEXT NOT NULL,
+            field_name TEXT NOT NULL,
+            review_decision_id TEXT NOT NULL UNIQUE,
+            selected_observation_id TEXT,
+            applied_value_json TEXT,
+            decision_kind TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (document_id) REFERENCES documents(document_id),
+            FOREIGN KEY (source_version_id) REFERENCES document_source_versions(source_version_id),
+            FOREIGN KEY (selected_observation_id) REFERENCES document_field_observations(observation_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS document_metadata_sync (
+            sync_id TEXT PRIMARY KEY,
+            proposal_id TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            external_id TEXT NOT NULL,
+            source_version_id TEXT NOT NULL,
+            operation_id TEXT NOT NULL UNIQUE,
+            desired_hash TEXT NOT NULL,
+            observed_hash TEXT,
+            provider_version TEXT,
+            state TEXT NOT NULL,
+            error_code TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(proposal_id, provider, desired_hash),
+            FOREIGN KEY (proposal_id) REFERENCES document_metadata_proposals(proposal_id),
+            FOREIGN KEY (source_version_id) REFERENCES document_source_versions(source_version_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_document_classifications_selected
+            ON document_classifications(document_id, source_version_id, selected, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_document_field_observations_lookup
+            ON document_field_observations(document_id, source_version_id, field_name, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_document_field_decisions_lookup
+            ON document_field_decisions(document_id, source_version_id, field_name, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_document_metadata_sync_state
+            ON document_metadata_sync(state, updated_at);
+        """
+    )
+
+
+def _migrate_phase6_archive_visibility(conn: sqlite3.Connection) -> None:
+    columns = _columns(conn, "documents")
+    if "archive_text_visible" not in columns:
+        conn.execute(
+            "ALTER TABLE documents ADD COLUMN archive_text_visible INTEGER NOT NULL DEFAULT 1"
+        )
+
+
+def _migrate_phase7_note_proposals(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS document_action_proposals (
+            proposal_id TEXT PRIMARY KEY,
+            document_id TEXT NOT NULL,
+            source_version_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            action_text TEXT NOT NULL,
+            target_list_name TEXT NOT NULL,
+            due_text TEXT,
+            normalized_due_date TEXT,
+            assignee_candidate TEXT,
+            confidence REAL NOT NULL,
+            evidence_json TEXT NOT NULL,
+            sensitivity TEXT NOT NULL,
+            item_hash TEXT NOT NULL,
+            review_id TEXT,
+            state TEXT NOT NULL,
+            execution_ref TEXT,
+            target_item_ref TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(run_id, item_hash),
+            FOREIGN KEY (document_id) REFERENCES documents(document_id),
+            FOREIGN KEY (source_version_id) REFERENCES document_source_versions(source_version_id),
+            FOREIGN KEY (run_id) REFERENCES document_processing_runs(run_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS document_memory_proposals (
+            proposal_id TEXT PRIMARY KEY,
+            document_id TEXT NOT NULL,
+            source_version_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            fact_text TEXT NOT NULL,
+            confidence REAL NOT NULL,
+            evidence_json TEXT NOT NULL,
+            sensitivity TEXT NOT NULL,
+            item_hash TEXT NOT NULL,
+            state TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(run_id, item_hash),
+            FOREIGN KEY (document_id) REFERENCES documents(document_id),
+            FOREIGN KEY (source_version_id) REFERENCES document_source_versions(source_version_id),
+            FOREIGN KEY (run_id) REFERENCES document_processing_runs(run_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_document_action_proposals_review
+            ON document_action_proposals(review_id, state, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_document_action_proposals_document
+            ON document_action_proposals(document_id, source_version_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_document_memory_proposals_document
+            ON document_memory_proposals(document_id, source_version_id, state, created_at DESC);
+        """
+    )
+
+
+def _migrate_phase8_contact_proposals(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS document_contact_proposals (
+            proposal_id TEXT PRIMARY KEY,
+            document_id TEXT NOT NULL,
+            source_version_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            proposed_fields_json TEXT NOT NULL,
+            candidate_matches_json TEXT NOT NULL,
+            provider_name TEXT,
+            capability_status TEXT NOT NULL,
+            proposed_operation TEXT NOT NULL,
+            selected_contact_ref TEXT,
+            confidence REAL NOT NULL,
+            evidence_json TEXT NOT NULL,
+            item_hash TEXT NOT NULL,
+            review_id TEXT,
+            state TEXT NOT NULL,
+            execution_ref TEXT,
+            target_contact_ref TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(run_id, item_hash),
+            FOREIGN KEY (document_id) REFERENCES documents(document_id),
+            FOREIGN KEY (source_version_id) REFERENCES document_source_versions(source_version_id),
+            FOREIGN KEY (run_id) REFERENCES document_processing_runs(run_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_document_contact_proposals_review
+            ON document_contact_proposals(review_id, state, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_document_contact_proposals_document
+            ON document_contact_proposals(document_id, source_version_id, created_at DESC);
+        """
+    )
+
+
+def _migrate_phase9_intelligence(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS document_analyses (
+            analysis_id TEXT PRIMARY KEY,
+            document_id TEXT NOT NULL,
+            source_version_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            analysis_kind TEXT NOT NULL,
+            result_json TEXT NOT NULL,
+            recurring_match_token TEXT,
+            input_hash TEXT NOT NULL,
+            state TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(run_id, analysis_kind, input_hash),
+            FOREIGN KEY (document_id) REFERENCES documents(document_id),
+            FOREIGN KEY (source_version_id) REFERENCES document_source_versions(source_version_id),
+            FOREIGN KEY (run_id) REFERENCES document_processing_runs(run_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS document_literal_claims (
+            claim_id TEXT PRIMARY KEY,
+            document_id TEXT NOT NULL,
+            source_version_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            claim_kind TEXT NOT NULL,
+            machine_label TEXT NOT NULL,
+            literal_text TEXT NOT NULL,
+            normalized_date TEXT,
+            page_number INTEGER NOT NULL,
+            block_id TEXT NOT NULL,
+            confidence REAL NOT NULL,
+            item_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(run_id, item_hash),
+            FOREIGN KEY (document_id) REFERENCES documents(document_id),
+            FOREIGN KEY (source_version_id) REFERENCES document_source_versions(source_version_id),
+            FOREIGN KEY (run_id) REFERENCES document_processing_runs(run_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_document_analyses_match
+            ON document_analyses(recurring_match_token, analysis_kind, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_document_analyses_document
+            ON document_analyses(document_id, source_version_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_document_literal_claims_document
+            ON document_literal_claims(document_id, source_version_id, claim_kind, created_at DESC);
+        """
+    )
+
+
+def _migrate_phase10_restricted_access_audit(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS document_restricted_access_audit (
+            audit_id TEXT PRIMARY KEY,
+            document_id TEXT NOT NULL,
+            actor_principal TEXT NOT NULL,
+            purpose_code TEXT NOT NULL,
+            operation TEXT NOT NULL,
+            outcome TEXT NOT NULL,
+            reason_code TEXT NOT NULL,
+            request_id TEXT NOT NULL,
+            observed_at TEXT NOT NULL,
+            UNIQUE(request_id, operation),
+            FOREIGN KEY (document_id) REFERENCES documents(document_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_document_restricted_audit_document
+            ON document_restricted_access_audit(document_id, observed_at DESC);
+        """
+    )
+
+
 def initialize_document_schema(conn: sqlite3.Connection) -> int:
     """Initialize the private Documents ledger; this DB is never mounted by core Jarvis."""
 
@@ -507,5 +786,35 @@ def initialize_document_schema(conn: sqlite3.Connection) -> int:
     if current < 8:
         _migrate_ocr_block_metadata(conn)
         conn.execute("PRAGMA user_version = 8")
+        conn.commit()
+        current = 8
+    if current < 9:
+        _migrate_phase6_classification_and_extraction(conn)
+        conn.execute("PRAGMA user_version = 9")
+        conn.commit()
+        current = 9
+    if current < 10:
+        _migrate_phase6_archive_visibility(conn)
+        conn.execute("PRAGMA user_version = 10")
+        conn.commit()
+        current = 10
+    if current < 11:
+        _migrate_phase7_note_proposals(conn)
+        conn.execute("PRAGMA user_version = 11")
+        conn.commit()
+        current = 11
+    if current < 12:
+        _migrate_phase8_contact_proposals(conn)
+        conn.execute("PRAGMA user_version = 12")
+        conn.commit()
+        current = 12
+    if current < 13:
+        _migrate_phase9_intelligence(conn)
+        conn.execute("PRAGMA user_version = 13")
+        conn.commit()
+        current = 13
+    if current < 14:
+        _migrate_phase10_restricted_access_audit(conn)
+        conn.execute("PRAGMA user_version = 14")
         conn.commit()
     return DOCUMENT_SCHEMA_VERSION

@@ -169,12 +169,23 @@ class DocumentQueryService:
             status = self.gateway.status(document_id)
             result: dict[str, Any] = {
                 "status": "ok",
-                "message": "Document status retrieved.",
+                "message": self._status_message(status=status, include_text=intent == "documents.get"),
                 "document": status,
                 "document_context_entities": self._context_entities([status]),
             }
             if intent == "documents.get" and status.get("processing_state") == "complete":
-                result["evidence"] = self.gateway.evidence(document_id=document_id, limit=10)
+                evidence = self.gateway.evidence(document_id=document_id, limit=10)
+                result["evidence"] = evidence
+                fields = self.gateway.fields(document_id=document_id)
+                result["structured_fields"] = (
+                    fields.get("fields") if isinstance(fields.get("fields"), list) else []
+                )[:64]
+                readable_text = self._bounded_evidence_text(evidence)
+                result["message"] = (
+                    f"Here is the text I could read:\n{readable_text}"
+                    if readable_text
+                    else "OCR completed, but it did not return any readable text."
+                )
             return result
         if intent == "documents.show_source":
             if not document_id:
@@ -254,6 +265,68 @@ class DocumentQueryService:
                 "document_context_entities": self._context_entities([{"document_id": document_id}]),
             }
         raise ValueError("unsupported document intent")
+
+    @staticmethod
+    def _status_message(*, status: dict[str, Any], include_text: bool) -> str:
+        processing_state = str(status.get("processing_state") or "").strip().casefold()
+        document_state = str(status.get("state") or "").strip().casefold()
+        if processing_state == "needs_review":
+            return (
+                "I received the attachment, but OCR could not read it reliably enough to present as "
+                "verified text. It needs human review."
+                if include_text
+                else "Document processing finished and needs human review."
+            )
+        if processing_state == "processing_incomplete":
+            return (
+                "I received the attachment, but processing ended without reliable text. It needs "
+                "human review."
+                if include_text
+                else "Document processing ended incomplete and needs human review."
+            )
+        if processing_state == "cancelled":
+            return "Document processing was cancelled; the retained source can be reprocessed."
+        if processing_state == "protected_pending":
+            return (
+                "I received the attachment and classified it as protected. Exact contents were not "
+                "placed in ordinary OCR results or search; protected review remains disabled until "
+                "the restricted workflow is certified."
+            )
+        if processing_state == "failed" or document_state == "failed":
+            return "Document processing failed; the source was retained for retry or review."
+        if processing_state != "complete":
+            return (
+                "The attachment is still being archived or processed. Ask me again shortly."
+                if include_text
+                else "Document processing is still in progress."
+            )
+        return "Document processing is complete."
+
+    @staticmethod
+    def _bounded_evidence_text(evidence: dict[str, Any], *, max_chars: int = 1600) -> str:
+        rows = evidence.get("blocks")
+        if not isinstance(rows, list):
+            rows = evidence.get("evidence")
+        if not isinstance(rows, list):
+            return ""
+        parts: list[str] = []
+        seen: set[str] = set()
+        for row in rows[:20]:
+            if not isinstance(row, dict):
+                continue
+            literal = " ".join(str(row.get("literal_text") or "").split())
+            if not literal or literal in seen:
+                continue
+            seen.add(literal)
+            projected = "\n".join([*parts, literal]) if parts else literal
+            if len(projected) > max_chars:
+                existing_chars = len("\n".join(parts))
+                remaining = max_chars - existing_chars - (1 if parts else 0)
+                if remaining > 3:
+                    parts.append(f"{literal[: remaining - 3]}...")
+                break
+            parts.append(literal)
+        return "\n".join(parts)
 
     @staticmethod
     def _context_entities(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

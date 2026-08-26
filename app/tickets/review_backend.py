@@ -6,6 +6,7 @@ from typing import Any, Protocol
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.accelerator.client import accelerator_request_headers
 from app.core.ollama_observability import OllamaCallObserver, OllamaMetricsCallback
 from app.tickets.types import ReviewDecision, ReviewRepair, ReviewVerdict
 
@@ -115,6 +116,7 @@ class OllamaTicketReviewBackend:
         try:
             response = httpx.post(
                 f"{self._base_url}/api/generate",
+                headers=accelerator_request_headers("action_ticket_review"),
                 json={
                     "model": self.model_name,
                     "prompt": prompt,

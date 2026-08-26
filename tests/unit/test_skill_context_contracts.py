@@ -13,6 +13,82 @@ def test_default_skill_context_contracts_cover_core_domains():
     assert {"lists", "lights", "calendar", "conversation", "email"} <= contract_ids
 
 
+def test_documents_contract_binds_current_discord_attachment_to_read_action():
+    contract = next(
+        item
+        for item in default_skill_context_contracts(documents_enabled=True)
+        if getattr(item, "contract_id", "") == "documents"
+    )
+    context = {
+        "principal_kind": "discord_adapter",
+        "discord_channel_id": "200",
+        "document_attachment_ids": ["doc-1"],
+        "current_document_attachment_ids": ["doc-1"],
+    }
+    decision = MicroDecision(
+        intent=Intent.UNKNOWN,
+        confidence=0.0,
+        entities={},
+        ambiguity_flags=["micro_bypassed_unprefixed_discord"],
+        recommended_owner=SessionOwner.MAIN,
+    )
+
+    bound = contract.bind_request_decision(
+        decision=decision,
+        request_context=context,
+        working_context={},
+        text="What does this say?",
+    )
+
+    assert bound.intent == Intent.DOCUMENTS_GET
+    assert bound.entities == {"document_id": "doc-1"}
+    assert bound.recommended_owner == SessionOwner.MAIN
+    assert contract.request_interrupts_pending(
+        request_context=context,
+        text="What does this say?",
+        pending_intent="conversation.general",
+    )
+
+
+def test_documents_contract_binds_semantic_followup_but_not_unrelated_recent_turn():
+    contract = next(
+        item
+        for item in default_skill_context_contracts(documents_enabled=True)
+        if getattr(item, "contract_id", "") == "documents"
+    )
+    context = {
+        "principal_kind": "discord_adapter",
+        "discord_channel_id": "200",
+        "document_attachment_ids": ["doc-1"],
+    }
+
+    def decision():
+        return MicroDecision(
+            intent=Intent.UNKNOWN,
+            confidence=0.0,
+            entities={},
+            ambiguity_flags=[],
+            recommended_owner=SessionOwner.MAIN,
+        )
+
+    followup = contract.bind_request_decision(
+        decision=decision(),
+        request_context=context,
+        working_context={},
+        text="You tell me what the text in that image says",
+    )
+    unrelated = contract.bind_request_decision(
+        decision=decision(),
+        request_context=context,
+        working_context={},
+        text="How is the weather tomorrow?",
+    )
+
+    assert followup.intent == Intent.DOCUMENTS_GET
+    assert followup.entities["document_id"] == "doc-1"
+    assert unrelated.intent == Intent.UNKNOWN
+
+
 def test_email_contract_emits_only_stable_reference_metadata():
     contract = next(
         item for item in default_skill_context_contracts()

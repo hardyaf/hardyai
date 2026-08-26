@@ -1,15 +1,108 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Callable
 
 from app.context.reference_resolver import ReferenceResolver
 from app.context.types import EntityRegistry
-from app.core.types import SessionOwner
+from app.core.micro_jarvis import MicroDecision
+from app.core.types import Intent, SessionOwner
 from app.skills.domains.documents.query_service import DOCUMENT_INTENTS
 
 
 class DocumentsContextContract:
     contract_id = "documents"
+
+    _ATTACHMENT_REFERENCE = re.compile(
+        r"\b(?:image|photo|picture|attachment|document|scan|pdf|file|it|that)\b",
+        flags=re.IGNORECASE,
+    )
+    _READ_REQUEST = re.compile(
+        r"\b(?:read|says?|text|tell|show|transcrib\w*|extract|contents?|written|see)\b",
+        flags=re.IGNORECASE,
+    )
+
+    @staticmethod
+    def _bounded_attachment_ids(request_context: dict[str, Any], key: str) -> list[str]:
+        raw_ids = request_context.get(key)
+        if not isinstance(raw_ids, list):
+            return []
+        return [
+            str(item).strip()
+            for item in raw_ids[:4]
+            if isinstance(item, str) and str(item).strip()
+        ]
+
+    @classmethod
+    def _is_scoped_discord_read_request(
+        cls,
+        *,
+        request_context: dict[str, Any],
+        text: str,
+    ) -> tuple[bool, list[str]]:
+        if (
+            str(request_context.get("principal_kind") or "").strip().casefold()
+            != "discord_adapter"
+            or not str(request_context.get("discord_channel_id") or "").strip()
+        ):
+            return False, []
+        current_ids = cls._bounded_attachment_ids(
+            request_context,
+            "current_document_attachment_ids",
+        )
+        if current_ids and str(text or "").strip():
+            return True, current_ids
+        recent_ids = cls._bounded_attachment_ids(request_context, "document_attachment_ids")
+        normalized_text = str(text or "").strip()
+        return (
+            bool(
+                recent_ids
+                and cls._ATTACHMENT_REFERENCE.search(normalized_text)
+                and cls._READ_REQUEST.search(normalized_text)
+            ),
+            recent_ids,
+        )
+
+    def request_interrupts_pending(
+        self,
+        *,
+        request_context: dict[str, Any],
+        text: str,
+        pending_intent: str,
+    ) -> bool:
+        del pending_intent
+        matches, _document_ids = self._is_scoped_discord_read_request(
+            request_context=request_context,
+            text=text,
+        )
+        return matches
+
+    def bind_request_decision(
+        self,
+        *,
+        decision: Any,
+        request_context: dict[str, Any],
+        working_context: dict[str, Any],
+        text: str,
+    ) -> Any:
+        del working_context
+        intent = getattr(decision, "intent", None)
+        if intent not in {Intent.UNKNOWN, Intent.CONVERSATIONAL}:
+            return decision
+        matches, document_ids = self._is_scoped_discord_read_request(
+            request_context=request_context,
+            text=text,
+        )
+        if not matches or not document_ids:
+            return decision
+        return MicroDecision(
+            intent=Intent.DOCUMENTS_GET,
+            confidence=0.99,
+            entities={"document_id": document_ids[-1]},
+            ambiguity_flags=["trusted_discord_attachment_binding"],
+            recommended_owner=SessionOwner.MAIN,
+            reasoning="documents_context_bound_recent_discord_attachment",
+        )
 
     def supports_intent(self, *, intent: str) -> bool:
         return str(intent or "").strip().casefold() in DOCUMENT_INTENTS

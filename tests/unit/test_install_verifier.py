@@ -100,6 +100,49 @@ def test_document_install_verifier_fails_closed_when_required_profile_is_disable
     assert checks.results == [verify_install.CheckResult("FAIL", "documents", "DOCUMENTS_ENABLED is false")]
 
 
+def test_document_install_verifier_requires_safe_extraction_for_downstream_features(
+    tmp_path, monkeypatch
+) -> None:
+    _provision_document_paths(tmp_path, monkeypatch)
+    checks = InstallChecks()
+    profile = SimpleNamespace(
+        documents_enabled=True,
+        documents_local_only=True,
+        operator_api_key="operator-key",
+        documents_safe_extraction_enabled=False,
+        documents_note_proposals_enabled=True,
+    )
+
+    _check_documents(checks, profile, require_documents=True)
+
+    assert any(
+        result.name == "documents_feature_dependencies" and result.level == "FAIL"
+        for result in checks.results
+    )
+
+
+def test_document_install_verifier_blocks_restricted_workflow_without_adapters(
+    tmp_path, monkeypatch
+) -> None:
+    _provision_document_paths(tmp_path, monkeypatch)
+    checks = InstallChecks()
+    profile = SimpleNamespace(
+        documents_enabled=True,
+        documents_local_only=True,
+        operator_api_key="operator-key",
+        documents_restricted_workflow_enabled=True,
+        documents_restricted_security_review_id="review-1",
+        documents_restricted_recovery_attestation_path=str(tmp_path / "restore.txt"),
+    )
+
+    _check_documents(checks, profile, require_documents=True)
+
+    assert any(
+        result.name == "documents_restricted" and result.level == "FAIL"
+        for result in checks.results
+    )
+
+
 def test_email_verifier_accepts_explicit_api_token_isolation(tmp_path) -> None:
     permissions_path = tmp_path / "email-agent.yaml"
     permissions_path.write_text(

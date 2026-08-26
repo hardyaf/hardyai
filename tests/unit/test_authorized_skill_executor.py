@@ -82,6 +82,8 @@ def test_executor_builds_only_allowlisted_trusted_context_fields():
         request_context={
             "discord_channel_id": "111111111111111111",
             "identity_bound": True,
+            "document_attachment_ids": ["doc-1", "", "doc-2", "doc-3", "doc-4", "doc-5"],
+            "current_document_attachment_ids": ["doc-4"],
             "execution_ref": "forged",
         },
         request_id="request-2",
@@ -91,6 +93,8 @@ def test_executor_builds_only_allowlisted_trusted_context_fields():
     context = dispatcher.calls[0]["context"]
     assert context["request_id"] == "request-2"
     assert context["identity_bound"] is True
+    assert context["document_attachment_ids"] == ["doc-1", "doc-2", "doc-3"]
+    assert context["current_document_attachment_ids"] == ["doc-4"]
     assert "execution_ref" not in context
 
 

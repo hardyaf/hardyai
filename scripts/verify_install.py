@@ -109,6 +109,25 @@ def discord_policy_has_allow_scope(payload: Any) -> bool:
     return False
 
 
+def discord_policy_has_document_response_sink(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    defaults = payload.get("defaults")
+    if isinstance(defaults, dict):
+        channels = defaults.get("document_response_channel_ids")
+        if isinstance(channels, list) and any(_positive_discord_id(item) for item in channels):
+            return True
+    guilds = payload.get("guilds")
+    if isinstance(guilds, list):
+        for row in guilds:
+            if not isinstance(row, dict):
+                continue
+            channels = row.get("document_response_channel_ids")
+            if isinstance(channels, list) and any(_positive_discord_id(item) for item in channels):
+                return True
+    return False
+
+
 def discord_policy_uses_example_ids(payload: Any) -> bool:
     if isinstance(payload, dict):
         return any(discord_policy_uses_example_ids(value) for value in payload.values())
@@ -517,6 +536,44 @@ def _check_documents(checks: InstallChecks, settings: Any, *, require_documents:
         else:
             checks.pass_("documents_docling", "digest pin and CPU-only no-egress controls verified")
 
+    safe_extraction = bool(getattr(settings, "documents_safe_extraction_enabled", False))
+    dependent_features = [
+        name
+        for name, enabled_value in (
+            ("note_proposals", getattr(settings, "documents_note_proposals_enabled", False)),
+            ("contact_proposals", getattr(settings, "documents_contact_proposals_enabled", False)),
+            ("intelligence", getattr(settings, "documents_intelligence_enabled", False)),
+        )
+        if bool(enabled_value)
+    ]
+    if dependent_features and not safe_extraction:
+        checks.fail(
+            "documents_feature_dependencies",
+            "safe extraction is required for: " + ", ".join(dependent_features),
+        )
+    else:
+        checks.pass_("documents_feature_dependencies", "document feature dependency gates are valid")
+
+    from app.restricted_documents.readiness import evaluate_restricted_workflow
+
+    restricted = evaluate_restricted_workflow(
+        enabled=bool(getattr(settings, "documents_restricted_workflow_enabled", False)),
+        cipher_configured=False,
+        isolated_store_configured=False,
+        security_review_id=str(
+            getattr(settings, "documents_restricted_security_review_id", "") or ""
+        ),
+        recovery_attestation_path=str(
+            getattr(settings, "documents_restricted_recovery_attestation_path", "") or ""
+        ),
+    )
+    if restricted.enabled and not restricted.ready:
+        checks.fail("documents_restricted", "blocked: " + ", ".join(restricted.reasons))
+    elif restricted.ready:
+        checks.pass_("documents_restricted", "restricted workflow prerequisites verified")
+    else:
+        checks.pass_("documents_restricted", "disabled; restricted classes remain protected_pending")
+
 
 def _check_local_models(
     checks: InstallChecks,
@@ -698,6 +755,7 @@ def _check_discord(checks: InstallChecks, settings: Any, *, require_discord: boo
     explicit_scope = guild_id is not None or channel_id is not None
     policy_path = _resolve_from_repo(settings.discord_permissions_path)
     policy_scope = False
+    document_response_sink = False
     if policy_path.is_file():
         if os.name == "posix":
             policy_permissions = stat.S_IMODE(policy_path.stat().st_mode)
@@ -719,6 +777,7 @@ def _check_discord(checks: InstallChecks, settings: Any, *, require_discord: boo
                 checks.fail("discord_policy", f"replace the example IDs in {policy_path}")
                 return
             policy_scope = discord_policy_has_allow_scope(policy_payload)
+            document_response_sink = discord_policy_has_document_response_sink(policy_payload)
         except Exception as exc:
             checks.fail("discord_policy", f"could not load {policy_path}: {exc}")
             return
@@ -735,6 +794,22 @@ def _check_discord(checks: InstallChecks, settings: Any, *, require_discord: boo
             "discord_policy",
             "no restrictive policy or DISCORD_COMMAND_GUILD_ID/DISCORD_COMMAND_CHANNEL_ID is configured",
         )
+    if bool(getattr(settings, "discord_document_notifications_enabled", False)):
+        if not bool(getattr(settings, "discord_attachment_ingress_enabled", False)):
+            checks.fail(
+                "discord_document_notifications",
+                "completion notifications require DISCORD_ATTACHMENT_INGRESS_ENABLED=true",
+            )
+        elif not document_response_sink:
+            checks.fail(
+                "discord_document_notifications",
+                "completion notifications require an explicit document_response_channel_ids entry",
+            )
+        else:
+            checks.pass_(
+                "discord_document_notifications",
+                "enabled with an explicit per-channel response sink",
+            )
 
 
 def _check_google_calendar(checks: InstallChecks, settings: Any) -> None:

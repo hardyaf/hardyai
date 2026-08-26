@@ -15,6 +15,7 @@ from app.skills.domains.documents.ports import (
     ParserOperationUnavailable,
 )
 from app.skills.domains.documents.quality import evaluate_native_artifact
+from app.skills.domains.documents.enrichment import DocumentEnrichmentService
 from app.skills.domains.documents.storage import DocumentRepository, DocumentStorageError
 from app.skills.domains.documents.types import ArtifactKind, ProcessingState
 
@@ -41,6 +42,7 @@ class DocumentProcessingService:
         max_provider_json_bytes: int = 64 * 1024 * 1024,
         max_markdown_bytes: int = 16 * 1024 * 1024,
         quality_evaluator: Callable[[Any], Any] = evaluate_native_artifact,
+        enrichment: DocumentEnrichmentService | None = None,
     ) -> None:
         self.repository = repository
         self.archive = archive
@@ -50,6 +52,7 @@ class DocumentProcessingService:
         self.max_provider_json_bytes = max(1024, int(max_provider_json_bytes))
         self.max_markdown_bytes = max(1024, int(max_markdown_bytes))
         self.quality_evaluator = quality_evaluator
+        self.enrichment = enrichment
 
     def process(
         self,
@@ -135,6 +138,26 @@ class DocumentProcessingService:
                 operation_ref=operation_ref,
             )
             raise DocumentProcessingPending("parser_operation_unavailable") from exc
+        enrichment_result = None
+        if self.enrichment is not None:
+            enrichment_result = self.enrichment.enrich(artifact)
+            if enrichment_result.protected_pending:
+                self.repository.finish_processing_run(
+                    run_id=run_id,
+                    fencing_token=fencing_token,
+                    state=ProcessingState.PROTECTED_PENDING,
+                    error_code="restricted_content_withheld",
+                )
+                return {
+                    "status": "protected_pending",
+                    "document_id": document_id,
+                    "run_id": run_id,
+                    "document_class": enrichment_result.document_class.value,
+                    "review_ids": list(enrichment_result.review_ids),
+                }
+            if enrichment_result.artifact is None:
+                raise DocumentProcessingError("enrichment_artifact_unavailable")
+            artifact = enrichment_result.artifact
         raw_bytes = json.dumps(
             artifact.raw_provider,
             ensure_ascii=True,
@@ -210,6 +233,28 @@ class DocumentProcessingService:
                 "run_id": run_id,
                 "block_count": len(artifact.blocks),
                 "page_count": len(artifact.pages),
+                "document_class": (
+                    enrichment_result.document_class.value if enrichment_result is not None else None
+                ),
+                "field_count": (
+                    len(enrichment_result.extraction.observations)
+                    if enrichment_result is not None and enrichment_result.extraction is not None
+                    else 0
+                ),
+                "review_ids": (
+                    list(enrichment_result.review_ids) if enrichment_result is not None else []
+                ),
+                "action_proposal_count": (
+                    enrichment_result.action_proposal_count if enrichment_result is not None else 0
+                ),
+                "memory_proposal_count": (
+                    enrichment_result.memory_proposal_count if enrichment_result is not None else 0
+                ),
+                "contact_proposal_count": (
+                    enrichment_result.contact_proposal_count if enrichment_result is not None else 0
+                ),
+                "analysis_count": enrichment_result.analysis_count if enrichment_result is not None else 0,
+                "claim_count": enrichment_result.claim_count if enrichment_result is not None else 0,
             }
         review_id = None
         if self.reviews is not None:

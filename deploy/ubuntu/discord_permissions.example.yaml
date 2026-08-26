@@ -12,6 +12,9 @@ defaults:
   allowed_role_ids: []
   allowed_user_ids: []
   denied_user_ids: []
+  # Proactive OCR output is denied unless its destination is listed here or
+  # in the matching guild override below.
+  document_response_channel_ids: []
 
 guilds:
   - guild_id: 111111111111111111
@@ -22,6 +25,8 @@ guilds:
     allowed_role_ids: []
     allowed_user_ids: []
     denied_user_ids: []
+    document_response_channel_ids:
+      - 222222222222222222
     # Optional exact user/channel scopes for sensitive interactive skills.
     # This admits the channel to the Discord adapter; the skill re-checks its
     # own protected permissions before reading any data.

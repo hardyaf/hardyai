@@ -4,7 +4,13 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any, BinaryIO, Protocol
 
-from app.skills.domains.documents.types import DocumentArtifact
+from app.skills.domains.documents.types import (
+    ClassificationInput,
+    ClassificationResult,
+    DocumentArtifact,
+    ExtractionInput,
+    ExtractionResult,
+)
 
 
 class DurableDocumentEnqueuePort(Protocol):
@@ -56,6 +62,36 @@ class ArchiveReadPort(Protocol):
 
     def download_original(self, source_external_id: str) -> Iterator[bytes]:
         ...
+
+
+@dataclass(frozen=True)
+class ArchiveMetadataSnapshot:
+    external_version: str
+    values: dict[str, str]
+
+
+class ArchiveMetadataPort(Protocol):
+    def read_metadata(
+        self,
+        *,
+        source_external_id: str,
+        fields: tuple[str, ...],
+    ) -> ArchiveMetadataSnapshot: ...
+
+
+class ArchiveAccessPolicyPort(Protocol):
+    def grant_read_access(self, source_external_id: str) -> None: ...
+
+    def revoke_read_access(self, source_external_id: str) -> None: ...
+
+    def write_metadata(
+        self,
+        *,
+        source_external_id: str,
+        expected_external_version: str,
+        changes: dict[str, str],
+        operation_id: str,
+    ) -> ArchiveMetadataSnapshot: ...
 
 
 @dataclass(frozen=True)
@@ -122,6 +158,20 @@ class DocumentParserPort(Protocol):
         ...
 
 
+class DocumentClassifierPort(Protocol):
+    """Tool-free, provider-neutral document classification boundary."""
+
+    def classify(self, request: ClassificationInput) -> ClassificationResult:
+        ...
+
+
+class StructuredExtractorPort(Protocol):
+    """Tool-free typed extraction boundary; it cannot authorize downstream work."""
+
+    def extract(self, request: ExtractionInput) -> ExtractionResult:
+        ...
+
+
 class DocumentQueryPort(Protocol):
     def ready(self) -> bool: ...
 
@@ -136,6 +186,21 @@ class DocumentQueryPort(Protocol):
         block_id: str | None = None,
         page_number: int | None = None,
         limit: int = 10,
+    ) -> dict[str, Any]: ...
+
+    def fields(self, *, document_id: str) -> dict[str, Any]: ...
+
+    def classifications(self, *, document_id: str) -> dict[str, Any]: ...
+
+    def action_proposal(self, *, proposal_id: str) -> dict[str, Any]: ...
+
+    def bind_action_execution(
+        self,
+        *,
+        proposal_id: str,
+        review_id: str,
+        execution_ref: str,
+        target_item_ref: str,
     ) -> dict[str, Any]: ...
 
     def reprocess(self, *, document_id: str, idempotency_key: str) -> dict[str, Any]: ...

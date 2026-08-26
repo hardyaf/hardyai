@@ -5,7 +5,12 @@ from collections.abc import Iterator
 from typing import Any, BinaryIO
 
 from app.integrations.paperless.client import PaperlessClient
-from app.skills.domains.documents.ports import ArchiveOrigin, ArchiveSearchHit, ArchiveTask
+from app.skills.domains.documents.ports import (
+    ArchiveMetadataSnapshot,
+    ArchiveOrigin,
+    ArchiveSearchHit,
+    ArchiveTask,
+)
 
 
 def _results(value: Any) -> list[dict[str, Any]]:
@@ -108,6 +113,19 @@ class PaperlessArchiveAdapter:
             },
         )
 
+    def revoke_read_access(self, source_external_id: str) -> None:
+        document_id = _document_id(source_external_id)
+        self.client.request(
+            "PATCH",
+            f"/api/documents/{document_id}/",
+            json={
+                "set_permissions": {
+                    "view": {"users": [], "groups": []},
+                    "change": {"users": [], "groups": []},
+                }
+            },
+        )
+
     def download_original(self, source_external_id: str) -> Iterator[bytes]:
         document_id = _document_id(source_external_id)
         with self.client.stream(
@@ -120,6 +138,58 @@ class PaperlessArchiveAdapter:
             for chunk in response.iter_bytes(chunk_size=65536):
                 if chunk:
                     yield chunk
+
+    def read_metadata(
+        self,
+        *,
+        source_external_id: str,
+        fields: tuple[str, ...],
+    ) -> ArchiveMetadataSnapshot:
+        allowed = {"safe_title"}
+        normalized = {str(field).strip().casefold() for field in fields}
+        if not normalized or not normalized <= allowed:
+            raise ValueError("paperless metadata field is not allowlisted")
+        document_id = _document_id(source_external_id)
+        row = self.client.request("GET", f"/api/documents/{document_id}/").json()
+        if not isinstance(row, dict):
+            raise RuntimeError("paperless_invalid_document_response")
+        external_version = _bounded_text(row.get("modified"), 100)
+        if not external_version:
+            raise RuntimeError("paperless_document_version_unavailable")
+        values = {"safe_title": _bounded_text(row.get("title"), 200)}
+        return ArchiveMetadataSnapshot(
+            external_version=external_version,
+            values={field: values[field] for field in normalized},
+        )
+
+    def write_metadata(
+        self,
+        *,
+        source_external_id: str,
+        expected_external_version: str,
+        changes: dict[str, str],
+        operation_id: str,
+    ) -> ArchiveMetadataSnapshot:
+        normalized = {str(key).strip().casefold(): _bounded_text(value, 200) for key, value in changes.items()}
+        if set(normalized) != {"safe_title"} or not normalized["safe_title"]:
+            raise ValueError("paperless metadata change is not allowlisted")
+        if not str(operation_id or "").strip():
+            raise ValueError("paperless metadata operation id is required")
+        before = self.read_metadata(source_external_id=source_external_id, fields=("safe_title",))
+        if before.values == normalized:
+            return before
+        if before.external_version != str(expected_external_version or "").strip():
+            raise RuntimeError("paperless_metadata_version_changed")
+        document_id = _document_id(source_external_id)
+        self.client.request(
+            "PATCH",
+            f"/api/documents/{document_id}/",
+            json={"title": normalized["safe_title"]},
+        )
+        after = self.read_metadata(source_external_id=source_external_id, fields=("safe_title",))
+        if after.values != normalized:
+            raise RuntimeError("paperless_metadata_readback_mismatch")
+        return after
 
 
 class PaperlessReadAdapter:

@@ -7,6 +7,7 @@ from typing import Any, TYPE_CHECKING
 import httpx
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
+from app.accelerator.client import accelerator_request_headers
 from app.core.ollama_observability import OllamaCallObserver, OllamaMetricsCallback
 from app.core.types import Intent
 
@@ -103,6 +104,7 @@ class OllamaMicroInferenceBackend:
         try:
             response = httpx.post(
                 f"{self._base_url}/api/generate",
+                headers=accelerator_request_headers("micro"),
                 json={
                     "model": self._model,
                     "prompt": prompt,

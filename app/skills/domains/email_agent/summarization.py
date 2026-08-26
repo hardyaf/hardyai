@@ -7,6 +7,7 @@ from typing import Any, Protocol
 
 import httpx
 
+from app.accelerator.client import accelerator_request_headers
 from app.core.ollama_observability import OllamaCallObserver, OllamaMetricsCallback
 from app.services.google.gmail_mime import ParsedGmailMessage
 
@@ -104,6 +105,7 @@ class OllamaEmailSummaryCompiler:
         try:
             response = httpx.post(
                 f"{self._base_url}/api/generate",
+                headers=accelerator_request_headers("email_summary"),
                 json={
                     "model": self.model_name,
                     "prompt": prompt,

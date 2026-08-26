@@ -16,6 +16,7 @@ from app.integrations.discord_attachment.types import (
     DiscordAttachmentIngressPort,
 )
 from app.schemas.api import AskRequest
+from app.services.document_completion_service import DocumentCompletionNotificationService
 from app.skills.domains.private_notes.service import PrivateNotesChannelConfig
 
 try:
@@ -184,6 +185,9 @@ def load_discord_permissions_policy(permissions_path: str | None) -> dict[str, A
         "allowed_role_ids": _as_int_set(defaults.get("allowed_role_ids")),
         "allowed_user_ids": _as_int_set(defaults.get("allowed_user_ids")),
         "denied_user_ids": _as_int_set(defaults.get("denied_user_ids")),
+        "document_response_channel_ids": _as_int_set(
+            defaults.get("document_response_channel_ids")
+        ),
         "guilds": {},
         "private_notes_channels": [],
         "skill_channel_access": [],
@@ -215,6 +219,9 @@ def load_discord_permissions_policy(permissions_path: str | None) -> dict[str, A
             "allowed_role_ids": _as_int_set(row.get("allowed_role_ids")),
             "allowed_user_ids": _as_int_set(row.get("allowed_user_ids")),
             "denied_user_ids": _as_int_set(row.get("denied_user_ids")),
+            "document_response_channel_ids": _as_int_set(
+                row.get("document_response_channel_ids")
+            ),
         }
         private_rows = row.get("private_notes_channels")
         if not isinstance(private_rows, list):
@@ -273,6 +280,92 @@ def load_discord_permissions_policy(permissions_path: str | None) -> dict[str, A
     policy["private_notes_channels"] = private_notes_channels
     policy["skill_channel_access"] = skill_channel_access
     return policy
+
+
+def discord_document_response_allowed(
+    policy: dict[str, Any] | None,
+    *,
+    guild_id: int | None,
+    channel_id: int,
+) -> bool:
+    """Require a separate explicit channel allowlist for proactive document output."""
+
+    if not isinstance(policy, dict) or not policy:
+        return False
+    allowed = set(policy.get("document_response_channel_ids") or set())
+    guilds = policy.get("guilds")
+    guild_policy = guilds.get(guild_id) if isinstance(guilds, dict) else None
+    if isinstance(guild_policy, dict):
+        guild_allowed = set(guild_policy.get("document_response_channel_ids") or set())
+        if guild_allowed:
+            allowed = guild_allowed
+    return int(channel_id) in allowed
+
+
+def discord_scope_authorized(
+    policy: dict[str, Any] | None,
+    *,
+    guild_id: int | None,
+    channel_id: int,
+    user_id: int,
+    role_ids: set[int] | None = None,
+    command_guild_id: int | None = None,
+    command_channel_id: int | None = None,
+    skill_channel_allowed: bool = False,
+) -> bool:
+    """Re-evaluate the same durable Discord scope used when a message is accepted."""
+
+    roles = set(role_ids or set())
+    allow_direct_messages = False
+    allowed_guild_ids: set[int] = set()
+    allowed_channel_ids: set[int] = set()
+    allowed_role_ids: set[int] = set()
+    allowed_user_ids: set[int] = set()
+    denied_user_ids: set[int] = set()
+    if isinstance(policy, dict) and policy:
+        allow_direct_messages = bool(policy.get("allow_direct_messages"))
+        allowed_guild_ids = set(policy.get("allowed_guild_ids") or set())
+        allowed_channel_ids = set(policy.get("allowed_channel_ids") or set())
+        allowed_role_ids = set(policy.get("allowed_role_ids") or set())
+        allowed_user_ids = set(policy.get("allowed_user_ids") or set())
+        denied_user_ids = set(policy.get("denied_user_ids") or set())
+        guilds = policy.get("guilds")
+        guild_policy = guilds.get(guild_id) if isinstance(guilds, dict) else None
+        if isinstance(guild_policy, dict):
+            guild_allowed_channels = set(guild_policy.get("allowed_channel_ids") or set())
+            guild_allowed_roles = set(guild_policy.get("allowed_role_ids") or set())
+            guild_allowed_users = set(guild_policy.get("allowed_user_ids") or set())
+            guild_denied_users = set(guild_policy.get("denied_user_ids") or set())
+            if guild_allowed_channels:
+                allowed_channel_ids = guild_allowed_channels
+            if guild_allowed_roles:
+                allowed_role_ids = guild_allowed_roles
+            if guild_allowed_users:
+                allowed_user_ids = guild_allowed_users
+            if guild_denied_users:
+                denied_user_ids = guild_denied_users
+    if guild_id is None and not allow_direct_messages:
+        return False
+    if allowed_guild_ids and (guild_id is None or guild_id not in allowed_guild_ids):
+        return False
+    if command_guild_id is not None:
+        if (guild_id is None or int(guild_id) != int(command_guild_id)) and not skill_channel_allowed:
+            return False
+    if command_channel_id is not None:
+        if int(channel_id) != int(command_channel_id) and not skill_channel_allowed:
+            return False
+    if allowed_channel_ids and int(channel_id) not in allowed_channel_ids and not skill_channel_allowed:
+        return False
+    if int(user_id) in denied_user_ids:
+        return False
+    if allowed_user_ids and int(user_id) not in allowed_user_ids and not skill_channel_allowed:
+        return False
+    if allowed_role_ids and not skill_channel_allowed:
+        if guild_id is None:
+            return bool(allowed_user_ids and int(user_id) in allowed_user_ids)
+        if not (roles & allowed_role_ids):
+            return False
+    return True
 
 
 def discord_policy_has_allow_scope(policy: dict[str, Any] | None) -> bool:
@@ -446,6 +539,7 @@ def build_ask_request_payload(
     message_id: int | str | None = None,
     skill_scopes: list[str] | None = None,
     document_attachment_ids: list[str] | None = None,
+    current_document_attachment_ids: list[str] | None = None,
     micro_command_explicit: bool = False,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
@@ -481,6 +575,12 @@ def build_ask_request_payload(
         payload["context"]["document_attachment_ids"] = [
             str(item).strip()
             for item in document_attachment_ids[:4]
+            if str(item).strip()
+        ]
+    if current_document_attachment_ids:
+        payload["context"]["current_document_attachment_ids"] = [
+            str(item).strip()
+            for item in current_document_attachment_ids[:4]
             if str(item).strip()
         ]
     session_value = str(session_id).strip() if isinstance(session_id, str) else ""
@@ -563,6 +663,8 @@ if discord is not None:
             private_notes_poll_seconds: float = 30.0,
             turn_service: Any | None = None,
             attachment_ingress: DiscordAttachmentIngressPort | None = None,
+            document_completion_notifications: DocumentCompletionNotificationService | None = None,
+            document_notification_poll_seconds: float = 2.0,
             attachment_max_bytes: int = 52428800,
             attachment_max_per_message: int = 4,
         ) -> None:
@@ -575,6 +677,12 @@ if discord is not None:
             self._private_notes_service = private_notes_service
             self._turn_service = turn_service
             self._attachment_ingress = attachment_ingress
+            self._document_completion_notifications = document_completion_notifications
+            self._document_notification_poll_seconds = max(
+                1.0,
+                min(float(document_notification_poll_seconds), 60.0),
+            )
+            self._document_notification_task: asyncio.Task[None] | None = None
             self._attachment_max_bytes = max(1024, min(int(attachment_max_bytes), 104857600))
             self._attachment_max_per_message = max(1, min(int(attachment_max_per_message), 10))
             self._attachment_context_ttl_seconds = 1800.0
@@ -634,8 +742,19 @@ if discord is not None:
                     self._private_notes_digest_loop(),
                     name="jarvis-private-notes-digest",
                 )
+            if self._document_completion_notifications is not None:
+                self._document_notification_task = asyncio.create_task(
+                    self._document_notification_loop(),
+                    name="jarvis-document-discord-notifications",
+                )
 
         async def close(self) -> None:
+            document_task = self._document_notification_task
+            self._document_notification_task = None
+            if document_task is not None:
+                document_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await document_task
             task = self._private_notes_digest_task
             self._private_notes_digest_task = None
             if task is not None:
@@ -725,16 +844,175 @@ if discord is not None:
                         error=error_summary,
                     )
 
-        async def _handle_document_attachments(self, message: discord.Message) -> bool:
+        async def _document_notification_loop(self) -> None:
+            await self.wait_until_ready()
+            while not self.is_closed():
+                try:
+                    await self._run_document_notifications_once()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # pragma: no cover - defensive scheduler boundary
+                    print(
+                        "[discord] document notification scheduler error: "
+                        f"{summarize_discord_api_error(exc)}"
+                    )
+                await asyncio.sleep(self._document_notification_poll_seconds)
+
+        async def _run_document_notifications_once(self) -> int:
+            service = self._document_completion_notifications
+            if service is None:
+                return 0
+            jobs = await asyncio.to_thread(service.claim)
+            delivered = 0
+            last_error: str | None = None
+            for job in jobs:
+                try:
+                    prepared = await asyncio.to_thread(service.prepare, job)
+                    if prepared.disposition == "waiting":
+                        if not await asyncio.to_thread(service.defer, job):
+                            raise RuntimeError("document_notification_defer_lost")
+                        continue
+                    if prepared.disposition == "already_delivered":
+                        if not await asyncio.to_thread(service.complete, job):
+                            raise RuntimeError("document_notification_completion_lost")
+                        continue
+                    if prepared.disposition == "rejected":
+                        await asyncio.to_thread(
+                            service.reject,
+                            job,
+                            error_code=prepared.error_code or "document_notification_rejected",
+                        )
+                        continue
+                    target = service.target(job)
+                    if not await self._document_delivery_authorized(target):
+                        await asyncio.to_thread(
+                            service.reject,
+                            job,
+                            error_code="discord_document_response_not_authorized",
+                        )
+                        continue
+                    channel = self.get_channel(int(str(target["channel_id"])))
+                    if channel is None:
+                        channel = await self.fetch_channel(int(str(target["channel_id"])))
+                    reference = None
+                    fetch_message = getattr(channel, "fetch_message", None)
+                    if callable(fetch_message):
+                        try:
+                            reference = await fetch_message(int(str(target["message_id"])))
+                        except Exception:
+                            reference = None
+                    sent = await channel.send(
+                        prepared.message,
+                        allowed_mentions=discord.AllowedMentions.none(),
+                        reference=reference,
+                        nonce=service.delivery_nonce(job),
+                    )
+                    sent_id = str(getattr(sent, "id", "") or "").strip()
+                    if not sent_id:
+                        raise RuntimeError("discord_document_notification_missing_message_id")
+                    if not await asyncio.to_thread(
+                        service.record_delivery,
+                        job,
+                        message_id=sent_id,
+                    ):
+                        raise RuntimeError("document_notification_receipt_lost")
+                    if not await asyncio.to_thread(service.complete, job):
+                        raise RuntimeError("document_notification_completion_lost")
+                    delivered += 1
+                except asyncio.CancelledError:
+                    raise
+                except (TypeError, ValueError, KeyError) as exc:
+                    last_error = type(exc).__name__
+                    await asyncio.to_thread(
+                        service.reject,
+                        job,
+                        error_code=f"document_notification_{last_error}"[:120],
+                    )
+                except Exception as exc:
+                    last_error = type(exc).__name__
+                    print(
+                        "[discord] document completion delivery failed "
+                        f"job={str(job.get('job_id') or '')[:36]} error={summarize_discord_api_error(exc)}"
+                    )
+                    await asyncio.to_thread(
+                        service.retry,
+                        job,
+                        error_code=f"document_notification_{last_error}"[:120],
+                    )
+            await asyncio.to_thread(
+                service.heartbeat,
+                status="degraded" if last_error else "ready",
+                claimed=len(jobs),
+                delivered=delivered,
+                error_code=last_error,
+            )
+            return delivered
+
+        async def _document_delivery_authorized(
+            self,
+            target: dict[str, str | None],
+        ) -> bool:
+            guild_id = parse_discord_guild_id(target.get("guild_id"))
+            channel_id = parse_discord_channel_id(target.get("channel_id"))
+            user_id = parse_discord_channel_id(target.get("user_id"))
+            if channel_id is None or user_id is None:
+                return False
+            policy = load_discord_permissions_policy(self._permissions_path)
+            if not discord_document_response_allowed(
+                policy,
+                guild_id=guild_id,
+                channel_id=channel_id,
+            ):
+                return False
+            scoped_rows = policy.get("skill_channel_access")
+            if not isinstance(scoped_rows, list):
+                scoped_rows = []
+            skill_channel_allowed = any(
+                str(row.get("guild_id") or "") == str(guild_id)
+                and str(row.get("channel_id") or "") == str(channel_id)
+                and str(user_id) in {str(item) for item in row.get("allowed_user_ids") or []}
+                for row in scoped_rows
+                if isinstance(row, dict)
+            )
+            role_ids: set[int] = set()
+            if guild_id is not None:
+                guild = self.get_guild(guild_id)
+                if guild is None:
+                    return False
+                member = guild.get_member(user_id)
+                if member is None:
+                    try:
+                        member = await guild.fetch_member(user_id)
+                    except Exception:
+                        return False
+                for role in list(getattr(member, "roles", None) or []):
+                    role_id = parse_discord_channel_id(getattr(role, "id", None))
+                    if role_id is not None:
+                        role_ids.add(role_id)
+            return discord_scope_authorized(
+                policy,
+                guild_id=guild_id,
+                channel_id=channel_id,
+                user_id=user_id,
+                role_ids=role_ids,
+                command_guild_id=self._command_guild_id,
+                command_channel_id=self._command_channel_id,
+                skill_channel_allowed=skill_channel_allowed,
+            )
+
+        async def _handle_document_attachments(
+            self,
+            message: discord.Message,
+        ) -> tuple[bool, list[str]]:
             attachments = list(getattr(message, "attachments", None) or [])
             if not attachments:
-                return False
+                return False, []
             if self._attachment_ingress is None:
                 await message.channel.send(
                     "Document attachment intake is not enabled yet.",
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
-                return True
+                return True, []
 
             accepted_extensions = {".pdf", ".jpg", ".jpeg", ".png"}
             candidates: list[Any] = []
@@ -761,12 +1039,12 @@ if discord is not None:
                 )
             if candidates:
                 await message.channel.send(
-                    f"Securely submitting {len(candidates)} document attachment"
-                    f"{'s' if len(candidates) != 1 else ''}…",
+                    "I got it - processing now.",
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
 
             outcomes: list[str] = []
+            document_ids: list[str] = []
             for attachment in candidates:
                 filename = str(getattr(attachment, "filename", "") or "").strip()
                 try:
@@ -784,6 +1062,33 @@ if discord is not None:
                     )
                     receipt = await self._attachment_ingress.submit(descriptor)
                     self._remember_document_attachment(message=message, document_id=receipt.document_id)
+                    document_ids.append(str(receipt.document_id))
+                    notification_registration_failed = False
+                    if (
+                        self._document_completion_notifications is not None
+                        and discord_document_response_allowed(
+                            self._permissions_policy,
+                            guild_id=(message.guild.id if message.guild else None),
+                            channel_id=int(message.channel.id),
+                        )
+                    ):
+                        try:
+                            await asyncio.to_thread(
+                                self._document_completion_notifications.register_discord,
+                                document_id=str(receipt.document_id),
+                                guild_id=(str(message.guild.id) if message.guild else None),
+                                channel_id=str(message.channel.id),
+                                user_id=str(message.author.id),
+                                message_id=str(message.id),
+                                attachment_id=str(attachment.id),
+                            )
+                        except Exception as exc:
+                            notification_registration_failed = True
+                            print(
+                                "[discord] document completion registration failed "
+                                f"document={str(receipt.document_id)[:36]} "
+                                f"error={summarize_discord_api_error(exc)}"
+                            )
                     if receipt.duplicate:
                         outcomes.append(f"Already received `{receipt.filename}`.")
                     elif receipt.enqueue_confirmed:
@@ -791,6 +1096,10 @@ if discord is not None:
                     else:
                         outcomes.append(
                             f"Accepted `{receipt.filename}` securely; archival enqueue recovery is pending."
+                        )
+                    if notification_registration_failed:
+                        outcomes.append(
+                            "Automatic completion delivery could not be queued; ask me for the image status."
                         )
                 except Exception as exc:
                     print(
@@ -811,7 +1120,7 @@ if discord is not None:
                     "\n".join(outcomes),
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
-            return True
+            return True, document_ids
 
         @staticmethod
         def _attachment_context_key(message: discord.Message) -> tuple[str, str, str]:
@@ -918,24 +1227,12 @@ if discord is not None:
                     if role_id is not None:
                         role_ids.add(role_id)
 
-            allow_direct_messages = False
             require_prefix = False
             allow_unprefixed = self._command_channel_id is not None
-            allowed_guild_ids: set[int] = set()
-            allowed_channel_ids: set[int] = set()
-            allowed_role_ids: set[int] = set()
-            allowed_user_ids: set[int] = set()
-            denied_user_ids: set[int] = set()
 
             if isinstance(self._permissions_policy, dict) and self._permissions_policy:
-                allow_direct_messages = bool(self._permissions_policy.get("allow_direct_messages"))
                 require_prefix = bool(self._permissions_policy.get("require_prefix"))
                 allow_unprefixed = not require_prefix
-                allowed_guild_ids = set(self._permissions_policy.get("allowed_guild_ids") or set())
-                allowed_channel_ids = set(self._permissions_policy.get("allowed_channel_ids") or set())
-                allowed_role_ids = set(self._permissions_policy.get("allowed_role_ids") or set())
-                allowed_user_ids = set(self._permissions_policy.get("allowed_user_ids") or set())
-                denied_user_ids = set(self._permissions_policy.get("denied_user_ids") or set())
                 guild_policies = self._permissions_policy.get("guilds")
                 guild_policy = guild_policies.get(guild_id) if isinstance(guild_policies, dict) else None
                 if isinstance(guild_policy, dict):
@@ -943,47 +1240,26 @@ if discord is not None:
                     if isinstance(guild_require_prefix, bool):
                         require_prefix = guild_require_prefix
                         allow_unprefixed = not guild_require_prefix
-                    guild_allowed_channels = set(guild_policy.get("allowed_channel_ids") or set())
-                    guild_allowed_roles = set(guild_policy.get("allowed_role_ids") or set())
-                    guild_allowed_users = set(guild_policy.get("allowed_user_ids") or set())
-                    guild_denied_users = set(guild_policy.get("denied_user_ids") or set())
-                    if guild_allowed_channels:
-                        allowed_channel_ids = guild_allowed_channels
-                    if guild_allowed_roles:
-                        allowed_role_ids = guild_allowed_roles
-                    if guild_allowed_users:
-                        allowed_user_ids = guild_allowed_users
-                    if guild_denied_users:
-                        denied_user_ids = guild_denied_users
+            if not discord_scope_authorized(
+                self._permissions_policy,
+                guild_id=guild_id,
+                channel_id=channel_id,
+                user_id=user_id,
+                role_ids=role_ids,
+                command_guild_id=self._command_guild_id,
+                command_channel_id=self._command_channel_id,
+                skill_channel_allowed=skill_channel_allowed,
+            ):
+                return
+            if (
+                self._command_channel_id is not None
+                and int(channel_id) == int(self._command_channel_id)
+            ):
+                allow_unprefixed = not require_prefix
 
-            if guild_id is None and not allow_direct_messages:
-                return
-            if allowed_guild_ids and (guild_id is None or guild_id not in allowed_guild_ids):
-                return
-            if self._command_guild_id is not None:
-                if (guild_id is None or int(guild_id) != int(self._command_guild_id)) and not skill_channel_allowed:
-                    return
-            if self._command_channel_id is not None:
-                if int(channel_id) != int(self._command_channel_id) and not skill_channel_allowed:
-                    return
-                if int(channel_id) == int(self._command_channel_id):
-                    allow_unprefixed = not require_prefix
-            if allowed_channel_ids and int(channel_id) not in allowed_channel_ids and not skill_channel_allowed:
-                return
-            if denied_user_ids and int(user_id) in denied_user_ids:
-                return
-            if allowed_user_ids and int(user_id) not in allowed_user_ids and not skill_channel_allowed:
-                return
-            if allowed_role_ids and not skill_channel_allowed:
-                if guild_id is None:
-                    # Discord DMs carry no guild-role context. A separate user
-                    # allowlist is therefore required to admit a role-scoped user.
-                    if not allowed_user_ids or int(user_id) not in allowed_user_ids:
-                        return
-                elif not (role_ids & allowed_role_ids):
-                    return
-
-            attachments_handled = await self._handle_document_attachments(message)
+            attachments_handled, current_document_attachment_ids = (
+                await self._handle_document_attachments(message)
+            )
             if attachments_handled and not str(getattr(message, "content", "") or "").strip():
                 return
 
@@ -1037,6 +1313,7 @@ if discord is not None:
                 message_id=message.id,
                 skill_scopes=skill_scopes,
                 document_attachment_ids=self._active_document_attachment_ids(message),
+                current_document_attachment_ids=current_document_attachment_ids,
                 micro_command_explicit=command_envelope.micro_command_explicit,
             )
 
@@ -1075,6 +1352,8 @@ else:
             private_notes_poll_seconds: float = 30.0,
             turn_service: Any | None = None,
             attachment_ingress: DiscordAttachmentIngressPort | None = None,
+            document_completion_notifications: DocumentCompletionNotificationService | None = None,
+            document_notification_poll_seconds: float = 2.0,
             attachment_max_bytes: int = 52428800,
             attachment_max_per_message: int = 4,
         ) -> None:
@@ -1082,6 +1361,8 @@ else:
             del private_notes_poll_seconds
             del turn_service
             del attachment_ingress
+            del document_completion_notifications
+            del document_notification_poll_seconds
             del attachment_max_bytes
             del attachment_max_per_message
             raise RuntimeError(

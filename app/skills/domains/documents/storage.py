@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import hashlib
 import json
+from dataclasses import asdict
 from datetime import UTC, datetime
 from threading import RLock
 from typing import Any, ContextManager
@@ -15,10 +16,14 @@ from app.skills.domains.documents.types import (
     ArchiveSourceRecord,
     DocumentRecord,
     DocumentState,
+    DocumentClass,
     ProcessingRoute,
     ProcessingState,
     Sensitivity,
     StagedDocument,
+    ClassificationResult,
+    ExtractionResult,
+    ObservationState,
 )
 
 
@@ -77,6 +82,13 @@ class DocumentRepository:
             ),
             active_run_id=str(value["active_run_id"]) if value["active_run_id"] is not None else None,
             search_visible=bool(value["search_visible"]),
+            document_class=(
+                DocumentClass(str(value["selected_document_class"]))
+                if value.get("selected_document_class") is not None
+                else None
+            ),
+            classification_state=str(value.get("classification_state") or "unclassified"),
+            archive_text_visible=bool(value.get("archive_text_visible", 1)),
             created_at=str(value["created_at"]),
             updated_at=str(value["updated_at"]),
         )
@@ -764,6 +776,23 @@ class DocumentRepository:
             ).fetchone()
         return dict(row) if row is not None else None
 
+    def processing_run_blocks(self, run_id: str, *, limit: int = 2000) -> list[dict[str, Any]]:
+        """Return bounded normalized evidence for internal fallback comparison only."""
+
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT block_id, page_number, block_kind, reading_order,
+                       literal_text, confidence
+                FROM document_blocks
+                WHERE run_id = ?
+                ORDER BY page_number, reading_order, block_id
+                LIMIT ?
+                """,
+                (str(run_id), max(1, min(int(limit), 5000))),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def begin_processing_run(self, *, run_id: str, fencing_token: int) -> dict[str, Any]:
         observed_at = _now()
         with self._transaction(immediate=True) as cur:
@@ -1096,6 +1125,7 @@ class DocumentRepository:
             ProcessingState.PROCESSING_INCOMPLETE,
             ProcessingState.FAILED,
             ProcessingState.CANCELLED,
+            ProcessingState.PROTECTED_PENDING,
         }:
             raise ValueError("processing run target is not terminal")
         observed_at = _now()
@@ -1134,6 +1164,943 @@ class DocumentRepository:
                 (target.value, 1 if activate else 0, run_id, observed_at, row["document_id"]),
             )
         return dict(row)
+
+    def append_classification(
+        self,
+        *,
+        document_id: str,
+        source_version_id: str,
+        run_id: str,
+        result: ClassificationResult,
+    ) -> list[dict[str, Any]]:
+        if not result.candidates:
+            raise ValueError("classification requires at least one candidate")
+        created_at = _now()
+        rows: list[dict[str, Any]] = []
+        with self._transaction(immediate=True) as cur:
+            existing_human = cur.execute(
+                """
+                SELECT label FROM document_classifications
+                WHERE document_id = ? AND source_version_id = ?
+                  AND decision_source IN ('human_corrected', 'human_confirmed')
+                  AND state NOT IN ('superseded', 'revoked')
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (document_id, source_version_id),
+            ).fetchone()
+            selected_label = str(existing_human["label"]) if existing_human is not None else result.selected_label.value
+            for candidate in result.candidates:
+                evidence = [asdict(item) for item in candidate.evidence]
+                payload = {
+                    "taxonomy_version": result.taxonomy_version,
+                    "label": candidate.label.value,
+                    "sensitivity": candidate.sensitivity.value,
+                    "confidence": round(float(candidate.confidence), 6),
+                    "evidence": evidence,
+                    "classifier_name": result.classifier_name,
+                    "classifier_version": result.classifier_version,
+                }
+                encoded = json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+                item_hash = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+                classification_id = str(uuid4())
+                state = "conflicted" if existing_human is not None and selected_label != candidate.label.value else "machine_observed"
+                cur.execute(
+                    """
+                    INSERT INTO document_classifications (
+                        classification_id, document_id, source_version_id, run_id,
+                        taxonomy_version, label, sensitivity, confidence,
+                        classifier_name, classifier_version, evidence_json,
+                        decision_source, state, selected, item_hash, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'machine', ?, ?, ?, ?)
+                    ON CONFLICT(run_id, label, classifier_name, classifier_version, item_hash) DO NOTHING
+                    """,
+                    (
+                        classification_id,
+                        document_id,
+                        source_version_id,
+                        run_id,
+                        result.taxonomy_version,
+                        candidate.label.value,
+                        candidate.sensitivity.value,
+                        max(0.0, min(float(candidate.confidence), 1.0)),
+                        result.classifier_name[:120],
+                        result.classifier_version[:80],
+                        json.dumps(evidence, ensure_ascii=True, separators=(",", ":"), sort_keys=True),
+                        state,
+                        1 if candidate.label.value == selected_label else 0,
+                        item_hash,
+                        created_at,
+                    ),
+                )
+                row = cur.execute(
+                    """
+                    SELECT * FROM document_classifications
+                    WHERE run_id = ? AND label = ? AND classifier_name = ?
+                      AND classifier_version = ? AND item_hash = ?
+                    """,
+                    (run_id, candidate.label.value, result.classifier_name, result.classifier_version, item_hash),
+                ).fetchone()
+                if row is not None:
+                    rows.append(dict(row))
+            cur.execute(
+                """
+                UPDATE documents SET selected_document_class = ?, classification_state = ?,
+                    sensitivity = ?, search_visible = ?, updated_at = ?
+                WHERE document_id = ? AND active_source_version_id = ?
+                """,
+                (
+                    selected_label,
+                    "human_selected" if existing_human is not None else "machine_selected",
+                    result.selected_sensitivity.value,
+                    0 if result.selected_sensitivity in {Sensitivity.IDENTITY, Sensitivity.HIGHLY_RESTRICTED} else 1,
+                    created_at,
+                    document_id,
+                    source_version_id,
+                ),
+            )
+        return rows
+
+    def append_field_observations(
+        self,
+        *,
+        document_id: str,
+        source_version_id: str,
+        run_id: str,
+        result: ExtractionResult,
+    ) -> list[dict[str, Any]]:
+        created_at = _now()
+        rows: list[dict[str, Any]] = []
+        with self._transaction(immediate=True) as cur:
+            for observation in result.observations:
+                evidence = [asdict(item) for item in observation.evidence]
+                encoded_value = json.dumps(
+                    observation.value,
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+                item_hash = hashlib.sha256(
+                    json.dumps(
+                        {
+                            "schema_name": result.schema_name,
+                            "schema_version": result.schema_version,
+                            "field_name": observation.field_name,
+                            "value": observation.value,
+                            "literal_text": observation.literal_text,
+                            "sensitivity": observation.sensitivity.value,
+                            "evidence": evidence,
+                        },
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ).encode("utf-8")
+                ).hexdigest()
+                human = cur.execute(
+                    """
+                    SELECT 1 FROM document_field_decisions
+                    WHERE document_id = ? AND source_version_id = ? AND field_name = ?
+                      AND decision_kind IN ('correct', 'confirm')
+                    LIMIT 1
+                    """,
+                    (document_id, source_version_id, observation.field_name),
+                ).fetchone()
+                state = ObservationState.CONFLICTED if human is not None else ObservationState.MACHINE_OBSERVED
+                observation_id = str(uuid4())
+                cur.execute(
+                    """
+                    INSERT INTO document_field_observations (
+                        observation_id, document_id, source_version_id, run_id,
+                        schema_name, schema_version, field_name, value_json,
+                        literal_text, sensitivity, confidence, evidence_json,
+                        provider_name, provider_version, observation_state,
+                        item_hash, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(run_id, schema_name, schema_version, field_name, item_hash) DO NOTHING
+                    """,
+                    (
+                        observation_id,
+                        document_id,
+                        source_version_id,
+                        run_id,
+                        result.schema_name,
+                        result.schema_version,
+                        observation.field_name,
+                        encoded_value,
+                        observation.literal_text,
+                        observation.sensitivity.value,
+                        max(0.0, min(float(observation.confidence), 1.0)),
+                        json.dumps(evidence, ensure_ascii=True, separators=(",", ":"), sort_keys=True),
+                        result.extractor_name[:120],
+                        result.extractor_version[:80],
+                        state.value,
+                        item_hash,
+                        created_at,
+                    ),
+                )
+                row = cur.execute(
+                    """
+                    SELECT * FROM document_field_observations
+                    WHERE run_id = ? AND schema_name = ? AND schema_version = ?
+                      AND field_name = ? AND item_hash = ?
+                    """,
+                    (run_id, result.schema_name, result.schema_version, observation.field_name, item_hash),
+                ).fetchone()
+                if row is not None:
+                    rows.append(dict(row))
+        return rows
+
+    def mark_protected_pending(
+        self,
+        *,
+        document_id: str,
+        run_id: str,
+        sensitivity: Sensitivity | str = Sensitivity.HIGHLY_RESTRICTED,
+        reason_code: str = "restricted_content_withheld",
+    ) -> None:
+        target = Sensitivity(sensitivity)
+        if target not in {Sensitivity.IDENTITY, Sensitivity.HIGHLY_RESTRICTED}:
+            target = Sensitivity.HIGHLY_RESTRICTED
+        with self._transaction(immediate=True) as cur:
+            cur.execute(
+                """
+                UPDATE documents SET sensitivity = ?, search_visible = 0,
+                    archive_text_visible = 0, classification_state = 'protected_pending', updated_at = ?
+                WHERE document_id = ?
+                """,
+                (target.value, _now(), document_id),
+            )
+            if int(cur.rowcount or 0) != 1:
+                raise KeyError(document_id)
+            cur.execute(
+                """
+                INSERT INTO document_stage_messages (
+                    message_id, run_id, stage, severity, code, occurred_at
+                ) VALUES (?, ?, 'classify_extract', 'warning', ?, ?)
+                """,
+                (str(uuid4()), run_id, str(reason_code)[:120], _now()),
+            )
+
+    def set_archive_text_visibility(self, *, document_id: str, visible: bool) -> None:
+        with self._transaction(immediate=True) as cur:
+            cur.execute(
+                "UPDATE documents SET archive_text_visible = ?, updated_at = ? WHERE document_id = ?",
+                (1 if visible else 0, _now(), document_id),
+            )
+            if int(cur.rowcount or 0) != 1:
+                raise KeyError(document_id)
+
+    def record_field_decision(
+        self,
+        *,
+        document_id: str,
+        source_version_id: str,
+        field_name: str,
+        review_decision_id: str,
+        decision_kind: str,
+        selected_observation_id: str | None = None,
+        applied_value: Any | None = None,
+    ) -> dict[str, Any]:
+        normalized_kind = str(decision_kind or "").strip().casefold()
+        if normalized_kind not in {"correct", "confirm", "reject", "revoke"}:
+            raise ValueError("unsupported field decision")
+        encoded = None
+        if applied_value is not None:
+            encoded = json.dumps(applied_value, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+            if len(encoded.encode("utf-8")) > 4096:
+                raise ValueError("field decision is too large")
+            from app.skills.domains.documents.redaction import contains_unmasked_restricted_value
+
+            if contains_unmasked_restricted_value(encoded):
+                raise ValueError("field decision contains an exact restricted value")
+        decision_id = str(uuid4())
+        with self._transaction(immediate=True) as cur:
+            cur.execute(
+                """
+                INSERT INTO document_field_decisions (
+                    field_decision_id, document_id, source_version_id, field_name,
+                    review_decision_id, selected_observation_id, applied_value_json,
+                    decision_kind, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(review_decision_id) DO NOTHING
+                """,
+                (
+                    decision_id,
+                    document_id,
+                    source_version_id,
+                    str(field_name)[:120],
+                    str(review_decision_id)[:160],
+                    selected_observation_id,
+                    encoded,
+                    normalized_kind,
+                    _now(),
+                ),
+            )
+            row = cur.execute(
+                "SELECT * FROM document_field_decisions WHERE review_decision_id = ?",
+                (review_decision_id,),
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("field decision did not produce a row")
+        return dict(row)
+
+    def create_action_proposal(
+        self,
+        *,
+        document_id: str,
+        source_version_id: str,
+        run_id: str,
+        action_text: str,
+        target_list_name: str,
+        confidence: float,
+        evidence: list[dict[str, Any]],
+        due_text: str | None = None,
+        normalized_due_date: str | None = None,
+        assignee_candidate: str | None = None,
+    ) -> dict[str, Any]:
+        from app.skills.domains.documents.redaction import contains_unmasked_restricted_value
+
+        action = " ".join(str(action_text or "").split())[:500]
+        target = " ".join(str(target_list_name or "").split())[:80]
+        if not action or not target:
+            raise ValueError("action proposal is incomplete")
+        if "<REDACTED:" in action or contains_unmasked_restricted_value(action):
+            raise ValueError("action proposal contains restricted content")
+        bounded_evidence = [
+            {
+                "page_number": max(1, int(item["page_number"])),
+                "block_id": str(item["block_id"])[:120],
+            }
+            for item in evidence[:16]
+            if item.get("page_number") is not None and str(item.get("block_id") or "").strip()
+        ]
+        if not bounded_evidence:
+            raise ValueError("action proposal requires evidence")
+        payload = {
+            "action_text": action,
+            "target_list_name": target,
+            "due_text": " ".join(str(due_text or "").split())[:120] or None,
+            "normalized_due_date": str(normalized_due_date or "").strip()[:10] or None,
+            "assignee_candidate": " ".join(str(assignee_candidate or "").split())[:120] or None,
+            "evidence": bounded_evidence,
+        }
+        item_hash = hashlib.sha256(
+            json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        proposal_id = str(uuid4())
+        observed_at = _now()
+        with self._transaction(immediate=True) as cur:
+            cur.execute(
+                """
+                INSERT INTO document_action_proposals (
+                    proposal_id, document_id, source_version_id, run_id,
+                    action_text, target_list_name, due_text, normalized_due_date,
+                    assignee_candidate, confidence, evidence_json, sensitivity,
+                    item_hash, state, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'private', ?, 'pending_review', ?, ?)
+                ON CONFLICT(run_id, item_hash) DO NOTHING
+                """,
+                (
+                    proposal_id,
+                    document_id,
+                    source_version_id,
+                    run_id,
+                    action,
+                    target,
+                    payload["due_text"],
+                    payload["normalized_due_date"],
+                    payload["assignee_candidate"],
+                    max(0.0, min(float(confidence), 1.0)),
+                    json.dumps(bounded_evidence, ensure_ascii=True, separators=(",", ":"), sort_keys=True),
+                    item_hash,
+                    observed_at,
+                    observed_at,
+                ),
+            )
+            row = cur.execute(
+                "SELECT * FROM document_action_proposals WHERE run_id = ? AND item_hash = ?",
+                (run_id, item_hash),
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("action proposal did not produce a row")
+        return self._proposal_row(row)
+
+    def bind_action_review(self, *, proposal_id: str, review_id: str) -> bool:
+        with self._transaction(immediate=True) as cur:
+            cur.execute(
+                """
+                UPDATE document_action_proposals SET review_id = ?, updated_at = ?
+                WHERE proposal_id = ? AND state = 'pending_review'
+                  AND (review_id IS NULL OR review_id = ?)
+                """,
+                (review_id, _now(), proposal_id, review_id),
+            )
+            return int(cur.rowcount or 0) == 1
+
+    def get_action_proposal(self, *, proposal_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT p.*, d.owner_id, d.selected_document_class
+                FROM document_action_proposals AS p
+                JOIN documents AS d ON d.document_id = p.document_id
+                WHERE p.proposal_id = ?
+                """,
+                (proposal_id,),
+            ).fetchone()
+        return self._proposal_row(row) if row is not None else None
+
+    def mark_action_proposal_executed(
+        self,
+        *,
+        proposal_id: str,
+        review_id: str,
+        execution_ref: str,
+        target_item_ref: str,
+    ) -> dict[str, Any]:
+        with self._transaction(immediate=True) as cur:
+            cur.execute(
+                """
+                UPDATE document_action_proposals
+                SET state = 'executed', execution_ref = ?, target_item_ref = ?, updated_at = ?
+                WHERE proposal_id = ? AND review_id = ?
+                  AND (state = 'pending_review' OR
+                       (state = 'executed' AND execution_ref = ? AND target_item_ref = ?))
+                """,
+                (
+                    str(execution_ref)[:200],
+                    str(target_item_ref)[:240],
+                    _now(),
+                    proposal_id,
+                    review_id,
+                    str(execution_ref)[:200],
+                    str(target_item_ref)[:240],
+                ),
+            )
+            row = cur.execute(
+                "SELECT * FROM document_action_proposals WHERE proposal_id = ?",
+                (proposal_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(proposal_id)
+        value = self._proposal_row(row)
+        if value["state"] != "executed" or value["execution_ref"] != str(execution_ref)[:200]:
+            raise ValueError("action proposal execution binding changed")
+        return value
+
+    def create_memory_proposal(
+        self,
+        *,
+        document_id: str,
+        source_version_id: str,
+        run_id: str,
+        fact_text: str,
+        confidence: float,
+        evidence: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        from app.skills.domains.documents.redaction import contains_unmasked_restricted_value
+
+        fact = " ".join(str(fact_text or "").split())[:500]
+        if not fact or "<REDACTED:" in fact or contains_unmasked_restricted_value(fact):
+            raise ValueError("memory proposal contains restricted content")
+        bounded_evidence = [
+            {
+                "page_number": max(1, int(item["page_number"])),
+                "block_id": str(item["block_id"])[:120],
+            }
+            for item in evidence[:16]
+            if item.get("page_number") is not None and str(item.get("block_id") or "").strip()
+        ]
+        if not bounded_evidence:
+            raise ValueError("memory proposal requires evidence")
+        item_hash = hashlib.sha256(
+            json.dumps(
+                {"fact_text": fact, "evidence": bounded_evidence},
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        proposal_id = str(uuid4())
+        observed_at = _now()
+        with self._transaction(immediate=True) as cur:
+            cur.execute(
+                """
+                INSERT INTO document_memory_proposals (
+                    proposal_id, document_id, source_version_id, run_id,
+                    fact_text, confidence, evidence_json, sensitivity,
+                    item_hash, state, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'private', ?, 'capability_unavailable', ?, ?)
+                ON CONFLICT(run_id, item_hash) DO NOTHING
+                """,
+                (
+                    proposal_id,
+                    document_id,
+                    source_version_id,
+                    run_id,
+                    fact,
+                    max(0.0, min(float(confidence), 1.0)),
+                    json.dumps(bounded_evidence, ensure_ascii=True, separators=(",", ":"), sort_keys=True),
+                    item_hash,
+                    observed_at,
+                    observed_at,
+                ),
+            )
+            row = cur.execute(
+                "SELECT * FROM document_memory_proposals WHERE run_id = ? AND item_hash = ?",
+                (run_id, item_hash),
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("memory proposal did not produce a row")
+        return self._proposal_row(row)
+
+    def create_contact_proposal(
+        self,
+        *,
+        document_id: str,
+        source_version_id: str,
+        run_id: str,
+        proposed_fields: dict[str, str],
+        candidate_matches: list[dict[str, Any]],
+        provider_name: str | None,
+        capability_status: str,
+        proposed_operation: str,
+        selected_contact_ref: str | None,
+        confidence: float,
+        evidence: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        from app.skills.domains.documents.redaction import contains_unmasked_restricted_value
+
+        allowed_fields = {"full_name", "organization", "job_title", "email", "phone", "website"}
+        fields = {
+            str(key): " ".join(str(value or "").split())[:300]
+            for key, value in proposed_fields.items()
+            if key in allowed_fields and str(value or "").strip()
+        }
+        if not fields:
+            raise ValueError("contact proposal has no fields")
+        if contains_unmasked_restricted_value(json.dumps(fields, ensure_ascii=True)):
+            raise ValueError("contact proposal contains restricted content")
+        matches = [
+            {
+                "contact_ref": str(item.get("contact_ref") or "")[:240],
+                "display_name": " ".join(str(item.get("display_name") or "").split())[:160],
+                "organization": " ".join(str(item.get("organization") or "").split())[:160] or None,
+                "score": max(0.0, min(float(item.get("score") or 0.0), 1.0)),
+                "reasons": [str(reason)[:80] for reason in list(item.get("reasons") or [])[:12]],
+            }
+            for item in candidate_matches[:10]
+            if str(item.get("contact_ref") or "").strip()
+        ]
+        bounded_evidence = [
+            {
+                "page_number": max(1, int(item["page_number"])),
+                "block_id": str(item["block_id"])[:120],
+            }
+            for item in evidence[:32]
+            if item.get("page_number") is not None and str(item.get("block_id") or "").strip()
+        ]
+        if not bounded_evidence:
+            raise ValueError("contact proposal requires evidence")
+        capability = str(capability_status or "").strip().casefold()
+        operation = str(proposed_operation or "").strip().casefold()
+        if capability not in {"available", "capability_unavailable"}:
+            raise ValueError("contact proposal capability status is invalid")
+        if operation not in {"create", "update", "select_or_create"}:
+            raise ValueError("contact proposal operation is invalid")
+        payload = {
+            "fields": fields,
+            "matches": matches,
+            "provider_name": str(provider_name or "").strip()[:80] or None,
+            "capability_status": capability,
+            "proposed_operation": operation,
+            "selected_contact_ref": str(selected_contact_ref or "").strip()[:240] or None,
+            "evidence": bounded_evidence,
+        }
+        item_hash = hashlib.sha256(
+            json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        proposal_id = str(uuid4())
+        observed_at = _now()
+        state = "pending_review" if capability == "available" else "capability_unavailable"
+        with self._transaction(immediate=True) as cur:
+            cur.execute(
+                """
+                INSERT INTO document_contact_proposals (
+                    proposal_id, document_id, source_version_id, run_id,
+                    proposed_fields_json, candidate_matches_json, provider_name,
+                    capability_status, proposed_operation, selected_contact_ref,
+                    confidence, evidence_json, item_hash, state, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id, item_hash) DO NOTHING
+                """,
+                (
+                    proposal_id,
+                    document_id,
+                    source_version_id,
+                    run_id,
+                    json.dumps(fields, ensure_ascii=True, separators=(",", ":"), sort_keys=True),
+                    json.dumps(matches, ensure_ascii=True, separators=(",", ":"), sort_keys=True),
+                    payload["provider_name"],
+                    capability,
+                    operation,
+                    payload["selected_contact_ref"],
+                    max(0.0, min(float(confidence), 1.0)),
+                    json.dumps(bounded_evidence, ensure_ascii=True, separators=(",", ":"), sort_keys=True),
+                    item_hash,
+                    state,
+                    observed_at,
+                    observed_at,
+                ),
+            )
+            row = cur.execute(
+                "SELECT * FROM document_contact_proposals WHERE run_id = ? AND item_hash = ?",
+                (run_id, item_hash),
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("contact proposal did not produce a row")
+        return self._proposal_row(row)
+
+    def bind_contact_review(self, *, proposal_id: str, review_id: str) -> bool:
+        with self._transaction(immediate=True) as cur:
+            cur.execute(
+                """
+                UPDATE document_contact_proposals SET review_id = ?, updated_at = ?
+                WHERE proposal_id = ? AND (review_id IS NULL OR review_id = ?)
+                """,
+                (review_id, _now(), proposal_id, review_id),
+            )
+            return int(cur.rowcount or 0) == 1
+
+    def list_document_proposals(self, *, document_id: str) -> dict[str, list[dict[str, Any]]]:
+        with self._lock:
+            actions = self._conn.execute(
+                "SELECT * FROM document_action_proposals WHERE document_id = ? ORDER BY created_at DESC",
+                (document_id,),
+            ).fetchall()
+            memories = self._conn.execute(
+                "SELECT * FROM document_memory_proposals WHERE document_id = ? ORDER BY created_at DESC",
+                (document_id,),
+            ).fetchall()
+            contacts = self._conn.execute(
+                "SELECT * FROM document_contact_proposals WHERE document_id = ? ORDER BY created_at DESC",
+                (document_id,),
+            ).fetchall()
+        return {
+            "action_proposals": [self._proposal_row(row) for row in actions],
+            "memory_proposals": [self._proposal_row(row) for row in memories],
+            "contact_proposals": [self._proposal_row(row) for row in contacts],
+        }
+
+    @staticmethod
+    def _proposal_row(row: sqlite3.Row) -> dict[str, Any]:
+        value = dict(row)
+        for source, target, default in (
+            ("evidence_json", "evidence", "[]"),
+            ("proposed_fields_json", "proposed_fields", "{}"),
+            ("candidate_matches_json", "candidate_matches", "[]"),
+        ):
+            if source in value:
+                value[target] = json.loads(str(value.pop(source, default)))
+        return value
+
+    def append_analysis(
+        self,
+        *,
+        document_id: str,
+        source_version_id: str,
+        run_id: str,
+        analysis_kind: str,
+        result: dict[str, Any],
+        state: str,
+        recurring_match_token: str | None = None,
+    ) -> dict[str, Any]:
+        from app.skills.domains.documents.redaction import contains_unmasked_restricted_value
+
+        kind = str(analysis_kind or "").strip().casefold()[:80]
+        encoded = json.dumps(result, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+        if not kind or len(encoded) > 32_768 or contains_unmasked_restricted_value(encoded):
+            raise ValueError("document analysis payload is invalid")
+        input_hash = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+        analysis_id = str(uuid4())
+        with self._transaction(immediate=True) as cur:
+            cur.execute(
+                """
+                INSERT INTO document_analyses (
+                    analysis_id, document_id, source_version_id, run_id, analysis_kind,
+                    result_json, recurring_match_token, input_hash, state, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id, analysis_kind, input_hash) DO NOTHING
+                """,
+                (
+                    analysis_id, document_id, source_version_id, run_id, kind, encoded,
+                    str(recurring_match_token or "")[:64] or None, input_hash,
+                    str(state or "observed")[:40], _now(),
+                ),
+            )
+            row = cur.execute(
+                "SELECT * FROM document_analyses WHERE run_id = ? AND analysis_kind = ? AND input_hash = ?",
+                (run_id, kind, input_hash),
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("document analysis did not produce a row")
+        value = dict(row)
+        value["result"] = json.loads(str(value.pop("result_json")))
+        return value
+
+    def previous_analysis_for_token(
+        self,
+        *,
+        recurring_match_token: str,
+        current_document_id: str,
+        analysis_kind: str = "financial",
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT * FROM document_analyses
+                WHERE recurring_match_token = ? AND document_id <> ? AND analysis_kind = ?
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (recurring_match_token, current_document_id, analysis_kind),
+            ).fetchone()
+        if row is None:
+            return None
+        value = dict(row)
+        value["result"] = json.loads(str(value.pop("result_json")))
+        return value
+
+    def append_literal_claim(
+        self,
+        *,
+        document_id: str,
+        source_version_id: str,
+        run_id: str,
+        claim_kind: str,
+        machine_label: str,
+        literal_text: str,
+        normalized_date: str | None,
+        page_number: int,
+        block_id: str,
+        confidence: float,
+    ) -> dict[str, Any]:
+        from app.skills.domains.documents.redaction import contains_unmasked_restricted_value
+
+        literal = " ".join(str(literal_text or "").split())[:1000]
+        if not literal or contains_unmasked_restricted_value(literal):
+            raise ValueError("literal claim contains restricted content")
+        payload = {
+            "claim_kind": str(claim_kind)[:80],
+            "machine_label": str(machine_label)[:120],
+            "literal_text": literal,
+            "normalized_date": str(normalized_date or "")[:10] or None,
+            "page_number": max(1, int(page_number)),
+            "block_id": str(block_id)[:120],
+        }
+        item_hash = hashlib.sha256(
+            json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        claim_id = str(uuid4())
+        with self._transaction(immediate=True) as cur:
+            cur.execute(
+                """
+                INSERT INTO document_literal_claims (
+                    claim_id, document_id, source_version_id, run_id, claim_kind,
+                    machine_label, literal_text, normalized_date, page_number,
+                    block_id, confidence, item_hash, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id, item_hash) DO NOTHING
+                """,
+                (
+                    claim_id, document_id, source_version_id, run_id,
+                    payload["claim_kind"], payload["machine_label"], literal,
+                    payload["normalized_date"], payload["page_number"], payload["block_id"],
+                    max(0.0, min(float(confidence), 1.0)), item_hash, _now(),
+                ),
+            )
+            row = cur.execute(
+                "SELECT * FROM document_literal_claims WHERE run_id = ? AND item_hash = ?",
+                (run_id, item_hash),
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("literal claim did not produce a row")
+        return dict(row)
+
+    def list_intelligence(self, *, document_id: str) -> dict[str, list[dict[str, Any]]]:
+        with self._lock:
+            analyses = self._conn.execute(
+                "SELECT * FROM document_analyses WHERE document_id = ? ORDER BY created_at DESC",
+                (document_id,),
+            ).fetchall()
+            claims = self._conn.execute(
+                "SELECT * FROM document_literal_claims WHERE document_id = ? ORDER BY page_number, created_at",
+                (document_id,),
+            ).fetchall()
+        analysis_rows = []
+        for row in analyses:
+            value = dict(row)
+            value["result"] = json.loads(str(value.pop("result_json")))
+            analysis_rows.append(value)
+        return {"analyses": analysis_rows, "claims": [dict(row) for row in claims]}
+
+    def structured_search(
+        self,
+        *,
+        owner_id: str,
+        amount: str | None = None,
+        correspondent: str | None = None,
+        period: str | None = None,
+        date_value: str | None = None,
+        project: str | None = None,
+        clause: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        filters = {
+            "amount": amount,
+            "correspondent": correspondent,
+            "period": period,
+            "date": date_value,
+            "project": project,
+            "clause": clause,
+        }
+        active = {key: " ".join(str(value or "").split())[:120] for key, value in filters.items() if str(value or "").strip()}
+        if not active:
+            return []
+        clauses = ["d.owner_id = ?", "d.search_visible = 1", "d.processing_state = 'complete'"]
+        values: list[Any] = [owner_id]
+        field_map = {
+            "amount": ("amount_due", "total_amount", "amount_paid"),
+            "correspondent": ("issuer", "provider", "party"),
+            "period": ("service_period_start", "service_period_end"),
+            "date": ("due_date", "expiration_date", "effective_date", "purchase_date"),
+            "project": ("document_title", "title_candidate", "product"),
+        }
+        for key, fields in field_map.items():
+            if key not in active:
+                continue
+            placeholders = ",".join("?" for _ in fields)
+            clauses.append(
+                f"EXISTS (SELECT 1 FROM document_field_observations o WHERE o.document_id = d.document_id "
+                f"AND o.source_version_id = d.active_source_version_id AND o.field_name IN ({placeholders}) "
+                "AND LOWER(o.value_json) LIKE ?)"
+            )
+            values.extend(fields)
+            values.append(f"%{active[key].casefold()}%")
+        if "clause" in active:
+            clauses.append(
+                "EXISTS (SELECT 1 FROM document_literal_claims c WHERE c.document_id = d.document_id "
+                "AND c.source_version_id = d.active_source_version_id AND LOWER(c.literal_text) LIKE ?)"
+            )
+            values.append(f"%{active['clause'].casefold()}%")
+        values.append(max(1, min(int(limit), 100)))
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT d.document_id, d.title, d.selected_document_class, d.sensitivity "
+                f"FROM documents d WHERE {' AND '.join(clauses)} ORDER BY d.updated_at DESC LIMIT ?",
+                values,
+            ).fetchall()
+        return [{**dict(row), "matched_filters": sorted(active)} for row in rows]
+
+    def record_restricted_access(
+        self,
+        *,
+        document_id: str,
+        actor_principal: str,
+        purpose_code: str,
+        operation: str,
+        outcome: str,
+        reason_code: str,
+        request_id: str,
+    ) -> dict[str, Any]:
+        allowed_purposes = {"human_review", "correction", "identity_verification", "tax_use", "legal_use"}
+        purpose = str(purpose_code or "").strip().casefold()
+        if purpose not in allowed_purposes:
+            purpose = "human_review"
+            outcome = "denied"
+            reason_code = "invalid_purpose"
+        audit_id = str(uuid4())
+        with self._transaction(immediate=True) as cur:
+            cur.execute(
+                """
+                INSERT INTO document_restricted_access_audit (
+                    audit_id, document_id, actor_principal, purpose_code, operation,
+                    outcome, reason_code, request_id, observed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(request_id, operation) DO NOTHING
+                """,
+                (
+                    audit_id, document_id, str(actor_principal or "unknown")[:160], purpose,
+                    str(operation or "restricted.read")[:80], str(outcome or "denied")[:40],
+                    str(reason_code or "unspecified")[:120], str(request_id)[:160], _now(),
+                ),
+            )
+            row = cur.execute(
+                "SELECT * FROM document_restricted_access_audit WHERE request_id = ? AND operation = ?",
+                (str(request_id)[:160], str(operation or "restricted.read")[:80]),
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("restricted access audit did not produce a row")
+        return dict(row)
+
+    def list_restricted_access_audit(self, *, document_id: str, limit: int = 100) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM document_restricted_access_audit WHERE document_id = ? ORDER BY observed_at DESC LIMIT ?",
+                (document_id, max(1, min(int(limit), 500))),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_classifications(self, *, document_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT classification_id, source_version_id, run_id, taxonomy_version,
+                       label, sensitivity, confidence, classifier_name, classifier_version,
+                       decision_source, state, selected, item_hash, created_at
+                FROM document_classifications WHERE document_id = ?
+                ORDER BY created_at DESC
+                """,
+                (document_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def effective_fields(self, *, document_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                WITH ranked AS (
+                    SELECT o.*,
+                           ROW_NUMBER() OVER (PARTITION BY o.field_name ORDER BY o.created_at DESC) AS rank
+                    FROM document_field_observations AS o
+                    JOIN documents AS d ON d.document_id = o.document_id
+                    WHERE o.document_id = ? AND o.source_version_id = d.active_source_version_id
+                )
+                SELECT r.observation_id, r.field_name,
+                       COALESCE(d.applied_value_json, r.value_json) AS value_json,
+                       r.literal_text, r.sensitivity, r.confidence, r.evidence_json,
+                       r.observation_state, r.item_hash, r.created_at,
+                       d.review_decision_id, d.decision_kind
+                FROM ranked AS r
+                LEFT JOIN document_field_decisions AS d
+                  ON d.document_id = r.document_id AND d.source_version_id = r.source_version_id
+                 AND d.field_name = r.field_name
+                 AND d.created_at = (
+                    SELECT MAX(d2.created_at) FROM document_field_decisions AS d2
+                    WHERE d2.document_id = r.document_id
+                      AND d2.source_version_id = r.source_version_id
+                      AND d2.field_name = r.field_name
+                 )
+                WHERE r.rank = 1
+                ORDER BY r.field_name
+                """,
+                (document_id,),
+            ).fetchall()
+        result = []
+        for row in rows:
+            value = dict(row)
+            value["value"] = json.loads(str(value.pop("value_json")))
+            value["evidence"] = json.loads(str(value.pop("evidence_json")))
+            result.append(value)
+        return result
 
     def search_blocks(self, *, owner_id: str, query: str, limit: int = 20) -> list[dict[str, Any]]:
         terms = [item.casefold() for item in str(query or "").split() if item][:8]
@@ -1289,6 +2256,107 @@ class DocumentRepository:
                 (review_id, _now(), document_id, proposal_id, review_id),
             )
             return int(cur.rowcount or 0) == 1
+
+    def get_metadata_proposal(self, *, proposal_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM document_metadata_proposals WHERE proposal_id = ?",
+                (proposal_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        value = dict(row)
+        value["proposed_value"] = json.loads(str(value.pop("proposed_value_json")))
+        return value
+
+    def begin_metadata_sync(
+        self,
+        *,
+        proposal_id: str,
+        provider: str,
+        external_id: str,
+        source_version_id: str,
+        operation_id: str,
+        desired_hash: str,
+        provider_version: str,
+    ) -> dict[str, Any]:
+        sync_id = str(uuid4())
+        observed_at = _now()
+        with self._transaction(immediate=True) as cur:
+            cur.execute(
+                """
+                INSERT INTO document_metadata_sync (
+                    sync_id, proposal_id, provider, external_id, source_version_id,
+                    operation_id, desired_hash, provider_version, state,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'applying', ?, ?)
+                ON CONFLICT(operation_id) DO NOTHING
+                """,
+                (
+                    sync_id,
+                    proposal_id,
+                    str(provider)[:80],
+                    str(external_id)[:160],
+                    source_version_id,
+                    str(operation_id)[:160],
+                    desired_hash,
+                    str(provider_version)[:120],
+                    observed_at,
+                    observed_at,
+                ),
+            )
+            row = cur.execute(
+                "SELECT * FROM document_metadata_sync WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("metadata sync did not produce a row")
+        return dict(row)
+
+    def finish_metadata_sync(
+        self,
+        *,
+        operation_id: str,
+        state: str,
+        observed_hash: str | None = None,
+        provider_version: str | None = None,
+        error_code: str | None = None,
+    ) -> dict[str, Any]:
+        normalized_state = str(state or "").strip().casefold()
+        if normalized_state not in {"applied", "failed", "conflicted"}:
+            raise ValueError("invalid metadata sync state")
+        with self._transaction(immediate=True) as cur:
+            cur.execute(
+                """
+                UPDATE document_metadata_sync
+                SET state = ?, observed_hash = ?, provider_version = COALESCE(?, provider_version),
+                    error_code = ?, updated_at = ?
+                WHERE operation_id = ? AND state = 'applying'
+                """,
+                (
+                    normalized_state,
+                    observed_hash,
+                    str(provider_version)[:120] if provider_version else None,
+                    str(error_code)[:120] if error_code else None,
+                    _now(),
+                    operation_id,
+                ),
+            )
+            row = cur.execute(
+                "SELECT * FROM document_metadata_sync WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+            if normalized_state == "applied" and row is not None:
+                cur.execute(
+                    """
+                    UPDATE document_metadata_proposals SET state = 'applied', updated_at = ?
+                    WHERE proposal_id = ?
+                    """,
+                    (_now(), str(row["proposal_id"])),
+                )
+        if row is None:
+            raise KeyError(operation_id)
+        return dict(row)
 
     def _set_state(
         self,

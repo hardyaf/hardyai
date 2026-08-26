@@ -40,6 +40,17 @@ class AuthorizedSkillExecutor:
             ):
                 if key in request_context:
                     context[key] = request_context[key]
+            for key in ("document_attachment_ids", "current_document_attachment_ids"):
+                raw_ids = request_context.get(key)
+                if not isinstance(raw_ids, list):
+                    continue
+                document_ids = [
+                    str(item).strip()
+                    for item in raw_ids[:4]
+                    if isinstance(item, str) and str(item).strip()
+                ]
+                if document_ids:
+                    context[key] = document_ids
         return context
 
     def resolve(self, *, intent: str, user_id: str, agent_id: str) -> dict[str, Any] | None:

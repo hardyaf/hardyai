@@ -286,6 +286,32 @@ def test_main_turn_decision_prompt_enforces_action_commitment_boundary():
     assert "all unread" in prompt
 
 
+def test_main_turn_decision_prompt_includes_bounded_trusted_entity_context():
+    backend = OllamaMainConversationBackend(base_url="http://localhost:11434", model="test-model")
+    prompt = backend._build_turn_decision_prompt(
+        text="what does that image say?",
+        context={
+            "entity_hints": [
+                {
+                    "domain": "documents",
+                    "entity_type": "document",
+                    "entity_id": "doc-1",
+                    "display_name": "recent Discord attachment",
+                    "aliases": ["this image"],
+                    "resolution_hints": {"document_id": "doc-1"},
+                    "unsafe_extra": "must-not-project",
+                }
+            ],
+            "active_skill_context": {"last_document_id": "doc-1"},
+        },
+    )
+
+    assert "Trusted current entity context" in prompt
+    assert '"document_id":"doc-1"' in prompt
+    assert "must-not-project" not in prompt
+    assert "never reveal internal IDs" in prompt
+
+
 def test_main_turn_decision_backend_parses_json_without_ollama_format_flag(monkeypatch):
     class Response:
         @staticmethod
@@ -304,8 +330,8 @@ def test_main_turn_decision_backend_parses_json_without_ollama_format_flag(monke
 
     calls = []
 
-    def fake_post(url, *, json, timeout):
-        calls.append({"url": url, "json": json, "timeout": timeout})
+    def fake_post(url, *, json, timeout, headers):
+        calls.append({"url": url, "json": json, "timeout": timeout, "headers": headers})
         return Response()
 
     monkeypatch.setattr("app.core.main_backend.httpx.post", fake_post)

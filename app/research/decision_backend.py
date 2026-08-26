@@ -6,6 +6,7 @@ from typing import Any
 
 import httpx
 
+from app.accelerator.client import accelerator_request_headers
 from app.core.ollama_observability import OllamaCallObserver, OllamaMetricsCallback
 from app.research.types import ResearchDecision
 
@@ -64,6 +65,7 @@ class OllamaResearchDecisionBackend:
         try:
             response = httpx.post(
                 f"{self._base_url}/api/generate",
+                headers=accelerator_request_headers("research_decision"),
                 json=request_payload,
                 timeout=self._timeout,
             )

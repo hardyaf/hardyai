@@ -600,12 +600,71 @@ def test_authorized_attachment_only_message_queues_document_without_entering_ask
             )
             await bot.on_message(message)
             assert channel.send.await_count == 2
-            assert "Securely submitting" in channel.send.await_args_list[0].args[0]
+            assert channel.send.await_args_list[0].args[0] == "I got it - processing now."
             assert "Queued `receipt.png`" in channel.send.await_args_list[1].args[0]
 
     asyncio.run(exercise())
     assert [item.channel_id for item in ingress.descriptors] == ["200", "201"]
     assert all(item.filename == "receipt.png" for item in ingress.descriptors)
+
+
+def test_attachment_acknowledges_before_slow_ingress_finishes(tmp_path):
+    submit_started = asyncio.Event()
+    release_submit = asyncio.Event()
+
+    class SlowAttachmentIngressStub:
+        async def submit(self, descriptor):
+            submit_started.set()
+            await release_submit.wait()
+            return DiscordAttachmentReceipt(
+                filename=descriptor.filename,
+                document_id="doc-slow-1",
+                intake_id="intake-slow-1",
+                state="queued",
+                duplicate=False,
+                enqueue_confirmed=True,
+            )
+
+    permissions = tmp_path / "discord_permissions.yaml"
+    permissions.write_text(
+        "version: 1\ndefaults:\n  command_prefix: \"!\"\n  require_prefix: false\n"
+        "  allowed_guild_ids: [100]\nguilds:\n  - guild_id: 100\n"
+        "    allowed_channel_ids: [200]\n    allowed_user_ids: [300]\n",
+        encoding="utf-8",
+    )
+    bot = DiscordJarvisBot(
+        command_prefix="!",
+        permissions_path=str(permissions),
+        turn_service=SimpleNamespace(),
+        attachment_ingress=SlowAttachmentIngressStub(),
+        attachment_max_bytes=1024,
+    )
+    channel = SimpleNamespace(id=200, send=AsyncMock())
+    message = SimpleNamespace(
+        id=401,
+        author=SimpleNamespace(bot=False, id=300, roles=[]),
+        guild=SimpleNamespace(id=100),
+        channel=channel,
+        content="",
+        attachments=[SimpleNamespace(
+            id=500,
+            filename="receipt.png",
+            content_type="image/png",
+            size=512,
+            url="https://cdn.discordapp.com/attachments/200/500/receipt.png",
+        )],
+    )
+
+    async def exercise() -> None:
+        handling = asyncio.create_task(bot.on_message(message))
+        await asyncio.wait_for(submit_started.wait(), timeout=1.0)
+        assert channel.send.await_count == 1
+        assert channel.send.await_args.args[0] == "I got it - processing now."
+        release_submit.set()
+        await asyncio.wait_for(handling, timeout=1.0)
+        assert channel.send.await_count == 2
+
+    asyncio.run(exercise())
 
 
 def test_unauthorized_channel_never_submits_attachment(tmp_path):
@@ -711,5 +770,6 @@ def test_attachment_caption_carries_only_recent_user_channel_document_ids(tmp_pa
     asyncio.run(bot.on_message(message))
 
     assert turn_service.requests[0].context["document_attachment_ids"] == ["doc-caption-1"]
+    assert turn_service.requests[0].context["current_document_attachment_ids"] == ["doc-caption-1"]
     assert "doc-caption-1" not in turn_service.requests[0].text
     assert channel.send.await_count == 3

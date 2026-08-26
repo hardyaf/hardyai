@@ -9,6 +9,27 @@ from app.context.types import EntityRegistry
 class SkillContextContract(Protocol):
     contract_id: str
 
+    def request_interrupts_pending(
+        self,
+        *,
+        request_context: dict[str, Any],
+        text: str,
+        pending_intent: str,
+    ) -> bool:
+        """Optionally let trusted domain context supersede a stale clarification."""
+        ...
+
+    def bind_request_decision(
+        self,
+        *,
+        decision: Any,
+        request_context: dict[str, Any],
+        working_context: dict[str, Any],
+        text: str,
+    ) -> Any:
+        """Optionally bind a trusted request-scoped reference to a typed decision."""
+        ...
+
     def supports_intent(self, *, intent: str) -> bool:
         ...
 

@@ -20,6 +20,8 @@ from app.skills.domains.email_agent.service import EmailAgentService
 from app.jobs.repository import DurableJobRepository
 from app.reviews.repository import HumanReviewRepository
 from app.reviews.service import HumanReviewService
+from app.services.document_proposal_execution_service import DocumentProposalExecutionService
+from app.provenance.repository import ProvenanceRepository
 
 
 def get_container(request: Request) -> ApplicationContainer:
@@ -95,3 +97,13 @@ def get_human_review_repository(request: Request) -> HumanReviewRepository:
 
 def get_human_review_service(request: Request) -> HumanReviewService:
     return get_container(request).human_review_service
+
+
+def get_document_proposal_execution_service(
+    request: Request,
+) -> DocumentProposalExecutionService | None:
+    return get_container(request).document_proposal_execution_service
+
+
+def get_provenance_repository(request: Request) -> ProvenanceRepository:
+    return get_container(request).provenance_repository

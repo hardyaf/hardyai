@@ -23,6 +23,7 @@ class FakeArchive:
 
     def __init__(self) -> None:
         self.submissions = 0
+        self.read_grants: list[str] = []
 
     def submit(self, *, stream, filename: str, title: str) -> str:
         assert stream.read() == PDF
@@ -36,6 +37,7 @@ class FakeArchive:
 
     def grant_read_access(self, source_external_id: str) -> None:
         assert source_external_id == "41"
+        self.read_grants.append(source_external_id)
 
     def download_original(self, source_external_id: str):
         assert source_external_id == "41"
@@ -109,6 +111,29 @@ def test_worker_verifies_original_before_ready_and_removes_spool(tmp_path) -> No
     assert ready.spool_key is None
     assert spool_path.exists() is False
     assert jobs.list_jobs(job_type="document.archive.v1")[0]["status"] == "completed"
+    assert archive.read_grants == ["41"]
+    jobs.close()
+    documents.close()
+
+
+def test_worker_defers_archive_read_grant_until_phase6_classification(tmp_path) -> None:
+    jobs, documents, spool, accepted = _accepted_document(tmp_path)
+    archive = FakeArchive()
+    worker = DocumentProcessingWorker(
+        jobs=jobs,
+        documents=documents,
+        spool=spool,
+        archive=archive,
+        worker_id="worker-phase6-deferred-grant",
+        archive_read_grant_deferred=True,
+    )
+
+    result = worker.run_once()
+
+    assert result[0]["status"] == "ready"
+    assert documents.get(accepted.record.document_id).state.value == "ready"
+    assert documents.get(accepted.record.document_id).archive_text_visible is False
+    assert archive.read_grants == []
     jobs.close()
     documents.close()
 
@@ -165,6 +190,84 @@ def test_worker_routes_images_to_conventional_ocr_without_changing_pdf_route() -
         "source_version_id": "source-1",
         "run_id": "ocr-run",
     }]
+
+
+def test_worker_queues_vlm_only_after_quality_failed_image_run() -> None:
+    class DocumentsStub:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def get(self, _document_id):
+            return SimpleNamespace(media_type="image/jpeg")
+
+        def create_processing_run(self, **kwargs):
+            self.calls.append(kwargs)
+            return {"run_id": "vlm-run", "source_version_id": "source-1"}
+
+    class EnqueuerStub:
+        def enqueue_processing(self, **_kwargs):
+            return "job-vlm"
+
+    processor = SimpleNamespace(
+        parser=SimpleNamespace(provider_name="paddleocr_vl", provider_version="3.6.0")
+    )
+    documents = DocumentsStub()
+    worker = DocumentProcessingWorker(
+        jobs=SimpleNamespace(),
+        documents=documents,
+        spool=SimpleNamespace(),
+        archive=SimpleNamespace(),
+        processing_services={ProcessingRoute.VLM_FALLBACK: processor},
+        processing_route_metadata={
+            ProcessingRoute.VLM_FALLBACK: {
+                "image_digest": "sha256:" + "c" * 64,
+                "configuration_sha256": "d" * 64,
+                "resource_lane": "gpu_vlm",
+            }
+        },
+        processing_enqueuer=EnqueuerStub(),
+    )
+
+    result = worker._enqueue_fallback(
+        document_id="document-1",
+        fallback_from_run_id="ocr-run",
+        route=ProcessingRoute.VLM_FALLBACK,
+    )
+
+    assert result["status"] == "queued"
+    assert result["route"] == "vlm_fallback"
+    assert documents.calls[0]["fallback_from_run_id"] == "ocr-run"
+    assert documents.calls[0]["artifact_schema_version"] == "3"
+    assert documents.calls[0]["resource_lane"] == "gpu_vlm"
+
+
+def test_worker_signals_only_the_final_processing_result() -> None:
+    class CompletionEnqueuerStub:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def signal_terminal(self, **kwargs):
+            self.calls.append(kwargs)
+            return 1
+
+    completion = CompletionEnqueuerStub()
+    worker = DocumentProcessingWorker(
+        jobs=SimpleNamespace(),
+        documents=SimpleNamespace(),
+        spool=SimpleNamespace(),
+        archive=SimpleNamespace(),
+        completion_enqueuer=completion,
+    )
+
+    conventional_with_fallback = {
+        "status": "processing_incomplete",
+        "fallback": {"status": "queued", "route": "vlm_fallback"},
+    }
+    assert worker._processing_result_is_terminal(conventional_with_fallback) is False
+    assert worker._processing_result_is_terminal({"status": "needs_review"}) is True
+
+    worker._signal_terminal(document_id="doc-1", state="needs_review")
+    assert completion.calls == [{"document_id": "doc-1", "state": "needs_review"}]
 
 
 def test_ready_job_recovery_removes_spool_after_crash_window(tmp_path) -> None:

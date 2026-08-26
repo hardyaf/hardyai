@@ -16,12 +16,14 @@ from app.api.routes.identities import router as identities_router
 from app.api.routes.operator_session import router as operator_session_router
 from app.api.routes.jobs import router as jobs_router
 from app.api.routes.reviews import router as reviews_router
+from app.api.routes.provenance import router as provenance_router
 from app.api.operator_auth import validate_security_configuration
 from app.api.security_headers import SECURITY_HEADERS
 from app.container import ApplicationContainer
 from app.integrations.discord_attachment.client import DiscordAttachmentIngressClient
 from app.services.clock_scheduler import BoundedClockScheduler, ClockJob
 from app.services.discord.bot import DiscordJarvisBot
+from app.services.document_completion_service import DocumentCompletionNotificationService
 from app.services.offline_runtime_policy import validate_offline_runtime
 
 
@@ -95,6 +97,17 @@ async def _lifespan(application: FastAPI):
                 operator_key_path=settings.document_gateway_operator_key_path,
                 timeout_seconds=settings.discord_attachment_ingress_timeout_seconds,
             )
+        document_completion_notifications = None
+        if settings.discord_document_notifications_enabled:
+            if not settings.discord_attachment_ingress_enabled or container.documents_service is None:
+                raise RuntimeError(
+                    "Discord document notifications require attachment ingress and Documents."
+                )
+            document_completion_notifications = DocumentCompletionNotificationService(
+                repository=container.job_repository,
+                documents=container.documents_service,
+                poll_delay_seconds=settings.discord_document_notification_poll_seconds,
+            )
         discord_bot = DiscordJarvisBot(
             command_prefix=settings.discord_command_prefix,
             command_channel_id=settings.discord_command_channel_id,
@@ -103,6 +116,10 @@ async def _lifespan(application: FastAPI):
             private_notes_service=container.private_notes_service,
             turn_service=container.turn_service,
             attachment_ingress=discord_attachment_ingress,
+            document_completion_notifications=document_completion_notifications,
+            document_notification_poll_seconds=(
+                settings.discord_document_notification_poll_seconds
+            ),
             attachment_max_bytes=settings.documents_max_upload_bytes,
             attachment_max_per_message=settings.discord_attachment_max_per_message,
         )
@@ -162,6 +179,7 @@ def create_app(container: ApplicationContainer | None = None) -> FastAPI:
     application.include_router(operator_session_router)
     application.include_router(jobs_router)
     application.include_router(reviews_router)
+    application.include_router(provenance_router)
     application.include_router(dashboard_router)
     return application
 

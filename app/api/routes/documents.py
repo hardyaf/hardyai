@@ -28,7 +28,16 @@ from app.schemas.documents import (
     DocumentMetadataReviewBindingRequest,
     DocumentStatusResponse,
     DocumentUploadResponse,
+    DocumentClassificationsResponse,
+    DocumentFieldsResponse,
+    DocumentActionExecutionBindingRequest,
+    DocumentActionProposalView,
+    DocumentProposalsResponse,
+    DocumentStructuredSearchResponse,
+    DocumentIntelligenceResponse,
+    RestrictedDocumentAccessRequest,
 )
+from app.restricted_documents.readiness import evaluate_restricted_workflow
 from app.skills.domains.documents.types import DocumentRecord
 from app.skills.domains.documents.permissions import DocumentAccessPolicy
 from app.skills.domains.documents.storage import DocumentStorageError
@@ -49,6 +58,17 @@ def _enabled(container: DocumentGatewayContainer) -> None:
         raise HTTPException(status_code=503, detail="documents_disabled")
 
 
+def _restricted_readiness(container: DocumentGatewayContainer):
+    settings = container.settings
+    return evaluate_restricted_workflow(
+        enabled=settings.documents_restricted_workflow_enabled,
+        cipher_configured=False,
+        isolated_store_configured=False,
+        security_review_id=settings.documents_restricted_security_review_id,
+        recovery_attestation_path=settings.documents_restricted_recovery_attestation_path,
+    )
+
+
 def _status(record: DocumentRecord) -> DocumentStatusResponse:
     return DocumentStatusResponse(
         document_id=record.document_id,
@@ -66,6 +86,9 @@ def _status(record: DocumentRecord) -> DocumentStatusResponse:
         processing_state=record.processing_state.value,
         source_version_id=record.source_version_id,
         active_run_id=record.active_run_id,
+        document_class=record.document_class.value if record.document_class is not None else None,
+        classification_state=record.classification_state,
+        archive_text_visible=record.archive_text_visible,
     )
 
 
@@ -74,6 +97,13 @@ def _document_id(value: str) -> str:
         return str(UUID(str(value or "")))
     except ValueError as exc:
         raise HTTPException(status_code=404, detail="document_not_found") from exc
+
+
+def _proposal_id(value: str) -> str:
+    try:
+        return str(UUID(str(value or "")))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="document_action_proposal_not_found") from exc
 
 
 def _ingress_key(source: str | None, external_id: str | None) -> tuple[str, str] | None:
@@ -115,6 +145,19 @@ def _verified_source(chunks: Iterable[bytes], *, expected_size: int, expected_sh
 async def documents_ready(request: Request) -> JSONResponse:
     status = await asyncio.to_thread(_container(request).readiness)
     return JSONResponse(status_code=200 if status["status"] in {"ready", "disabled"} else 503, content=status)
+
+
+@router.get("/restricted/ready")
+async def restricted_workflow_readiness(
+    request: Request,
+    _: RequestPrincipal = Depends(require_operator),
+) -> JSONResponse:
+    readiness = _restricted_readiness(_container(request))
+    return JSONResponse(
+        content=readiness.public_view(),
+        status_code=200 if readiness.ready else 503,
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @router.post("", response_model=DocumentUploadResponse)
@@ -234,7 +277,10 @@ async def search_documents(
         if (
             record is None
             or record.document_id in seen
-            or not DocumentAccessPolicy.can_read(record=record, user_id=principal.user_id)
+            or not DocumentAccessPolicy.can_read_archive_text(
+                record=record,
+                user_id=principal.user_id,
+            )
         ):
             continue
         results.append(
@@ -247,6 +293,34 @@ async def search_documents(
             )
         )
     return DocumentSearchResponse(query=" ".join(query.split()), results=results[:limit])
+
+
+@router.get("/structured-search", response_model=DocumentStructuredSearchResponse)
+async def structured_search_documents(
+    request: Request,
+    amount: str | None = Query(default=None, max_length=40),
+    correspondent: str | None = Query(default=None, max_length=120),
+    period: str | None = Query(default=None, max_length=40),
+    date_value: str | None = Query(default=None, alias="date", max_length=40),
+    project: str | None = Query(default=None, max_length=120),
+    clause: str | None = Query(default=None, max_length=120),
+    limit: int = Query(default=20, ge=1, le=100),
+    principal: RequestPrincipal = Depends(require_operator),
+) -> DocumentStructuredSearchResponse:
+    container = _container(request)
+    _enabled(container)
+    rows = await asyncio.to_thread(
+        container.repository.structured_search,
+        owner_id=principal.user_id,
+        amount=amount,
+        correspondent=correspondent,
+        period=period,
+        date_value=date_value,
+        project=project,
+        clause=clause,
+        limit=limit,
+    )
+    return DocumentStructuredSearchResponse(results=rows)
 
 
 @router.post("/{document_id}/reprocess", response_model=DocumentReprocessResponse)
@@ -402,6 +476,208 @@ async def get_document_status(
     return _status(record)
 
 
+@router.post("/{document_id}/restricted-fields")
+async def read_restricted_document_field(
+    document_id: str,
+    body: RestrictedDocumentAccessRequest,
+    request: Request,
+    principal: RequestPrincipal = Depends(require_operator),
+) -> JSONResponse:
+    container = _container(request)
+    _enabled(container)
+    canonical_id = _document_id(document_id)
+    record = container.repository.get(canonical_id, owner_id=principal.user_id) if container.repository else None
+    if record is None:
+        raise HTTPException(status_code=404, detail="document_not_found")
+    readiness = _restricted_readiness(container)
+    reason = (
+        "document_not_restricted"
+        if record.sensitivity.value not in {"identity", "highly_restricted"}
+        else "restricted_workflow_not_ready"
+    )
+    await asyncio.to_thread(
+        container.repository.record_restricted_access,
+        document_id=canonical_id,
+        actor_principal=principal.subject,
+        purpose_code=body.purpose,
+        operation="restricted.read",
+        outcome="denied",
+        reason_code=reason,
+        request_id=body.request_id,
+    )
+    return JSONResponse(
+        status_code=503 if not readiness.ready else 409,
+        content={
+            "status": "blocked",
+            "reason": reason,
+            "readiness": readiness.public_view(),
+        },
+        headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
+    )
+
+
+@router.get("/{document_id}/restricted-access-audit")
+async def get_restricted_access_audit(
+    document_id: str,
+    request: Request,
+    limit: int = Query(default=100, ge=1, le=500),
+    principal: RequestPrincipal = Depends(require_operator),
+) -> JSONResponse:
+    container = _container(request)
+    _enabled(container)
+    canonical_id = _document_id(document_id)
+    record = container.repository.get(canonical_id, owner_id=principal.user_id) if container.repository else None
+    if record is None:
+        raise HTTPException(status_code=404, detail="document_not_found")
+    rows = await asyncio.to_thread(
+        container.repository.list_restricted_access_audit,
+        document_id=canonical_id,
+        limit=limit,
+    )
+    return JSONResponse(
+        content={"document_id": canonical_id, "audit": rows},
+        headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
+    )
+
+
+@router.get(
+    "/{document_id}/classifications",
+    response_model=DocumentClassificationsResponse,
+)
+async def get_document_classifications(
+    document_id: str,
+    request: Request,
+    principal: RequestPrincipal = Depends(require_operator),
+) -> DocumentClassificationsResponse:
+    container = _container(request)
+    _enabled(container)
+    canonical_id = _document_id(document_id)
+    record = container.repository.get(canonical_id, owner_id=principal.user_id) if container.repository else None
+    if record is None:
+        raise HTTPException(status_code=404, detail="document_not_found")
+    rows = container.repository.list_classifications(document_id=canonical_id)
+    for row in rows:
+        row["selected"] = bool(row["selected"])
+    return DocumentClassificationsResponse(
+        document_id=canonical_id,
+        classification_state=record.classification_state,
+        classifications=rows,
+    )
+
+
+@router.get("/{document_id}/fields", response_model=DocumentFieldsResponse)
+async def get_document_fields(
+    document_id: str,
+    request: Request,
+    principal: RequestPrincipal = Depends(require_operator),
+) -> DocumentFieldsResponse:
+    container = _container(request)
+    _enabled(container)
+    canonical_id = _document_id(document_id)
+    record = container.repository.get(canonical_id, owner_id=principal.user_id) if container.repository else None
+    if record is None:
+        raise HTTPException(status_code=404, detail="document_not_found")
+    if not DocumentAccessPolicy.can_read_fields(record=record, user_id=principal.user_id):
+        raise HTTPException(status_code=403, detail="protected_fields_unavailable")
+    return DocumentFieldsResponse(
+        document_id=canonical_id,
+        source_version_id=str(record.source_version_id or ""),
+        fields=container.repository.effective_fields(document_id=canonical_id),
+    )
+
+
+@router.get("/{document_id}/proposals", response_model=DocumentProposalsResponse)
+async def get_document_proposals(
+    document_id: str,
+    request: Request,
+    principal: RequestPrincipal = Depends(require_operator),
+) -> DocumentProposalsResponse:
+    container = _container(request)
+    _enabled(container)
+    canonical_id = _document_id(document_id)
+    record = container.repository.get(canonical_id, owner_id=principal.user_id) if container.repository else None
+    if record is None:
+        raise HTTPException(status_code=404, detail="document_not_found")
+    if not DocumentAccessPolicy.can_read_fields(record=record, user_id=principal.user_id):
+        raise HTTPException(status_code=403, detail="protected_proposals_unavailable")
+    proposals = container.repository.list_document_proposals(document_id=canonical_id)
+    return DocumentProposalsResponse(document_id=canonical_id, **proposals)
+
+
+@router.get("/{document_id}/intelligence", response_model=DocumentIntelligenceResponse)
+async def get_document_intelligence(
+    document_id: str,
+    request: Request,
+    principal: RequestPrincipal = Depends(require_operator),
+) -> DocumentIntelligenceResponse:
+    container = _container(request)
+    _enabled(container)
+    canonical_id = _document_id(document_id)
+    record = container.repository.get(canonical_id, owner_id=principal.user_id) if container.repository else None
+    if record is None:
+        raise HTTPException(status_code=404, detail="document_not_found")
+    if not DocumentAccessPolicy.can_read_fields(record=record, user_id=principal.user_id):
+        raise HTTPException(status_code=403, detail="protected_intelligence_unavailable")
+    return DocumentIntelligenceResponse(
+        document_id=canonical_id,
+        **container.repository.list_intelligence(document_id=canonical_id),
+    )
+
+
+@router.get(
+    "/action-proposals/{proposal_id}",
+    response_model=DocumentActionProposalView,
+)
+async def get_document_action_proposal(
+    proposal_id: str,
+    request: Request,
+    principal: RequestPrincipal = Depends(require_operator),
+) -> DocumentActionProposalView:
+    container = _container(request)
+    _enabled(container)
+    proposal = (
+        container.repository.get_action_proposal(proposal_id=_proposal_id(proposal_id))
+        if container.repository
+        else None
+    )
+    if proposal is None or str(proposal.get("owner_id")) != principal.user_id:
+        raise HTTPException(status_code=404, detail="document_action_proposal_not_found")
+    return DocumentActionProposalView(**proposal)
+
+
+@router.post(
+    "/action-proposals/{proposal_id}/execution-binding",
+    response_model=DocumentActionProposalView,
+)
+async def bind_document_action_execution(
+    proposal_id: str,
+    body: DocumentActionExecutionBindingRequest,
+    request: Request,
+    principal: RequestPrincipal = Depends(require_operator),
+) -> DocumentActionProposalView:
+    container = _container(request)
+    _enabled(container)
+    canonical_proposal_id = _proposal_id(proposal_id)
+    proposal = (
+        container.repository.get_action_proposal(proposal_id=canonical_proposal_id)
+        if container.repository
+        else None
+    )
+    if proposal is None or str(proposal.get("owner_id")) != principal.user_id:
+        raise HTTPException(status_code=404, detail="document_action_proposal_not_found")
+    try:
+        result = container.repository.mark_action_proposal_executed(
+            proposal_id=canonical_proposal_id,
+            review_id=body.review_id,
+            execution_ref=body.execution_ref,
+            target_item_ref=body.target_item_ref,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    result["owner_id"] = principal.user_id
+    return DocumentActionProposalView(**result)
+
+
 @router.get("/{document_id}/source")
 async def download_document_source(
     document_id: str,
@@ -415,6 +691,8 @@ async def download_document_source(
     record = container.repository.get(_document_id(document_id), owner_id=principal.user_id)
     if record is None:
         raise HTTPException(status_code=404, detail="document_not_found")
+    if not DocumentAccessPolicy.can_read_source(record=record, user_id=principal.user_id):
+        raise HTTPException(status_code=403, detail="protected_source_unavailable")
     if not record.source_ref:
         raise HTTPException(status_code=409, detail="document_source_not_ready")
     source = container.repository.archive_source(record.source_ref)

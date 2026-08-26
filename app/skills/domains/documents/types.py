@@ -30,6 +30,7 @@ class ProcessingState(StrEnum):
     PROCESSING_INCOMPLETE = "processing_incomplete"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    PROTECTED_PENDING = "protected_pending"
 
 
 class ProcessingRoute(StrEnum):
@@ -46,6 +47,30 @@ class ArtifactKind(StrEnum):
     MARKDOWN = "markdown"
     SOURCE_PRESERVING_TEXT = "source_preserving_text"
     SEARCH_BLOCKS = "search_blocks"
+
+
+class DocumentClass(StrEnum):
+    BILL = "bill"
+    INVOICE = "invoice"
+    RECEIPT = "receipt"
+    MEETING_NOTES = "meeting_notes"
+    GENERAL_NOTES = "general_notes"
+    BUSINESS_CARD = "business_card"
+    IDENTITY_DOCUMENT = "identity_document"
+    GOVERNMENT_DOCUMENT = "government_document"
+    CONTRACT = "contract"
+    INSURANCE_DOCUMENT = "insurance_document"
+    TAX_DOCUMENT = "tax_document"
+    WARRANTY = "warranty"
+    UNKNOWN = "unknown"
+
+
+class ObservationState(StrEnum):
+    MACHINE_OBSERVED = "machine_observed"
+    HUMAN_CORRECTED = "human_corrected"
+    HUMAN_CONFIRMED = "human_confirmed"
+    CONFLICTED = "conflicted"
+    SUPERSEDED = "superseded"
 
 
 @dataclass(frozen=True)
@@ -80,6 +105,9 @@ class DocumentRecord:
     source_version_id: str | None
     active_run_id: str | None
     search_visible: bool
+    document_class: DocumentClass | None
+    classification_state: str
+    archive_text_visible: bool
     created_at: str
     updated_at: str
 
@@ -182,3 +210,68 @@ class DocumentArtifact:
     raw_provider: dict[str, Any]
     markdown: str
     tables: tuple[NormalizedTable, ...] = ()
+
+
+@dataclass(frozen=True)
+class ClassificationInput:
+    contract_version: str
+    document_id: str
+    source_version_id: str
+    run_id: str
+    taxonomy_version: str
+    allowed_labels: tuple[DocumentClass, ...]
+    blocks: tuple[NormalizedBlock, ...]
+
+
+@dataclass(frozen=True)
+class ClassificationCandidate:
+    label: DocumentClass
+    sensitivity: Sensitivity
+    confidence: float
+    evidence: tuple[EvidenceRef, ...]
+
+
+@dataclass(frozen=True)
+class ClassificationResult:
+    contract_version: str
+    taxonomy_version: str
+    classifier_name: str
+    classifier_version: str
+    candidates: tuple[ClassificationCandidate, ...]
+    selected_label: DocumentClass
+    selected_sensitivity: Sensitivity
+    confidence: float
+    evidence: tuple[EvidenceRef, ...]
+
+
+@dataclass(frozen=True)
+class ExtractionInput:
+    contract_version: str
+    schema_name: str
+    schema_version: str
+    document_id: str
+    source_version_id: str
+    run_id: str
+    document_class: DocumentClass
+    sensitivity: Sensitivity
+    blocks: tuple[NormalizedBlock, ...]
+
+
+@dataclass(frozen=True)
+class FieldObservation:
+    field_name: str
+    value: Any
+    literal_text: str
+    sensitivity: Sensitivity
+    confidence: float
+    evidence: tuple[EvidenceRef, ...]
+
+
+@dataclass(frozen=True)
+class ExtractionResult:
+    contract_version: str
+    schema_name: str
+    schema_version: str
+    extractor_name: str
+    extractor_version: str
+    observations: tuple[FieldObservation, ...]

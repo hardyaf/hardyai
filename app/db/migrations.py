@@ -7,7 +7,7 @@ from app.db.core_schema import ensure_core_schema
 from app.db.review_schema import ensure_review_schema
 
 
-LATEST_SCHEMA_VERSION = 6
+LATEST_SCHEMA_VERSION = 7
 
 
 def configure_sqlite_connection(conn: sqlite3.Connection) -> None:
@@ -275,6 +275,33 @@ def _migration_006_shared_human_reviews(conn: sqlite3.Connection) -> None:
     ensure_review_schema(conn)
 
 
+def _migration_007_shared_provenance_links(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS provenance_links (
+            provenance_id TEXT PRIMARY KEY,
+            source_domain TEXT NOT NULL,
+            source_type TEXT NOT NULL,
+            source_ref TEXT NOT NULL,
+            source_version TEXT NOT NULL,
+            source_hash TEXT NOT NULL,
+            target_domain TEXT NOT NULL,
+            target_type TEXT NOT NULL,
+            target_ref TEXT NOT NULL,
+            link_kind TEXT NOT NULL,
+            operation_id TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL,
+            UNIQUE(source_domain, source_type, source_ref, source_version,
+                   target_domain, target_type, target_ref, link_kind)
+        );
+        CREATE INDEX IF NOT EXISTS idx_provenance_source
+            ON provenance_links(source_domain, source_type, source_ref, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_provenance_target
+            ON provenance_links(target_domain, target_type, target_ref, created_at DESC);
+        """
+    )
+
+
 _MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migration_001_action_ticket_ledger,
     2: _migration_002_list_operation_ids,
@@ -282,6 +309,7 @@ _MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     4: _migration_004_memory_operation_ids,
     5: _migration_005_durable_job_control_plane,
     6: _migration_006_shared_human_reviews,
+    7: _migration_007_shared_provenance_links,
 }
 
 

@@ -390,6 +390,47 @@ class RequestFlowCoordinator:
                 user_id=effective_payload.user_id,
             )
 
+        pending = router._pending_clarification(session)
+        if pending is not None:
+            pending_intent = str(pending.get("intent") or "").strip()
+            for contract in router._skill_context_contracts:
+                interrupt_hook = getattr(contract, "request_interrupts_pending", None)
+                if not callable(interrupt_hook):
+                    continue
+                try:
+                    should_interrupt = interrupt_hook(
+                        request_context=effective_context,
+                        text=effective_payload.text,
+                        pending_intent=pending_intent,
+                    )
+                except Exception as exc:  # pragma: no cover - defensive contract isolation
+                    router._event_log.record(
+                        event_type="context.contract.request_interrupts_pending.failed",
+                        session_id=session.session_id,
+                        payload={
+                            "contract_id": getattr(contract, "contract_id", "unknown"),
+                            "error": type(exc).__name__,
+                        },
+                    )
+                    continue
+                if should_interrupt is not True:
+                    continue
+                router._cancel_pending_interaction(
+                    session=session,
+                    reason="skill_context_bound_new_request",
+                )
+                router._clear_main_sticky_followup(session)
+                router._event_log.record(
+                    event_type="pending.clarification.interrupted",
+                    session_id=session.session_id,
+                    payload={
+                        "pending_intent": pending_intent,
+                        "reason": "skill_context_bound_new_request",
+                        "contract_id": getattr(contract, "contract_id", "unknown"),
+                    },
+                )
+                break
+
         pending_response = router._handle_pending_clarification(payload=effective_payload, session=session)
         if pending_response is not None:
             return pending_response
@@ -469,6 +510,29 @@ class RequestFlowCoordinator:
                     "target_owner": SessionOwner.MAIN.value,
                 },
             )
+        for contract in router._skill_context_contracts:
+            bind_hook = getattr(contract, "bind_request_decision", None)
+            if not callable(bind_hook):
+                continue
+            try:
+                bound = bind_hook(
+                    decision=decision,
+                    request_context=effective_payload.context,
+                    working_context=working_context_payload,
+                    text=effective_payload.text,
+                )
+            except Exception as exc:  # pragma: no cover - defensive contract isolation
+                router._event_log.record(
+                    event_type="context.contract.bind_request_decision.failed",
+                    session_id=session.session_id,
+                    payload={
+                        "contract_id": getattr(contract, "contract_id", "unknown"),
+                        "error": type(exc).__name__,
+                    },
+                )
+                continue
+            if isinstance(bound, MicroDecision):
+                decision = bound
         decision = router._resolve_followup_entities(session=session, decision=decision)
         decision = router._resolve_handoff_followup_entities(
             session=session,
@@ -751,7 +815,13 @@ class RequestFlowCoordinator:
                 user_id=effective_payload.user_id,
             )
 
-        if target_owner == SessionOwner.MAIN and decision.intent in EMAIL_AGENT_INTENTS:
+        trusted_document_binding = (
+            decision.intent in {Intent.DOCUMENTS_GET, Intent.DOCUMENTS_STATUS}
+            and "trusted_discord_attachment_binding" in decision.ambiguity_flags
+        )
+        if target_owner == SessionOwner.MAIN and (
+            decision.intent in EMAIL_AGENT_INTENTS or trusted_document_binding
+        ):
             tool_result = router._execute_fast_command(
                 decision=decision,
                 source_interface=effective_payload.source,
@@ -760,14 +830,18 @@ class RequestFlowCoordinator:
                 agent_id=active_agent_id,
                 request_context=effective_payload.context,
             )
+            event_payload = {
+                "intent": decision.intent.value,
+                "result_status": tool_result.get("status"),
+            }
+            if decision.intent.value.startswith("email."):
+                event_payload["sensitive_domain"] = "email"
+            elif decision.intent.value.startswith("documents."):
+                event_payload["sensitive_domain"] = "documents"
             router._event_log.record(
                 event_type="tool.executed",
                 session_id=session.session_id,
-                payload={
-                    "intent": decision.intent.value,
-                    "result_status": tool_result.get("status"),
-                    "sensitive_domain": "email",
-                },
+                payload=event_payload,
             )
             router._clear_pending_clarification(session)
             router._set_state(session, SessionState.IDLE)

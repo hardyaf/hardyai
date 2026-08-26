@@ -23,12 +23,10 @@ services:
       timeout: 5s
       retries: 12
       start_period: 20s
+    networks: [accelerator-backend]
 
-  jarvis:
+  accelerator-admission:
     image: jarvis-poc-app:local
-    build:
-      context: ../..
-      dockerfile: deploy/docker/Dockerfile
     restart: unless-stopped
     init: true
     user: "${JARVIS_UID:-1001}:${JARVIS_GID:-1001}"
@@ -39,11 +37,82 @@ services:
       - ../../.env
     environment:
       APP_ENV: production
+      OFFLINE_MODE: "true"
+      ACCELERATOR_DATABASE_PATH: /opt/jarvis/data/accelerator/leases.db
+      ACCELERATOR_ADMISSION_API_KEY_PATH: /run/secrets/accelerator_admission_api_key
+      ACCELERATOR_OLLAMA_MODELS: "${JARVIS_MICRO_MODEL:-qwen2.5:7b},${JARVIS_MAIN_MODEL:-gpt-oss:20b}"
+      ACCELERATOR_OLLAMA_EVICTABLE_MODELS: "${JARVIS_MICRO_MODEL:-qwen2.5:7b}"
+      ACCELERATOR_OLLAMA_PROTECTED_MODELS: "${JARVIS_MAIN_MODEL:-gpt-oss:20b}"
+      ACCELERATOR_MAX_REQUEST_BYTES: "${ACCELERATOR_MAX_REQUEST_BYTES:-2097152}"
+      ACCELERATOR_MAX_VLM_REQUEST_BYTES: "${ACCELERATOR_MAX_VLM_REQUEST_BYTES:-75497472}"
+      ACCELERATOR_MAX_RESPONSE_BYTES: "${ACCELERATOR_MAX_RESPONSE_BYTES:-16777216}"
+      ACCELERATOR_WAIT_SECONDS: "${ACCELERATOR_WAIT_SECONDS:-120}"
+      ACCELERATOR_LEASE_SECONDS: "${ACCELERATOR_LEASE_SECONDS:-30}"
+      ACCELERATOR_HEARTBEAT_SECONDS: "${ACCELERATOR_HEARTBEAT_SECONDS:-5}"
+      ACCELERATOR_UPSTREAM_TIMEOUT_SECONDS: "${ACCELERATOR_UPSTREAM_TIMEOUT_SECONDS:-180}"
+      OLLAMA_BACKEND_URL: http://ollama:11434
+      DOCUMENTS_PADDLEOCR_VL_ENABLED: "${DOCUMENTS_PADDLEOCR_VL_ENABLED:-false}"
+      PADDLEOCR_VL_BACKEND_URL: http://paddleocr-vl-serve:8050
+    command:
+      - python
+      - -m
+      - uvicorn
+      - app.api.accelerator_admission_app:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8040"
+      - --workers
+      - "1"
+      - --no-access-log
+    volumes:
+      - ../../data:/opt/jarvis/data
+      - type: bind
+        source: ${DOCUMENTS_SECRETS_ROOT:-/etc/hardyai/documents-required}/accelerator_admission_api_key
+        target: /run/secrets/accelerator_admission_api_key
+        read_only: true
+        bind:
+          create_host_path: false
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 128
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks: [accelerator-control, accelerator-backend]
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import json,pathlib,urllib.request; key=pathlib.Path('/run/secrets/accelerator_admission_api_key').read_text().strip(); request=urllib.request.Request('http://127.0.0.1:8040/ready',headers={'X-HardyAI-Accelerator-Key':key}); payload=json.load(urllib.request.urlopen(request,timeout=5)); raise SystemExit(0 if payload.get('status') == 'ready' else 1)"
+      interval: 10s
+      timeout: 8s
+      retries: 18
+      start_period: 30s
+
+  jarvis:
+    image: jarvis-poc-app:local
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    restart: unless-stopped
+    init: true
+    user: "${JARVIS_UID:-1001}:${JARVIS_GID:-1001}"
+    depends_on:
+      accelerator-admission:
+        condition: service_healthy
+    env_file:
+      - ../../.env
+    environment:
+      APP_ENV: production
       DATABASE_PATH: /opt/jarvis/data/jarvis_v2.db
       MEMORY_MODE: sqlite
       MEMORY_MARKDOWN_PATH: /opt/jarvis/data/memory_markdown
       SKILL_ARTIFACT_AUTO_COMPILE_ENABLED: "false"
-      LOCAL_MODEL_URL: http://ollama:11434
+      LOCAL_MODEL_URL: http://accelerator-admission:8040
+      ACCELERATOR_ADMISSION_REQUIRED: "true"
+      ACCELERATOR_ADMISSION_API_KEY_PATH: /run/secrets/accelerator_admission_api_key
       MICRO_MODEL_ENABLED: "${JARVIS_MODELS_ENABLED:-false}"
       MICRO_MODEL_PROVIDER: ollama
       MICRO_MODEL_NAME: "${JARVIS_MICRO_MODEL:-qwen2.5:7b}"
@@ -109,13 +178,15 @@ services:
       DISCORD_ATTACHMENT_INGRESS_BASE_URL: http://discord-attachment-ingress:8020
       DISCORD_ATTACHMENT_INGRESS_TIMEOUT_SECONDS: "${DISCORD_ATTACHMENT_INGRESS_TIMEOUT_SECONDS:-180}"
       DISCORD_ATTACHMENT_MAX_PER_MESSAGE: "${DISCORD_ATTACHMENT_MAX_PER_MESSAGE:-4}"
+      DISCORD_DOCUMENT_NOTIFICATIONS_ENABLED: "${DISCORD_DOCUMENT_NOTIFICATIONS_ENABLED:-false}"
+      DISCORD_DOCUMENT_NOTIFICATION_POLL_SECONDS: "${DISCORD_DOCUMENT_NOTIFICATION_POLL_SECONDS:-2}"
       DOCUMENTS_ENABLED: "${DOCUMENTS_ENABLED:-false}"
       DOCUMENTS_LOCAL_ONLY: "true"
       DOCUMENT_GATEWAY_BASE_URL: http://document-gateway:8010
       DOCUMENT_GATEWAY_OPERATOR_KEY_PATH: /run/secrets/jarvis_operator_api_key
     ports:
       - "${JARVIS_BIND_ADDRESS:-127.0.0.1}:8000:8000"
-    networks: [default, documents-control, discord-ingress-control]
+    networks: [default, accelerator-control, documents-control, discord-ingress-control]
     volumes:
       - ../../.env:/opt/jarvis/.env:ro
       - ../../data:/opt/jarvis/data
@@ -123,6 +194,12 @@ services:
       - type: bind
         source: ${DOCUMENTS_SECRETS_ROOT:-/etc/hardyai/documents-required}/jarvis_operator_api_key
         target: /run/secrets/jarvis_operator_api_key
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${DOCUMENTS_SECRETS_ROOT:-/etc/hardyai/documents-required}/accelerator_admission_api_key
+        target: /run/secrets/accelerator_admission_api_key
         read_only: true
         bind:
           create_host_path: false
@@ -166,7 +243,7 @@ services:
     init: true
     user: "${JARVIS_UID:-1001}:${JARVIS_GID:-1001}"
     depends_on:
-      ollama:
+      accelerator-admission:
         condition: service_healthy
       jarvis:
         condition: service_healthy
@@ -176,16 +253,25 @@ services:
       APP_ENV: production
       DATABASE_PATH: /opt/jarvis/data/jarvis_v2.db
       SKILL_ARTIFACT_AUTO_COMPILE_ENABLED: "false"
-      LOCAL_MODEL_URL: http://ollama:11434
+      LOCAL_MODEL_URL: http://accelerator-admission:8040
+      ACCELERATOR_ADMISSION_REQUIRED: "true"
+      ACCELERATOR_ADMISSION_API_KEY_PATH: /run/secrets/accelerator_admission_api_key
       ACTION_TICKET_REVIEW_ENABLED: "true"
     command: ["python", "-m", "app.workers.ticket_review_worker"]
     volumes:
       - ../../data:/opt/jarvis/data
       - ../../secrets/live:/opt/jarvis/secrets/live:ro
+      - type: bind
+        source: ${DOCUMENTS_SECRETS_ROOT:-/etc/hardyai/documents-required}/accelerator_admission_api_key
+        target: /run/secrets/accelerator_admission_api_key
+        read_only: true
+        bind:
+          create_host_path: false
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
+    networks: [default, accelerator-control]
 
   plane-sync:
     image: jarvis-poc-app:local
@@ -405,6 +491,13 @@ services:
       DOCUMENTS_MAX_IMAGE_PIXELS: "${DOCUMENTS_MAX_IMAGE_PIXELS:-64000000}"
       DOCUMENT_JOB_SOCKET_PATH: /run/jarvis-documents/enqueue.sock
       DOCUMENTS_PROCESSING_ENABLED: "${DOCUMENTS_PROCESSING_ENABLED:-false}"
+      DOCUMENTS_SAFE_EXTRACTION_ENABLED: "${DOCUMENTS_SAFE_EXTRACTION_ENABLED:-false}"
+      DOCUMENTS_NOTE_PROPOSALS_ENABLED: "${DOCUMENTS_NOTE_PROPOSALS_ENABLED:-false}"
+      DOCUMENTS_CONTACT_PROPOSALS_ENABLED: "${DOCUMENTS_CONTACT_PROPOSALS_ENABLED:-false}"
+      DOCUMENTS_INTELLIGENCE_ENABLED: "${DOCUMENTS_INTELLIGENCE_ENABLED:-false}"
+      DOCUMENTS_RESTRICTED_WORKFLOW_ENABLED: "${DOCUMENTS_RESTRICTED_WORKFLOW_ENABLED:-false}"
+      DOCUMENTS_RESTRICTED_SECURITY_REVIEW_ID: "${DOCUMENTS_RESTRICTED_SECURITY_REVIEW_ID:-}"
+      DOCUMENTS_RESTRICTED_RECOVERY_ATTESTATION_PATH: "${DOCUMENTS_RESTRICTED_RECOVERY_ATTESTATION_PATH:-}"
       DOCUMENT_PROCESS_MAX_ATTEMPTS: "${DOCUMENT_PROCESS_MAX_ATTEMPTS:-60}"
       DOCUMENT_PROCESS_LEASE_SECONDS: "${DOCUMENT_PROCESS_LEASE_SECONDS:-300}"
       DOCUMENTS_WATCH_ENABLED: "${DOCUMENTS_WATCH_ENABLED:-false}"
@@ -429,6 +522,15 @@ services:
       PADDLEOCR_MODEL_TIER: "${PADDLEOCR_MODEL_TIER:-small}"
       PADDLEOCR_TIMEOUT_SECONDS: "${PADDLEOCR_TIMEOUT_SECONDS:-300}"
       PADDLEOCR_MAX_RESPONSE_BYTES: "${PADDLEOCR_MAX_RESPONSE_BYTES:-67108864}"
+      DOCUMENTS_PADDLEOCR_VL_ENABLED: "${DOCUMENTS_PADDLEOCR_VL_ENABLED:-false}"
+      PADDLEOCR_VL_BASE_URL: http://accelerator-admission:8040
+      PADDLEOCR_VL_FRAMEWORK_VERSION: "${PADDLEOCR_VL_FRAMEWORK_VERSION:-3.6.0}"
+      PADDLEOCR_VL_PIPELINE_VERSION: "${PADDLEOCR_VL_PIPELINE_VERSION:-1.6}"
+      PADDLEOCR_VL_IMAGE_DIGEST: "${PADDLEOCR_VL_IMAGE_DIGEST:-sha256:6c735bdf9e758ffdd58ccc067db0c2d84e37e5e6a2cbd47156069d4d7ea5d709}"
+      PADDLEOCR_VL_TIMEOUT_SECONDS: "${PADDLEOCR_VL_TIMEOUT_SECONDS:-120}"
+      PADDLEOCR_VL_MAX_RESPONSE_BYTES: "${PADDLEOCR_VL_MAX_RESPONSE_BYTES:-16777216}"
+      ACCELERATOR_ADMISSION_REQUIRED: "true"
+      ACCELERATOR_ADMISSION_API_KEY_PATH: /run/secrets/accelerator_admission_api_key
       PAPERLESS_BASE_URL: http://paperless-webserver:8000
       PAPERLESS_ARCHIVE_TOKEN_PATH: /run/secrets/paperless_archive_token
       PAPERLESS_READ_USER_ID_PATH: /run/secrets/paperless_read_user_id
@@ -476,6 +578,12 @@ services:
         bind:
           create_host_path: false
       - type: bind
+        source: ${DOCUMENTS_SECRETS_ROOT:-/etc/hardyai/documents-required}/accelerator_admission_api_key
+        target: /run/secrets/accelerator_admission_api_key
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
         source: ${DOCUMENTS_STORAGE_ROOT:-/mnt/hardyai-documents-required}/control
         target: /run/jarvis-documents
         bind:
@@ -484,7 +592,7 @@ services:
     tmpfs: [/tmp]
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
-    networks: [documents-edge, documents-inference]
+    networks: [documents-edge, documents-inference, accelerator-control]
     healthcheck:
       test: ["CMD", "python", "-c", "from pathlib import Path; raise SystemExit(0 if Path('/run/jarvis-documents/enqueue.sock').is_socket() else 1)"]
       interval: 10s
@@ -800,11 +908,71 @@ services:
       retries: 30
       start_period: 180s
 
+  paddleocr-vl-serve:
+    image: hardyai-paddleocr-vl:3.6.0-pipeline1.6
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.paddleocr-vl
+    profiles: ["documents-phase5"]
+    restart: unless-stopped
+    init: true
+    user: "${JARVIS_UID:-1001}:${JARVIS_GID:-1001}"
+    mem_limit: 12g
+    cpus: 4.0
+    pids_limit: 512
+    shm_size: 2g
+    environment:
+      HOME: /tmp/home
+      ACCELERATOR_ADMISSION_API_KEY_PATH: /run/secrets/accelerator_admission_api_key
+      PADDLEOCR_VL_MAX_INPUT_BYTES: "${DOCUMENTS_MAX_UPLOAD_BYTES:-52428800}"
+      PADDLEOCR_VL_MAX_IMAGE_PIXELS: "${DOCUMENTS_MAX_IMAGE_PIXELS:-64000000}"
+      PADDLEOCR_VL_TIMEOUT_SECONDS: "${PADDLEOCR_VL_INFERENCE_TIMEOUT_SECONDS:-90}"
+      PADDLEOCR_VL_MAX_NEW_TOKENS: "${PADDLEOCR_VL_MAX_NEW_TOKENS:-512}"
+      PADDLE_PDX_CACHE_HOME: /tmp/paddlex
+      PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK: "True"
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      DO_NOT_TRACK: "1"
+    volumes:
+      - type: bind
+        source: ${DOCUMENTS_SECRETS_ROOT:-/etc/hardyai/documents-required}/accelerator_admission_api_key
+        target: /run/secrets/accelerator_admission_api_key
+        read_only: true
+        bind:
+          create_host_path: false
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    read_only: true
+    tmpfs:
+      - /tmp:exec,mode=0700,uid=${JARVIS_UID:-1001},gid=${JARVIS_GID:-1001},size=2g
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks: [accelerator-backend]
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          nvidia-smi -L >/dev/null && python -c "import json,pathlib,urllib.request; key=pathlib.Path('/run/secrets/accelerator_admission_api_key').read_text().strip(); request=urllib.request.Request('http://127.0.0.1:8050/ready',headers={'X-HardyAI-Accelerator-Key':key}); payload=json.load(urllib.request.urlopen(request,timeout=5)); raise SystemExit(0 if payload.get('status') == 'ready' and payload.get('models_local') else 1)"
+      interval: 15s
+      timeout: 8s
+      retries: 24
+      start_period: 60s
+
 volumes:
   ollama-data:
 
 networks:
   default:
+  accelerator-control:
+    internal: true
+  accelerator-backend:
+    internal: true
   documents-control:
     internal: true
   documents-edge:

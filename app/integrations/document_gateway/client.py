@@ -90,6 +90,42 @@ class DocumentGatewayClient:
             params=params,
         )
 
+    def fields(self, *, document_id: str) -> dict[str, Any]:
+        return self._json(
+            "GET",
+            f"/documents/{quote(document_id, safe='')}/fields",
+        )
+
+    def classifications(self, *, document_id: str) -> dict[str, Any]:
+        return self._json(
+            "GET",
+            f"/documents/{quote(document_id, safe='')}/classifications",
+        )
+
+    def action_proposal(self, *, proposal_id: str) -> dict[str, Any]:
+        return self._json(
+            "GET",
+            f"/documents/action-proposals/{quote(proposal_id, safe='')}",
+        )
+
+    def bind_action_execution(
+        self,
+        *,
+        proposal_id: str,
+        review_id: str,
+        execution_ref: str,
+        target_item_ref: str,
+    ) -> dict[str, Any]:
+        return self._json(
+            "POST",
+            f"/documents/action-proposals/{quote(proposal_id, safe='')}/execution-binding",
+            json={
+                "review_id": review_id,
+                "execution_ref": execution_ref,
+                "target_item_ref": target_item_ref,
+            },
+        )
+
     def reprocess(self, *, document_id: str, idempotency_key: str) -> dict[str, Any]:
         return self._json(
             "POST",

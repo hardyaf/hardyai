@@ -89,6 +89,26 @@ class DurableJobStore(Protocol):
     ) -> bool:
         ...
 
+    def release_jobs(
+        self,
+        *,
+        job_type: str,
+        aggregate_id: str,
+        reconcile_state: str,
+    ) -> int:
+        """Make matching pending work immediately claimable after an external state change."""
+        ...
+
+    def dead_letter_job(
+        self,
+        *,
+        job_id: str,
+        worker_id: str,
+        fencing_token: int,
+        error_code: str,
+    ) -> bool:
+        ...
+
     def record_worker_heartbeat(
         self,
         *,

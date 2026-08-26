@@ -25,6 +25,7 @@ def test_document_compose_profile_is_digest_pinned_segmented_and_least_privilege
     assert "ports" not in services["document-gateway"]
     assert set(services["jarvis"]["networks"]) == {
         "default",
+        "accelerator-control",
         "documents-control",
         "discord-ingress-control",
     }
@@ -33,6 +34,7 @@ def test_document_compose_profile_is_digest_pinned_segmented_and_least_privilege
         "documents-edge",
     }
     assert set(services["document-worker"]["networks"]) == {
+        "accelerator-control",
         "documents-edge",
         "documents-inference",
     }
@@ -63,11 +65,30 @@ def test_document_compose_profile_is_digest_pinned_segmented_and_least_privilege
     assert "paddleocr==3.7.0" in paddle_dockerfile
     assert services["paperless-db"]["networks"] == ["paperless-data"]
     assert all(compose["networks"][name]["internal"] for name in (
+        "accelerator-control",
+        "accelerator-backend",
         "documents-control",
         "documents-edge",
         "paperless-data",
         "documents-inference",
     ))
+    assert services["ollama"]["networks"] == ["accelerator-backend"]
+    admission = services["accelerator-admission"]
+    assert set(admission["networks"]) == {"accelerator-control", "accelerator-backend"}
+    assert "ports" not in admission
+    assert admission["read_only"] is True
+    assert admission["cap_drop"] == ["ALL"]
+    assert admission["environment"]["OLLAMA_BACKEND_URL"] == "http://ollama:11434"
+    assert services["jarvis"]["environment"]["LOCAL_MODEL_URL"] == (
+        "http://accelerator-admission:8040"
+    )
+    paddleocr_vl = services["paddleocr-vl-serve"]
+    assert paddleocr_vl["profiles"] == ["documents-phase5"]
+    assert "ports" not in paddleocr_vl
+    assert paddleocr_vl["networks"] == ["accelerator-backend"]
+    assert paddleocr_vl["read_only"] is True
+    assert paddleocr_vl["cap_drop"] == ["ALL"]
+    assert paddleocr_vl["environment"]["HF_HUB_OFFLINE"] == "1"
 
     gateway_mounts = str(services["document-gateway"]["volumes"])
     worker_mounts = str(services["document-worker"]["volumes"])

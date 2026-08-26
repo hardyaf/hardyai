@@ -5,7 +5,7 @@ from app.core.micro_jarvis import MicroJarvis
 from tests.router_support import RegistryBackedTestRouter as JarvisRouter
 from app.core.session_store import SessionStore
 from app.core.state_machine import RuntimePowerController
-from app.core.types import SessionOwner
+from app.core.types import Intent, SessionOwner
 from app.schemas.api import AskRequest
 from app.services.event_log import EventLogService
 from app.tools.calendar_service import CalendarService
@@ -187,6 +187,84 @@ def test_router_uses_skill_context_contracts_for_followup_resolution_and_context
         isinstance(item, dict) and str(item.get("display_name") or "").strip().lower() == "contract-list"
         for item in entities
     )
+
+
+def test_router_executes_trusted_discord_attachment_caption_without_main_model_clarification():
+    class DocumentsService:
+        def __init__(self) -> None:
+            self.executed = []
+
+        def capability_access(self, *, context):
+            del context
+            return {
+                "configured": True,
+                "authorized_here": True,
+                "availability": "available",
+            }
+
+        def execute(self, *, intent, entities, context):
+            self.executed.append((intent, entities, context))
+            assert context["document_attachment_ids"] == ["doc-1"]
+            assert context["current_document_attachment_ids"] == ["doc-1"]
+            return {
+                "status": "ok",
+                "message": "I received the attachment, but it needs human review.",
+                "_persistence_policy": "restricted_read",
+            }
+
+    documents = DocumentsService()
+    session_store = SessionStore()
+    router = JarvisRouter(
+        micro_jarvis=MicroJarvis(),
+        main_jarvis=MainJarvis(),
+        session_store=session_store,
+        runtime_power=RuntimePowerController(),
+        event_log=EventLogService(),
+        memory_service=None,
+        lists_service=ListsService(default_list_names=["groceries", "to-do"]),
+        calendar_service=CalendarService(),
+        home_service=HomeService(default_switch_names=["kitchen light"]),
+        documents_service=documents,
+    )
+    session = session_store.get_or_create(
+        session_id="discord-attachment-caption",
+        user_id="300",
+        source="discord",
+    )
+    router._store_pending_clarification(
+        session=session,
+        intent=Intent.CONVERSATIONAL,
+        entities={},
+        missing_fields=["topic_subject"],
+        question="Could you provide the text?",
+        kind="conversation",
+    )
+
+    response = router.route(
+        AskRequest(
+            text="What does this say?",
+            request_id="discord:attachment-caption-1",
+            session_id="discord-attachment-caption",
+            user_id="300",
+            source="discord",
+            context={
+                "principal_kind": "discord_adapter",
+                "discord_channel_id": "200",
+                "document_attachment_ids": ["doc-1"],
+                "current_document_attachment_ids": ["doc-1"],
+                "micro_command_explicit": False,
+                "force_main_owner": True,
+            },
+        )
+    )
+
+    assert response["intent"] == "documents.get"
+    assert response["route"] == "main_skill"
+    assert response["assistant"]["text"].startswith(
+        "I received the attachment, but it needs human review."
+    )
+    assert documents.executed[0][0] == "documents.get"
+    assert documents.executed[0][1] == {"document_id": "doc-1"}
 
 
 def test_router_enriches_rotated_session_with_safe_email_anchor_before_micro_routing():

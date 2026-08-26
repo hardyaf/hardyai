@@ -13,6 +13,7 @@ class PermissiveTestSkillRegistry:
         "calendar.": "app.skills.domains.calendar.handler:run",
         "home.": "app.skills.domains.lights.handler:run",
         "email.": "app.skills.domains.email_agent.handler:run",
+        "documents.": "app.skills.domains.documents.handler:run",
         "conversation.": "app.skills.domains.conversation.handler:run",
         "private_notes.": "app.skills.domains.private_notes.handler:run",
     }
@@ -26,7 +27,7 @@ class PermissiveTestSkillRegistry:
                     "skill_id": f"test.{prefix.rstrip('.')}",
                     "active": True,
                     "execution_ref": execution_ref,
-                    "micro_enabled": True,
+                    "micro_enabled": not normalized.startswith(("email.", "documents.")),
                     "intents": [normalized],
                 }
         return None
@@ -59,7 +60,7 @@ class PermissiveTestSkillRegistry:
 
     @staticmethod
     def is_micro_allowed_for_intent(*, skill: dict[str, Any] | None, intent: str) -> bool:
-        return isinstance(skill, dict) and bool(intent)
+        return isinstance(skill, dict) and bool(intent) and skill.get("micro_enabled") is True
 
     @staticmethod
     def record_skill_run(**_: Any) -> None:

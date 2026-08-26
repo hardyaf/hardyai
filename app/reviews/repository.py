@@ -134,6 +134,25 @@ class HumanReviewRepository:
             ).fetchone()
         return self._item(row) if row is not None else None
 
+    def get_decision(self, decision_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM review_decisions WHERE decision_id = ?",
+                (str(decision_id),),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def latest_decision(self, review_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT * FROM review_decisions WHERE review_id = ?
+                ORDER BY decided_at DESC LIMIT 1
+                """,
+                (str(review_id),),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
     def list_items(
         self,
         *,

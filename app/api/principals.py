@@ -58,6 +58,7 @@ _DISCORD_CONTEXT_KEYS = {
     "discord_message_id",
     "discord_role_ids",
     "discord_routing_lane",
+    "current_document_attachment_ids",
     "document_attachment_ids",
     "external_display_name",
     "external_message_id",

@@ -38,6 +38,20 @@ class Gateway:
     def evidence(self, **kwargs):
         return {"evidence": [{"literal_text": "account balance 12345", "block_id": "b7"}]}
 
+    def fields(self, **kwargs):
+        return {
+            "fields": [
+                {
+                    "field_name": "account_identifier_masked",
+                    "value": "****2345",
+                    "evidence": [{"page_number": 2, "block_id": "b7"}],
+                }
+            ]
+        }
+
+    def classifications(self, **kwargs):
+        return {"classifications": []}
+
     def reprocess(self, *, document_id: str, idempotency_key: str):
         return {"document_id": document_id, "run_id": "run-2", "enqueue_confirmed": True}
 
@@ -117,6 +131,7 @@ def test_discord_reads_only_the_recent_scoped_attachment_id() -> None:
     )
     assert allowed["status"] == "ok"
     assert allowed["evidence"]["evidence"][0]["literal_text"] == "account balance 12345"
+    assert allowed["message"] == "Here is the text I could read:\naccount balance 12345"
 
     wrong_id = service.execute(
         intent="documents.get",
@@ -130,3 +145,35 @@ def test_discord_reads_only_the_recent_scoped_attachment_id() -> None:
     )
     assert wrong_id["status"] == "denied"
     assert search["status"] == "denied"
+
+
+def test_review_required_attachment_returns_truthful_message_without_candidate_evidence() -> None:
+    class NeedsReviewGateway(Gateway):
+        def status(self, document_id: str):
+            return {
+                "document_id": document_id,
+                "title": "Difficult phone image",
+                "sensitivity": "private",
+                "state": "ready",
+                "processing_state": "needs_review",
+                "source_available": True,
+            }
+
+        def evidence(self, **kwargs):
+            raise AssertionError("unreviewed candidate evidence must remain behind the review gate")
+
+    service = DocumentQueryService(gateway=NeedsReviewGateway())
+    result = service.execute(
+        intent="documents.get",
+        entities={"document_id": "doc-review-1"},
+        context={
+            "principal_kind": "discord_adapter",
+            "source": "discord",
+            "document_attachment_ids": ["doc-review-1"],
+        },
+    )
+
+    assert result["status"] == "ok"
+    assert "could not read it reliably" in result["message"]
+    assert "human review" in result["message"]
+    assert "evidence" not in result

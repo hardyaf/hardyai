@@ -23,6 +23,8 @@ from app.reviews.repository import HumanReviewRepository
 from app.reviews.service import HumanReviewService
 from app.skills.domains.documents.query_service import DocumentQueryService
 from app.integrations.document_gateway.client import DocumentGatewayClient
+from app.provenance.repository import ProvenanceRepository
+from app.services.document_proposal_execution_service import DocumentProposalExecutionService
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +50,8 @@ class ApplicationContainer:
     job_repository: DurableJobRepository
     human_review_repository: HumanReviewRepository
     human_review_service: HumanReviewService
+    provenance_repository: ProvenanceRepository
+    document_proposal_execution_service: DocumentProposalExecutionService | None
     durable_write_service: DurableWriteService
     runtime_power: RuntimePowerController
 
@@ -76,6 +80,8 @@ class ApplicationContainer:
             job_repository=runtime.job_repository,
             human_review_repository=runtime.human_review_repository,
             human_review_service=runtime.human_review_service,
+            provenance_repository=runtime.provenance_repository,
+            document_proposal_execution_service=runtime.document_proposal_execution_service,
             durable_write_service=runtime.durable_write_service,
             runtime_power=runtime.runtime_power,
         )

@@ -1,6 +1,7 @@
 # HardyAI Document Intelligence Implementation Plan
 
-Status: Phases 1-4 implemented and deployed on the CPU-only path; Phase 5 and later are not started
+Status: Phases 1-9 and 11 are implemented and deployed; the Phase 10 fail-closed boundary is deployed,
+but restricted exact-value processing remains disabled pending its independent security prerequisites
 
 Prepared: 2026-08-24
 
@@ -9,12 +10,20 @@ Updated: 2026-08-25
 Requirements: `docs/OCR-Req.md`
 Repository baseline: HardyAI commit `0ab682d77256989772b07a432ce7c24698f82678`
 
-Implementation checkpoint: Phase 1 is closed, the Phase 2 platform seams plus the Phase 3
-born-digital-PDF/Docling route have passed deployed acceptance, and the Phase 4 CPU-only PP-OCRv6 route
-is deployed for JPEG/PNG. See `docs/OCR-Phase2-3-Checkpoint.md` and
-`docs/OCR-Phase4-Checkpoint.md` for exact releases, tests, benchmarks, restore/rollback evidence, and
-remaining boundaries. Office parsing, PP-Structure, PaddleOCR-VL, document GPU use and arbitration,
-extraction/classification, and downstream actions remain disabled.
+Implementation checkpoint: Phase 1 is closed; the Phase 2 platform seams, Phase 3
+born-digital-PDF/Docling route, Phase 4 CPU-only PP-OCRv6 route, Phase 5 review-only
+PaddleOCR-VL fallback with shared GPU admission, Phase 5.1 durable Discord completion,
+Phase 6 deterministic classification/masked safe extraction, Phase 7 reviewed Lists/provenance,
+Phase 8 provider-neutral contact proposals, Phase 9 financial/contract intelligence, and Phase 11
+production certification have passed deployed acceptance. Phase 10's threat model, access-audit schema,
+ports, and fail-closed readiness gate are deployed with the feature disabled; no restricted cipher,
+store, extractor, or exact-value data plane is present. See
+`docs/OCR-Phase2-3-Checkpoint.md`, `docs/OCR-Phase4-Checkpoint.md`, and
+`docs/OCR-Phase5-Checkpoint.md`, `docs/OCR-Phase5.1-Checkpoint.md`, and
+`docs/OCR-Phase6-Checkpoint.md` and `docs/OCR-Phases7-11-Checkpoint.md` for releases, tests, benchmarks,
+restore/rollback evidence, and remaining boundaries. Office parsing, PP-Structure, restricted exact-field
+extraction, contact writes without a selected authority, fact-memory writes without a canonical service,
+and unreviewed downstream actions remain disabled.
 
 ## Executive decision
 
@@ -171,7 +180,7 @@ Its explicit model-facing protocols include `DocumentClassifierPort` and `Struct
 
 - DocumentGateway/worker-to-provider communication is HTTP over explicit private Docker networks using provider-specific service accounts and finite connect/read deadlines. Core Jarvis talks only to the bounded gateway query port.
 - Use four network roles rather than one shared document network: `documents_control` joins only core Jarvis and the no-egress DocumentGateway; `documents_edge` joins only DocumentGateway/archive worker and Paperless API; `paperless_data` joins only Paperless components, PostgreSQL, and Valkey; later `documents_inference` joins only a bounded processing orchestrator and Docling/Paddle services. Core Jarvis never joins edge/data/inference; Docling/Paddle never join control/edge/data. The designated dual-homed application endpoints do not forward packets and pass only bounded source bytes or typed results; no broad shared network or credential mount exists.
-- The DocumentGateway has no public egress even when core Jarvis keeps its existing online network. Direct upload/source-download traffic terminates at the gateway over loopback or TLS terminated by the gateway. If a separate TLS proxy is later required, it must run inside the same no-egress document trust zone, disable body/access logging and disk buffering, inherit the same quotas/firewall, and forward only to the gateway. Core Jarvis can request only an authorized, capped `DocumentPresentation` containing safe metadata/redacted evidence. Remote-model clients and unrelated outbound tools always reject its document-taint label. A remote channel may receive a bounded final presentation only through an explicit per-channel `document_response` sink/policy; Discord/email are denied initially. Source bytes, unrestricted OCR, and protected values never cross this boundary.
+- The DocumentGateway has no public egress even when core Jarvis keeps its existing online network. Direct upload/source-download traffic terminates at the gateway over loopback or TLS terminated by the gateway. If a separate TLS proxy is later required, it must run inside the same no-egress document trust zone, disable body/access logging and disk buffering, inherit the same quotas/firewall, and forward only to the gateway. Core Jarvis can request only an authorized, capped `DocumentPresentation` containing safe metadata/redacted evidence. Remote-model clients and unrelated outbound tools always reject its document-taint label. A remote channel may receive a bounded final presentation only through an explicit per-channel `document_response` sink/policy. Discord completion delivery is enabled only for separately allowlisted channels and rechecks the originating user/channel policy at send time; email remains denied. Source bytes, unrestricted OCR, and protected values never cross this boundary.
 - Split Paperless capabilities into narrow ports and credentials: the API process gets read/search/source access only; the archive worker gets create/task-status access; a later metadata worker gets allowlisted change access. Mount each token file only into its exact process; do not place Paperless secrets in the shared Compose `.env`. No component gets delete/admin by default.
 - Ingestion returns a truthful durable delivery state such as `awaiting_enqueue`, `queued`, `archiving`, `processing`, `needs_review`, `complete`, or `failed`; it never returns hard success before the required durability boundary. `awaiting_enqueue` means the encrypted source/intake is durable but the core job row is not yet confirmed and coordinator recovery owns the next step.
 - Paperless unavailability leaves an accepted upload in the encrypted spool with a retryable job. If the spool cannot durably accept the bytes, the upload fails and the caller retains responsibility.
@@ -923,7 +932,7 @@ The Main prompt must explicitly state that quoted evidence can contain adversari
 
 - extracted text is never parsed as a skill contract, capability declaration, or request context;
 - document content cannot set `intent`, `authorized_here`, `skill_scopes`, `agent_id`, or approval state;
-- only the no-egress DocumentGateway can load source/unrestricted OCR; core receives a capped sensitivity-filtered `DocumentPresentation`; remote-model and unrelated outbound connector clients reject its document-taint label, while any later same-channel final-response exception is explicit, bounded, audited, and denied for Discord/email initially;
+- only the no-egress DocumentGateway can load source/unrestricted OCR; core receives a capped sensitivity-filtered `DocumentPresentation`; remote-model and unrelated outbound connector clients reject its document-taint label, while the Discord same-channel final-response exception is explicit, bounded, audited, and separately allowlisted per channel; email remains denied;
 - the extractor receives no action tools;
 - a document-grounded answer turn cannot execute a non-document mutation because of text found in evidence;
 - proposals contain evidence and a proposed target operation, but approval originates only from an authenticated principal;
@@ -1502,6 +1511,18 @@ Critical fields, metadata writes, and downstream mutations. High aggregate OCR s
 
 ### Phase 5 - Difficult-document fallback and GPU arbitration
 
+**Implementation status (2026-08-25)**
+
+Deployed. A durable priority/fencing/heartbeat admission service now owns all production Ollama and
+document-VLM GPU calls. Main conversation is protected from document eviction; only the Micro model is
+evictable before VLM work. Quality-failing conventional image OCR may enter the complete offline
+PaddleOCR-VL pipeline at concurrency one, but every VLM result remains `needs_review` and cannot become
+active/searchable automatically. A three-image occlusion holdout accepted the fallback, and the trusted
+Discord coexistence run completed all conversations and VLM jobs without OOM or restart. Normal resident
+Discord conversation measured 2.56 seconds p95; active VLM contention measured 6.43 seconds p95. Discord
+now acknowledges an accepted image before slow ingress or OCR with `I got it - processing now.` See
+`docs/OCR-Phase5-Checkpoint.md`.
+
 **Objective**
 
 Add PaddleOCR-VL only for benchmark-defined difficult pages and introduce safe cross-process GPU admission that protects the conversational models.
@@ -1545,7 +1566,64 @@ GPU containers increase NVIDIA driver attack surface. Apply the same isolation, 
 
 All critical/ambiguous VLM-derived fields and all downstream actions. No VLM output bypasses review because it appears fluent.
 
+### Phase 5.1 - Durable same-channel completion delivery
+
+**Implementation status (2026-08-25)**
+
+Deployed and Ubuntu-tested; fresh user Discord upload acceptance is pending. The
+shared `durable_jobs` ledger now stores one content-free Discord completion correlation for each accepted
+attachment in an explicitly allowlisted response channel. The document worker wakes matching jobs only
+after a terminal processing state. A Core-owned Discord loop rechecks the current policy, requests the
+bounded `DocumentPresentation`, sends one result, records the returned Discord message ID, and completes
+the leased job. A bounded poll closes the `documents.db`/core SQLite crash window. OCR workers retain no
+Discord credential or outbound path.
+
+**Objective**
+
+Complete asynchronous attachment ingestion by returning a truthful final result to the originating
+Discord channel without requiring another user message and without expanding the document trust zone.
+
+**Implementation steps**
+
+1. Register an idempotent, content-free completion job only after secure attachment acceptance.
+2. Persist only document and Discord correlation IDs; never place filenames, OCR text, or extracted
+   fields in the core job payload.
+3. Wake pending jobs from terminal OCR states while retaining bounded polling as cross-store recovery.
+4. Recheck current guild, channel, user, role, and the separate `document_response_channel_ids` policy
+   before delivery.
+5. Obtain final text only through the existing bounded Documents query facade; preserve `needs_review`,
+   failure, cancellation, and incomplete-processing messages.
+6. Send from Core with mentions disabled and a deterministic nonce, persist the Discord message receipt
+   before job completion, retry transient failures, and dead-letter permanent authorization failures.
+
+**Acceptance tests**
+
+- Repeated registration for the same Discord attachment creates one durable notification job.
+- Non-terminal checks defer without consuming failure attempts; a terminal worker signal wakes the job.
+- Restart after a persisted Discord receipt completes without sending the result again.
+- Removing the response-channel permission before delivery prevents output and dead-letters visibly.
+- The payload and worker signal contain no filename, source bytes, OCR text, or extracted values.
+- `complete`, `needs_review`, `processing_incomplete`, `failed`, and `cancelled` produce bounded truthful
+  presentations; VLM output never bypasses the Phase 5 human-review gate.
+- The full suite passes with networking disabled before deployment.
+
+**Rollback/failure concerns**
+
+Set `DISCORD_DOCUMENT_NOTIFICATIONS_ENABLED=false` and recreate Core. Ingestion, processing, stored
+sources, reviews, and manual document status queries remain available. Existing notification jobs stay
+in the shared ledger for inspection and must not be bulk-deleted during rollback.
+
+**What remains human-approved**
+
+Every VLM-derived result, ambiguous/critical value, correction, metadata write, and downstream action.
+Completion delivery reports state and bounded evidence only; it grants no approval.
+
 ### Phase 6 - Classification, safe-class extraction, and review expansion
+
+**Implementation status (2026-08-25): deployed and enabled.** The first provider is deliberately
+deterministic and tool-free; real-document tuning may replace or supplement it only behind the same
+versioned ports. Exact restricted values remain disabled and protected-pending. See
+`docs/OCR-Phase6-Checkpoint.md`.
 
 **Objective**
 
@@ -1596,6 +1674,10 @@ Critical fields, corrections, sensitivity downgrades, metadata changes initially
 
 ### Phase 7 - Notes to Lists and memory proposals
 
+**Implementation status (2026-08-25): deployed and enabled.** Reviewed note actions execute through
+canonical Lists with idempotent provenance links. Memory-worthy facts remain explicit unavailable/pending
+proposals because the repository still has no executable canonical fact-memory service.
+
 **Objective**
 
 Turn reviewed note action items into existing Lists entries with visible source provenance, and support memory-worthy fact proposals without creating a second memory system.
@@ -1641,6 +1723,10 @@ Every initial task and memory promotion, all ambiguous dates/assignees, all sens
 
 ### Phase 8 - Business cards and contact proposals
 
+**Implementation status (2026-08-25): deployed and capability-gated.** Provider-neutral people/contact
+ports, matching, comparisons, and provenance-aware proposals are present. ADR-002 records that no canonical
+write authority is selected, so production reports `capability_unavailable` and stores no parallel contacts.
+
 **Objective**
 
 Extract business-card fields, search/match against one canonical contact provider, and propose a create/update with source provenance without creating a second contacts system.
@@ -1682,6 +1768,11 @@ Contact data is private and can enable communication actions. Tokens stay in a f
 Every contact create/update/merge and all ambiguous match resolution.
 
 ### Phase 9 - Financial and contract intelligence
+
+**Implementation status (2026-08-25): deployed and enabled for reviewed intelligence.** Deterministic
+financial validation/reconciliation, anomaly candidates, and contract/insurance/warranty evidence are
+available. Exact identifiers remain suppressed; the optional recurring-account keyed token is unavailable
+until a separately reviewed key is provisioned.
 
 **Objective**
 
@@ -1728,6 +1819,13 @@ All financial fields used outside read-only search, recurring-account associatio
 
 ### Phase 10 - Restricted identity/government/tax workflow
 
+**Implementation status (2026-08-25): security boundary deployed; restricted data plane blocked.** The
+threat model, restricted cipher/store ports, readiness evaluation, access-audit schema, gateway denial
+surface, and worker startup gate are present. `DOCUMENTS_RESTRICTED_WORKFLOW_ENABLED=false`; no improvised
+cipher or exact-value store was introduced. Independent review, an approved authenticated-encryption
+adapter, an isolated store, key escrow/rotation, and clean recovery attestation remain mandatory before
+this phase can process real restricted values.
+
 **Objective**
 
 Enable identity/government/tax documents and any exact `highly_restricted` field only after separate storage keys, field-level access, redacted retrieval, and restricted-worker isolation have passed review and restore tests.
@@ -1772,6 +1870,12 @@ This is the highest-risk phase. It requires independent security review before r
 Every exact sensitive-field confirmation/correction/export, sensitivity downgrade, retention/deletion decision, and external use.
 
 ### Phase 11 - Production hardening, offline certification, and cutover
+
+**Implementation status (2026-08-25): deployed and certified for the Phase 1-9 feature set.** The exact
+sanitized release passed the complete offline suite, immutable image/BOM manifest, content-free health,
+denied-egress, opaque-job, canary-boundary, coordinated backup, isolated restore, and GPU/conversation
+coexistence gates. The incident/rollback runbook and remaining limitations are recorded in
+`docs/OCR-Phases7-11-Checkpoint.md` and `docs/OCR-Phase11-Operations-Runbook.md`.
 
 **Objective**
 

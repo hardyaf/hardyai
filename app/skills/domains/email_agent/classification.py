@@ -7,6 +7,7 @@ from typing import Any, Protocol
 
 import httpx
 
+from app.accelerator.client import accelerator_request_headers
 from app.core.ollama_observability import OllamaCallObserver, OllamaMetricsCallback
 from app.services.google.gmail_mime import ParsedGmailMessage
 from app.skills.domains.email_agent.config import (
@@ -90,6 +91,7 @@ class OllamaEmailModelClassifier:
         try:
             response = httpx.post(
                 f"{self._base_url}/api/generate",
+                headers=accelerator_request_headers("email_classifier"),
                 json={
                     "model": self._model,
                     "prompt": prompt,

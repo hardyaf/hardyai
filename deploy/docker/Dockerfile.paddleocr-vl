@@ -1,0 +1,19 @@
+FROM ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddleocr-vl@sha256:6c735bdf9e758ffdd58ccc067db0c2d84e37e5e6a2cbd47156069d4d7ea5d709
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+USER root
+WORKDIR /opt/hardyai-vl
+
+COPY app/api/__init__.py /opt/hardyai-vl/app/api/__init__.py
+COPY app/api/paddleocr_vl_app.py /opt/hardyai-vl/app/api/paddleocr_vl_app.py
+
+RUN touch /opt/hardyai-vl/app/__init__.py \
+    && chmod -R a+rX /opt/hardyai-vl/app \
+    && python -m pip check
+
+USER 1001:1001
+
+CMD ["python", "-m", "uvicorn", "app.api.paddleocr_vl_app:app", "--host", "0.0.0.0", "--port", "8050", "--workers", "1", "--no-access-log"]

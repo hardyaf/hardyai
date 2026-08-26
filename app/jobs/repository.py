@@ -373,6 +373,72 @@ class DurableJobRepository:
             )
             return int(cur.rowcount or 0) == 1
 
+    def release_jobs(
+        self,
+        *,
+        job_type: str,
+        aggregate_id: str,
+        reconcile_state: str,
+    ) -> int:
+        """Wake content-free subscriptions after their aggregate reaches new durable state."""
+
+        normalized_type = str(job_type or "").strip()
+        normalized_aggregate = str(aggregate_id or "").strip()
+        normalized_state = str(reconcile_state or "").strip().casefold()[:80]
+        if not normalized_type or not normalized_aggregate or not normalized_state:
+            raise ValueError("job type, aggregate ID, and reconciliation state are required")
+        now = _iso_utc()
+        with self._transaction(immediate=True) as cur:
+            cur.execute(
+                """
+                UPDATE durable_jobs
+                SET available_at = ?, provider_reconcile_state = ?, updated_at = ?
+                WHERE job_type = ? AND aggregate_id = ? AND status IN (?, ?)
+                  AND cancel_requested_at IS NULL
+                """,
+                (
+                    now,
+                    normalized_state,
+                    now,
+                    normalized_type,
+                    normalized_aggregate,
+                    JobStatus.PENDING.value,
+                    JobStatus.RETRY.value,
+                ),
+            )
+            return int(cur.rowcount or 0)
+
+    def dead_letter_job(
+        self,
+        *,
+        job_id: str,
+        worker_id: str,
+        fencing_token: int,
+        error_code: str,
+    ) -> bool:
+        """Fail closed for a claimed job that must never be retried automatically."""
+
+        with self._transaction(immediate=True) as cur:
+            cur.execute(
+                """
+                UPDATE durable_jobs
+                SET status = ?, lease_owner = NULL, lease_expires_at = NULL,
+                    last_error_code = ?, updated_at = ?
+                WHERE job_id = ? AND status = ? AND lease_owner = ?
+                  AND lease_fencing_token = ?
+                """,
+                (
+                    JobStatus.DEAD_LETTER.value,
+                    str(error_code or "job_rejected")[:120],
+                    _iso_utc(),
+                    job_id,
+                    JobStatus.RUNNING.value,
+                    worker_id,
+                    int(fencing_token),
+                ),
+            )
+            return int(cur.rowcount or 0) == 1
+
     def renew_lease(
         self,
         *,

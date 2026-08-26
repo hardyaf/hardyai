@@ -6,6 +6,7 @@ from enum import StrEnum
 
 class ReviewKind(StrEnum):
     QUALITY = "quality"
+    CLASSIFICATION = "classification"
     FIELD_CORRECTION = "field_correction"
     METADATA_PROPOSAL = "metadata_proposal"
     DOWNSTREAM_ACTION = "downstream_action"

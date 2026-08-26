@@ -1,0 +1,2 @@
+"""PaddleOCR-VL fallback integration."""
+

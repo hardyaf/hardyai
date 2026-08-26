@@ -13,6 +13,8 @@ from app.integrations.docling.adapter import DoclingParserAdapter
 from app.integrations.docling.client import DoclingClient
 from app.integrations.paddleocr.adapter import PaddleOCRParserAdapter
 from app.integrations.paddleocr.client import PaddleOCRClient
+from app.integrations.paddleocr_vl.adapter import PaddleOCRVLParserAdapter
+from app.integrations.paddleocr_vl.client import PaddleOCRVLClient
 from app.integrations.paperless.adapter import PaperlessArchiveAdapter
 from app.integrations.paperless.client import PaperlessClient
 from app.jobs.document_enqueue import (
@@ -20,6 +22,7 @@ from app.jobs.document_enqueue import (
     DOCUMENT_PROCESS_JOB_TYPE,
     DurableDocumentEnqueuer,
 )
+from app.jobs.document_completion import DurableDocumentCompletionEnqueuer
 from app.jobs.enqueue_ipc import DocumentEnqueueSocketServer
 from app.jobs.repository import DurableJobRepository
 from app.jobs.types import JobStatus
@@ -30,14 +33,25 @@ from app.skills.domains.documents.artifacts import ContentAddressedArtifactStore
 from app.skills.domains.documents.configuration import (
     conventional_ocr_configuration_sha256,
     native_docling_configuration_sha256,
+    vlm_fallback_configuration_sha256,
 )
 from app.skills.domains.documents.ingestion import TransientDocumentSpool
+from app.skills.domains.documents.classification import DeterministicDocumentClassifier
+from app.skills.domains.documents.enrichment import DocumentEnrichmentService
+from app.skills.domains.documents.extraction import DeterministicStructuredExtractor
+from app.skills.domains.documents.note_proposals import NoteProposalService
+from app.skills.domains.documents.contact_proposals import ContactProposalService
+from app.skills.domains.documents.intelligence import DocumentIntelligenceService
+from app.restricted_documents.readiness import evaluate_restricted_workflow
 from app.skills.domains.documents.processing import (
     DocumentProcessingError,
     DocumentProcessingPending,
     DocumentProcessingService,
 )
-from app.skills.domains.documents.quality import evaluate_conventional_ocr_artifact
+from app.skills.domains.documents.quality import (
+    evaluate_conventional_ocr_artifact,
+    evaluate_vlm_fallback_artifact,
+)
 from app.skills.domains.documents.reconciliation import DocumentOriginReconciler
 from app.skills.domains.documents.scanner import WatchedDocumentScanner
 from app.skills.domains.documents.service import DocumentIngestionService
@@ -64,6 +78,7 @@ class DocumentProcessingWorker:
         processing_services: dict[ProcessingRoute, DocumentProcessingService] | None = None,
         processing_route_metadata: dict[ProcessingRoute, dict[str, str | None]] | None = None,
         processing_enqueuer: DurableDocumentEnqueuer | None = None,
+        completion_enqueuer: DurableDocumentCompletionEnqueuer | None = None,
         parser_image_digest: str | None = None,
         processing_configuration_sha256: str | None = None,
         scanner: WatchedDocumentScanner | None = None,
@@ -74,6 +89,7 @@ class DocumentProcessingWorker:
         lease_seconds: float = 180.0,
         process_lease_seconds: float = 300.0,
         poll_seconds: float = 5.0,
+        archive_read_grant_deferred: bool = False,
     ) -> None:
         self.jobs = jobs
         self.documents = documents
@@ -86,6 +102,7 @@ class DocumentProcessingWorker:
             self.processing_services[ProcessingRoute.NATIVE_DOCLING] = processing
         self.processing_route_metadata = dict(processing_route_metadata or {})
         self.processing_enqueuer = processing_enqueuer
+        self.completion_enqueuer = completion_enqueuer
         self.parser_image_digest = str(parser_image_digest or "")[:160] or None
         self.processing_configuration_sha256 = str(
             processing_configuration_sha256 or hashlib.sha256(b"docling-native-v1").hexdigest()
@@ -102,6 +119,7 @@ class DocumentProcessingWorker:
         self.lease_seconds = max(30.0, min(float(lease_seconds), 900.0))
         self.process_lease_seconds = max(30.0, min(float(process_lease_seconds), 1800.0))
         self.poll_seconds = max(1.0, min(float(poll_seconds), 300.0))
+        self.archive_read_grant_deferred = bool(archive_read_grant_deferred)
         self._stop = Event()
 
     def request_stop(self) -> None:
@@ -240,6 +258,8 @@ class DocumentProcessingWorker:
                 error_code=code,
                 terminal=status == JobStatus.DEAD_LETTER.value,
             )
+        if status == JobStatus.DEAD_LETTER.value:
+            self._signal_terminal(document_id=document_id, state="failed")
         return {
             "status": "dead_letter" if status == JobStatus.DEAD_LETTER.value else "retry",
             "error_code": code,
@@ -257,6 +277,7 @@ class DocumentProcessingWorker:
                 continue
             code = str(dead_job.get("last_error_code") or "document_job_dead_letter")[:120]
             self.documents.mark_failure(document_id=document_id, error_code=code, terminal=True)
+            self._signal_terminal(document_id=document_id, state="failed")
             results.append(
                 {
                     "status": "dead_letter",
@@ -296,7 +317,8 @@ class DocumentProcessingWorker:
             raise DocumentArchiveError("paperless_task_pending")
         if task.state not in {"succeeded", "duplicate"} or not task.source_external_id:
             raise DocumentArchiveError(task.error_code or "paperless_task_failed")
-        self.archive.grant_read_access(task.source_external_id)
+        if not self.archive_read_grant_deferred:
+            self.archive.grant_read_access(task.source_external_id)
         observed_hash = hashlib.sha256()
         observed_size = 0
         for chunk in self.archive.download_original(task.source_external_id):
@@ -313,6 +335,12 @@ class DocumentProcessingWorker:
             external_id=task.source_external_id,
             verified_sha256=record.sha256,
         )
+        if self.archive_read_grant_deferred:
+            self.documents.set_archive_text_visibility(
+                document_id=document_id,
+                visible=False,
+            )
+            ready = self.documents.get(document_id) or ready
         self.spool.delete(spool_key)
         ready = self.documents.clear_spool(
             document_id=document_id,
@@ -410,9 +438,20 @@ class DocumentProcessingWorker:
                     and result.get("status") in {"needs_review", "processing_incomplete"}
                     and ProcessingRoute.CONVENTIONAL_OCR in self.processing_services
                 ):
-                    result["fallback"] = self._enqueue_conventional_fallback(
+                    result["fallback"] = self._enqueue_fallback(
                         document_id=document_id,
                         fallback_from_run_id=run_id,
+                        route=ProcessingRoute.CONVENTIONAL_OCR,
+                    )
+                elif (
+                    route == ProcessingRoute.CONVENTIONAL_OCR
+                    and result.get("status") in {"needs_review", "processing_incomplete"}
+                    and ProcessingRoute.VLM_FALLBACK in self.processing_services
+                ):
+                    result["fallback"] = self._enqueue_fallback(
+                        document_id=document_id,
+                        fallback_from_run_id=run_id,
+                        route=ProcessingRoute.VLM_FALLBACK,
                     )
                 if not self.jobs.complete_job(
                     job_id=job_id,
@@ -420,6 +459,11 @@ class DocumentProcessingWorker:
                     fencing_token=token,
                 ):
                     raise DocumentProcessingError("stale_processing_job_fence")
+                if self._processing_result_is_terminal(result):
+                    self._signal_terminal(
+                        document_id=document_id,
+                        state=str(result.get("status") or "complete"),
+                    )
                 results.append(result)
             except DocumentProcessingPending as exc:
                 run = self.documents.get_processing_run(run_id) or {}
@@ -442,6 +486,7 @@ class DocumentProcessingWorker:
                     self._acknowledge_processing_cancel(
                         job_id=job_id,
                         run_id=run_id,
+                        document_id=document_id,
                         fencing_token=token,
                     )
                 results.append(
@@ -465,27 +510,40 @@ class DocumentProcessingWorker:
                 terminal = persisted.get("status") == JobStatus.DEAD_LETTER.value
                 if terminal:
                     self._fail_processing_run(run_id=run_id, fencing_token=token, code=code)
+                    self._signal_terminal(document_id=document_id, state="failed")
                 results.append({"status": "dead_letter" if terminal else "retry", "error_code": code})
         return results
 
-    def _enqueue_conventional_fallback(
+    def _enqueue_fallback(
         self,
         *,
         document_id: str,
         fallback_from_run_id: str,
+        route: ProcessingRoute,
     ) -> dict[str, Any]:
-        processing = self.processing_services[ProcessingRoute.CONVENTIONAL_OCR]
-        metadata = self.processing_route_metadata.get(ProcessingRoute.CONVENTIONAL_OCR, {})
+        processing = self.processing_services[route]
+        metadata = self.processing_route_metadata.get(route, {})
+        record = self.documents.get(document_id)
+        if (
+            route == ProcessingRoute.VLM_FALLBACK
+            and (record is None or record.media_type not in {"image/jpeg", "image/png"})
+        ):
+            return {"status": "not_queued", "error_code": "vlm_media_type_unsupported"}
+        schema_version = {
+            ProcessingRoute.NATIVE_DOCLING: "1",
+            ProcessingRoute.CONVENTIONAL_OCR: "2",
+            ProcessingRoute.VLM_FALLBACK: "3",
+        }[route]
         try:
             run = self.documents.create_processing_run(
                 document_id=document_id,
-                route=ProcessingRoute.CONVENTIONAL_OCR,
+                route=route,
                 parser_name=processing.parser.provider_name,
                 parser_version=processing.parser.provider_version,
                 parser_image_digest=str(metadata.get("image_digest") or "")[:160] or None,
                 configuration_sha256=str(metadata.get("configuration_sha256") or ""),
-                artifact_schema_version="2",
-                resource_lane=str(metadata.get("resource_lane") or "cpu_ocr")[:40],
+                artifact_schema_version=schema_version,
+                resource_lane=str(metadata.get("resource_lane") or "cpu")[:40],
                 fallback_from_run_id=fallback_from_run_id,
             )
         except Exception as exc:
@@ -503,7 +561,7 @@ class DocumentProcessingWorker:
             job_id = None
         return {
             "status": "queued" if enqueue_confirmed else "awaiting_enqueue_recovery",
-            "route": ProcessingRoute.CONVENTIONAL_OCR.value,
+            "route": route.value,
             "run_id": str(run["run_id"]),
             "job_id": job_id,
         }
@@ -513,6 +571,7 @@ class DocumentProcessingWorker:
         *,
         job_id: str,
         run_id: str,
+        document_id: str,
         fencing_token: int,
     ) -> None:
         if self.jobs.acknowledge_cancel(
@@ -527,6 +586,7 @@ class DocumentProcessingWorker:
                     state=ProcessingState.CANCELLED,
                     error_code="cancelled",
                 )
+                self._signal_terminal(document_id=document_id, state="cancelled")
             except (DocumentStorageError, KeyError):
                 pass
 
@@ -542,6 +602,33 @@ class DocumentProcessingWorker:
                 )
         except (DocumentStorageError, KeyError):
             pass
+
+    @staticmethod
+    def _processing_result_is_terminal(result: dict[str, Any]) -> bool:
+        fallback = result.get("fallback")
+        if isinstance(fallback, dict) and fallback.get("status") in {
+            "queued",
+            "awaiting_enqueue_recovery",
+        }:
+            return False
+        return str(result.get("status") or "").strip().casefold() in {
+            "complete",
+            "needs_review",
+            "processing_incomplete",
+            "failed",
+            "cancelled",
+            "protected_pending",
+        }
+
+    def _signal_terminal(self, *, document_id: str, state: str) -> None:
+        if self.completion_enqueuer is None:
+            return
+        try:
+            self.completion_enqueuer.signal_terminal(document_id=document_id, state=state)
+        except Exception:
+            # Notification jobs also poll with a bounded delay, closing the
+            # documents.db/core.db cross-store crash or lock window.
+            return
 
     @staticmethod
     def _document_id(job: dict[str, Any]) -> str:
@@ -569,6 +656,21 @@ def _read_positive_id(path_value: str) -> int:
 def main() -> int:
     if not settings.documents_enabled:
         raise RuntimeError("DOCUMENTS_ENABLED must be true to run the document worker.")
+    if settings.documents_note_proposals_enabled and not settings.documents_safe_extraction_enabled:
+        raise RuntimeError("DOCUMENTS_NOTE_PROPOSALS_ENABLED requires safe extraction.")
+    if settings.documents_contact_proposals_enabled and not settings.documents_safe_extraction_enabled:
+        raise RuntimeError("DOCUMENTS_CONTACT_PROPOSALS_ENABLED requires safe extraction.")
+    if settings.documents_intelligence_enabled and not settings.documents_safe_extraction_enabled:
+        raise RuntimeError("DOCUMENTS_INTELLIGENCE_ENABLED requires safe extraction.")
+    restricted = evaluate_restricted_workflow(
+        enabled=settings.documents_restricted_workflow_enabled,
+        cipher_configured=False,
+        isolated_store_configured=False,
+        security_review_id=settings.documents_restricted_security_review_id,
+        recovery_attestation_path=settings.documents_restricted_recovery_attestation_path,
+    )
+    if settings.documents_restricted_workflow_enabled and not restricted.ready:
+        raise RuntimeError("Restricted document workflow is blocked: " + ",".join(restricted.reasons))
     validate_offline_runtime(settings, entrypoint="document-worker")
     jobs = DurableJobRepository(settings.database_path)
     documents = DocumentRepository(settings.documents_database_path)
@@ -584,6 +686,7 @@ def main() -> int:
         max_attempts=settings.document_archive_max_attempts,
         processing_max_attempts=settings.document_process_max_attempts,
     )
+    completion_enqueuer = DurableDocumentCompletionEnqueuer(jobs)
     archive_client = PaperlessClient(
         base_url=settings.paperless_base_url,
         token_path=settings.paperless_archive_token_path,
@@ -599,15 +702,44 @@ def main() -> int:
     reviews_repository: HumanReviewRepository | None = None
     docling_client: DoclingClient | None = None
     paddleocr_client: PaddleOCRClient | None = None
+    paddleocr_vl_client: PaddleOCRVLClient | None = None
     processing_services: dict[ProcessingRoute, DocumentProcessingService] = {}
     route_metadata: dict[ProcessingRoute, dict[str, str | None]] = {}
     artifact_store = ContentAddressedArtifactStore(settings.documents_artifacts_path)
     review_service: HumanReviewService | None = None
     if settings.documents_processing_enabled and (
-        settings.documents_docling_enabled or settings.documents_paddleocr_enabled
+        settings.documents_docling_enabled
+        or settings.documents_paddleocr_enabled
+        or settings.documents_paddleocr_vl_enabled
     ):
         reviews_repository = HumanReviewRepository(settings.database_path)
         review_service = HumanReviewService(reviews_repository)
+    enrichment_service = (
+        DocumentEnrichmentService(
+            repository=documents,
+            classifier=DeterministicDocumentClassifier(),
+            extractor=DeterministicStructuredExtractor(),
+            reviews=review_service,
+            archive_access=archive,
+            note_proposals=(
+                NoteProposalService(repository=documents, reviews=review_service)
+                if settings.documents_note_proposals_enabled
+                else None
+            ),
+            contact_proposals=(
+                ContactProposalService(repository=documents, reviews=review_service)
+                if settings.documents_contact_proposals_enabled
+                else None
+            ),
+            intelligence=(
+                DocumentIntelligenceService(repository=documents, reviews=review_service)
+                if settings.documents_intelligence_enabled
+                else None
+            ),
+        )
+        if settings.documents_safe_extraction_enabled and review_service is not None
+        else None
+    )
     if settings.documents_processing_enabled and settings.documents_docling_enabled:
         docling_client = DoclingClient(
             base_url=settings.docling_base_url,
@@ -622,8 +754,13 @@ def main() -> int:
             archive=archive,
             parser=parser,
             artifact_store=artifact_store,
-            reviews=(None if settings.documents_paddleocr_enabled else review_service),
+            reviews=(
+                None
+                if settings.documents_paddleocr_enabled or settings.documents_paddleocr_vl_enabled
+                else review_service
+            ),
             max_provider_json_bytes=settings.docling_max_response_bytes,
+            enrichment=enrichment_service,
         )
         route_metadata[ProcessingRoute.NATIVE_DOCLING] = {
             "image_digest": settings.docling_image_digest,
@@ -648,14 +785,56 @@ def main() -> int:
             archive=archive,
             parser=parser,
             artifact_store=artifact_store,
-            reviews=review_service,
+            reviews=(None if settings.documents_paddleocr_vl_enabled else review_service),
             max_provider_json_bytes=settings.paddleocr_max_response_bytes,
             quality_evaluator=evaluate_conventional_ocr_artifact,
+            enrichment=enrichment_service,
         )
         route_metadata[ProcessingRoute.CONVENTIONAL_OCR] = {
             "image_digest": settings.paddleocr_image_digest,
             "configuration_sha256": conventional_ocr_configuration_sha256(settings),
             "resource_lane": "cpu_ocr",
+        }
+    if settings.documents_processing_enabled and settings.documents_paddleocr_vl_enabled:
+        paddleocr_vl_client = PaddleOCRVLClient(
+            base_url=settings.paddleocr_vl_base_url,
+            framework_version=settings.paddleocr_vl_framework_version,
+            pipeline_version=settings.paddleocr_vl_pipeline_version,
+            timeout_seconds=settings.paddleocr_vl_timeout_seconds,
+            max_input_bytes=settings.documents_max_upload_bytes,
+            max_response_bytes=settings.paddleocr_vl_max_response_bytes,
+        )
+        parser = PaddleOCRVLParserAdapter(
+            paddleocr_vl_client,
+            provider_version=settings.paddleocr_vl_framework_version,
+        )
+
+        def evaluate_vlm_with_conventional_evidence(artifact):
+            run = documents.get_processing_run(artifact.run_id) or {}
+            fallback_run_id = str(run.get("fallback_from_run_id") or "")
+            reference_texts = tuple(
+                str(block.get("literal_text") or "")
+                for block in documents.processing_run_blocks(fallback_run_id)
+            )
+            return evaluate_vlm_fallback_artifact(
+                artifact,
+                reference_texts=reference_texts,
+            )
+
+        processing_services[ProcessingRoute.VLM_FALLBACK] = DocumentProcessingService(
+            repository=documents,
+            archive=archive,
+            parser=parser,
+            artifact_store=artifact_store,
+            reviews=review_service,
+            max_provider_json_bytes=settings.paddleocr_vl_max_response_bytes,
+            quality_evaluator=evaluate_vlm_with_conventional_evidence,
+            enrichment=enrichment_service,
+        )
+        route_metadata[ProcessingRoute.VLM_FALLBACK] = {
+            "image_digest": settings.paddleocr_vl_image_digest,
+            "configuration_sha256": vlm_fallback_configuration_sha256(settings),
+            "resource_lane": "gpu_vlm",
         }
     scanner = (
         WatchedDocumentScanner(
@@ -689,11 +868,13 @@ def main() -> int:
         processing_services=processing_services,
         processing_route_metadata=route_metadata,
         processing_enqueuer=enqueuer if processing_services else None,
+        completion_enqueuer=completion_enqueuer,
         parser_image_digest=settings.docling_image_digest,
         scanner=scanner,
         reconciler=reconciler,
         process_lease_seconds=settings.document_process_lease_seconds,
         poll_seconds=settings.document_archive_poll_seconds,
+        archive_read_grant_deferred=settings.documents_safe_extraction_enabled,
     )
     signal.signal(signal.SIGTERM, lambda *_: worker.request_stop())
     signal.signal(signal.SIGINT, lambda *_: worker.request_stop())
@@ -705,6 +886,8 @@ def main() -> int:
             docling_client.close()
         if paddleocr_client is not None:
             paddleocr_client.close()
+        if paddleocr_vl_client is not None:
+            paddleocr_vl_client.close()
         if reviews_repository is not None:
             reviews_repository.close()
         archive_client.close()

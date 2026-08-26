@@ -42,8 +42,8 @@ critical-field approval, and downstream mutations remain disabled.
   `sha256:d80b0c2d2647475c683e0685452b6269d7ac49ace6cc26f453f473d5b5defda3`
 - PaddleOCR release/model family: `3.7.0`, PP-OCRv6
 - Selected production tier/device: `tiny`, CPU, four threads
-- Authoritative checkout: `/home/codex/jarvis-poc`
-- Durable storage/model root: `/mnt/hardyai-documents`
+- Authoritative checkout: `$HARDYAI_RUNTIME_ROOT` (operator-configured Ubuntu path)
+- Durable storage/model root: `$DOCUMENTS_STORAGE_ROOT` (operator-configured encrypted mount)
 
 Every Compose operation used `--env-file .env`. Jarvis, the document worker, DocumentGateway, and Discord
 attachment ingress run the same application image. All were healthy with zero restarts after promotion.
@@ -53,7 +53,7 @@ The PaddleOCR service was healthy with zero restarts and no host port binding.
 
 All benchmark runs used disposable, read-only, no-network, non-root CPU containers with four CPUs and the
 sealed local model files. Reports are retained mode `0600` under
-`/mnt/hardyai-documents/jarvis/benchmarks/reports/`.
+`$DOCUMENTS_STORAGE_ROOT/jarvis/benchmarks/reports/`.
 
 | Tier | Mean fixture time | Passed | Result |
 |---|---:|---:|---|
@@ -94,7 +94,7 @@ until Phase 5 implements shared cross-process accelerator admission and proves c
 ## Backup and rollback
 
 The coordinated pre-Phase-4 backup is retained at
-`/mnt/hardyai-documents/backups/pre-phase4-20260825-rc3` and passed its verification manifest. The prior
+`$DOCUMENTS_STORAGE_ROOT/backups/pre-phase4-20260825-rc3` and passed its verification manifest. The prior
 source, environment, application image, and OCR image tags are retained.
 
 Rollback is additive and non-destructive:
