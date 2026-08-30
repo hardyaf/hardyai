@@ -40,6 +40,7 @@ class PrivateNotesChannelConfig:
     digest_at: str = "18:00"
     skip_if_empty: bool = True
     raw_note_retention_days: int = 30
+    compute_budget_notices: bool = False
 
     @classmethod
     def from_mapping(cls, value: dict[str, Any]) -> "PrivateNotesChannelConfig":
@@ -82,6 +83,7 @@ class PrivateNotesChannelConfig:
             digest_at=digest_at,
             skip_if_empty=bool(value.get("skip_if_empty", True)),
             raw_note_retention_days=raw_note_retention_days,
+            compute_budget_notices=bool(value.get("compute_budget_notices", False)),
         )
 
 

@@ -87,6 +87,45 @@ class DocumentsContextContract:
     ) -> Any:
         del working_context
         intent = getattr(decision, "intent", None)
+        if intent in {Intent.DOCUMENTS_ESCALATE_OCR, Intent.DOCUMENTS_CORRECT_FIELD}:
+            entities = getattr(decision, "entities", None)
+            if not isinstance(entities, dict):
+                return decision
+            if (
+                str(request_context.get("principal_kind") or "").strip().casefold()
+                != "discord_adapter"
+                or not str(request_context.get("discord_channel_id") or "").strip()
+            ):
+                return decision
+            if intent == Intent.DOCUMENTS_CORRECT_FIELD and not (
+                str(entities.get("field_name") or "").strip()
+                and str(entities.get("corrected_value") or "").strip()
+            ):
+                decision.intent = Intent.DOCUMENTS_ESCALATE_OCR
+                entities = {
+                    "document_id": str(entities.get("document_id") or "").strip(),
+                }
+                decision.entities = {
+                    key: value
+                    for key, value in entities.items()
+                    if str(value or "").strip()
+                }
+            if str(entities.get("document_id") or "").strip():
+                return decision
+            document_ids = self._bounded_attachment_ids(
+                request_context,
+                "current_document_attachment_ids",
+            ) or self._bounded_attachment_ids(request_context, "document_attachment_ids")
+            if not document_ids:
+                return decision
+            decision.entities = {**entities, "document_id": document_ids[-1]}
+            decision.confidence = max(float(getattr(decision, "confidence", 0.0)), 0.88)
+            ambiguity_flags = list(getattr(decision, "ambiguity_flags", []) or [])
+            if "trusted_discord_attachment_binding" not in ambiguity_flags:
+                ambiguity_flags.append("trusted_discord_attachment_binding")
+            decision.ambiguity_flags = ambiguity_flags
+            decision.recommended_owner = SessionOwner.MAIN
+            return decision
         if intent not in {Intent.UNKNOWN, Intent.CONVERSATIONAL}:
             return decision
         matches, document_ids = self._is_scoped_discord_read_request(
@@ -108,13 +147,13 @@ class DocumentsContextContract:
         return str(intent or "").strip().casefold() in DOCUMENT_INTENTS
 
     def normalize_entities(self, *, intent: str, entities: dict[str, Any]) -> dict[str, Any]:
-        del intent
         normalized = dict(entities)
         aliases = {
             "document_id": ("document_id", "document", "id"),
             "query": ("query", "search", "terms"),
             "field_name": ("field_name", "field", "metadata_field"),
             "proposed_value": ("proposed_value", "value", "metadata_value"),
+            "corrected_value": ("corrected_value", "new_value", "replacement"),
         }
         for target, candidates in aliases.items():
             for candidate in candidates:
@@ -122,7 +161,32 @@ class DocumentsContextContract:
                 if value is not None and str(value).strip():
                     normalized[target] = str(value).strip()
                     break
+        if str(intent or "").strip().casefold() == "documents.correct_field":
+            normalized["field_name"] = self._canonical_field_name(normalized.get("field_name"))
         return normalized
+
+    @staticmethod
+    def _canonical_field_name(value: object) -> str:
+        normalized = " ".join(str(value or "").strip().casefold().replace("_", " ").split())
+        aliases = {
+            "name": "full_name",
+            "full name": "full_name",
+            "person": "full_name",
+            "company": "organization",
+            "business": "organization",
+            "employer": "organization",
+            "organisation": "organization",
+            "title": "job_title",
+            "role": "job_title",
+            "job title": "job_title",
+            "email address": "email",
+            "phone number": "phone",
+            "telephone": "phone",
+            "web site": "website",
+            "site": "website",
+            "url": "website",
+        }
+        return aliases.get(normalized, normalized.replace(" ", "_"))
 
     def apply_text_constraints(
         self,
@@ -146,13 +210,16 @@ class DocumentsContextContract:
         working_context: dict[str, Any],
     ) -> dict[str, Any]:
         raw_ids = request_context.get("document_attachment_ids")
-        if not isinstance(raw_ids, list):
-            return {}
         ids = [
             str(item).strip()
-            for item in raw_ids[:4]
+            for item in (raw_ids[:4] if isinstance(raw_ids, list) else [])
             if isinstance(item, str) and str(item).strip()
         ]
+        result_contexts = self._bounded_result_contexts(request_context)
+        for item in result_contexts:
+            document_id = str(item.get("document_id") or "").strip()
+            if document_id and document_id not in ids:
+                ids.append(document_id)
         if not ids:
             return {}
         existing = working_context.get("entity_hints")
@@ -165,15 +232,48 @@ class DocumentsContextContract:
         for index, document_id in enumerate(ids):
             if document_id in known:
                 continue
+            result_context = next(
+                (
+                    item
+                    for item in reversed(result_contexts)
+                    if str(item.get("document_id") or "").strip() == document_id
+                ),
+                None,
+            )
+            document_class = (
+                str(result_context.get("document_class") or "").strip().replace("_", " ")
+                if isinstance(result_context, dict)
+                else ""
+            )
+            field_names = (
+                list(result_context.get("field_names") or [])
+                if isinstance(result_context, dict)
+                else []
+            )
+            aliases = ["this image", "this attachment", "the image"]
+            for field_name in field_names:
+                spoken = str(field_name).replace("_", " ")
+                aliases.extend((spoken, f"the {spoken}", f"{spoken} field"))
             hints.append(
                 {
                     "domain": "documents",
                     "entity_type": "document",
                     "entity_id": document_id,
-                    "display_name": "recent Discord attachment",
-                    "aliases": ["this image", "this attachment", "the image"],
+                    "display_name": (
+                        f"recent {document_class} OCR result"
+                        if document_class
+                        else "recent Discord attachment"
+                    ),
+                    "aliases": list(dict.fromkeys(aliases))[:24],
                     "salience": max(0.7, 1.0 - (index * 0.1)),
-                    "resolution_hints": {"document_id": document_id, "source": "discord_attachment"},
+                    "resolution_hints": {
+                        "document_id": document_id,
+                        "source": (
+                            "discord_document_result"
+                            if isinstance(result_context, dict)
+                            else "discord_attachment"
+                        ),
+                    },
                 }
             )
         return {
@@ -181,8 +281,45 @@ class DocumentsContextContract:
             "active_skill_context": {
                 "attached_document_ids": ids,
                 "last_document_id": ids[-1],
+                "document_result_shapes": result_contexts,
             },
         }
+
+    @staticmethod
+    def _bounded_result_contexts(request_context: dict[str, Any]) -> list[dict[str, Any]]:
+        raw = request_context.get("document_result_contexts")
+        if not isinstance(raw, list):
+            return []
+        results: list[dict[str, Any]] = []
+        for row in raw[:4]:
+            if not isinstance(row, dict) or row.get("schema_version") != 1:
+                continue
+            document_id = str(row.get("document_id") or "").strip()
+            if not document_id or len(document_id) > 128:
+                continue
+            document_class = str(row.get("document_class") or "").strip().casefold()
+            if document_class and not re.fullmatch(r"[a-z0-9_-]{1,64}", document_class):
+                document_class = ""
+            processing_state = str(row.get("processing_state") or "").strip().casefold()
+            if processing_state and not re.fullmatch(r"[a-z0-9_-]{1,40}", processing_state):
+                processing_state = ""
+            field_names: list[str] = []
+            raw_fields = row.get("field_names")
+            if isinstance(raw_fields, list):
+                for value in raw_fields[:16]:
+                    field_name = str(value or "").strip().casefold()
+                    if re.fullmatch(r"[a-z0-9_]{1,64}", field_name):
+                        field_names.append(field_name)
+            results.append(
+                {
+                    "schema_version": 1,
+                    "document_id": document_id,
+                    "document_class": document_class or None,
+                    "processing_state": processing_state or None,
+                    "field_names": list(dict.fromkeys(field_names)),
+                }
+            )
+        return results
 
     def resolve_followup(
         self,
@@ -248,7 +385,10 @@ class DocumentsContextContract:
             "documents.get": ["document_id"],
             "documents.show_source": ["document_id"],
             "documents.reprocess": ["document_id"],
+            "documents.escalate_ocr": ["document_id"],
             "documents.propose_metadata": ["document_id", "field_name", "proposed_value"],
+            "documents.correct_field": ["document_id", "field_name", "corrected_value"],
+            "documents.confirm_fields": ["document_id"],
             "documents.ingest": [],
             "documents.list_reviews": [],
         }.get(str(intent or "").casefold())
@@ -263,6 +403,7 @@ class DocumentsContextContract:
             "query": "What should I search for in your documents?",
             "field_name": "Which low-risk metadata field should change?",
             "proposed_value": "What value should I propose for review?",
+            "corrected_value": "What should that field say instead?",
         }.get(str(field_name))
 
     def continue_pending_interaction(

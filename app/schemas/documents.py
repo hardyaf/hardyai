@@ -61,6 +61,7 @@ class DocumentStructuredSearchResponse(BaseModel):
 
 class DocumentReprocessRequest(BaseModel):
     idempotency_key: str = Field(min_length=8, max_length=120, pattern=r"^[A-Za-z0-9_.:-]+$")
+    processing_tier: Literal["default", "review_fallback"] = "default"
 
 
 class DocumentReprocessResponse(BaseModel):
@@ -69,6 +70,16 @@ class DocumentReprocessResponse(BaseModel):
     processing_state: str
     job_id: str | None = None
     enqueue_confirmed: bool
+    processing_tier: str = "default"
+    route: str | None = None
+
+
+class DocumentProcessingRunResponse(BaseModel):
+    document_id: str
+    run_id: str
+    status: str
+    route: str
+    processing_tier: str
 
 
 class DocumentEvidenceBlock(BaseModel):
@@ -135,7 +146,7 @@ class DocumentClassificationsResponse(BaseModel):
 
 
 class DocumentFieldView(BaseModel):
-    observation_id: str
+    observation_id: str | None = None
     field_name: str
     value: object
     literal_text: str
@@ -144,6 +155,7 @@ class DocumentFieldView(BaseModel):
     evidence: list[dict[str, object]] = Field(default_factory=list)
     observation_state: str
     item_hash: str
+    review_binding_hash: str
     created_at: str
     review_decision_id: str | None = None
     decision_kind: str | None = None
@@ -153,6 +165,26 @@ class DocumentFieldsResponse(BaseModel):
     document_id: str
     source_version_id: str
     fields: list[DocumentFieldView] = Field(default_factory=list)
+
+
+class DocumentFieldDecisionRequest(BaseModel):
+    source_version_id: str = Field(min_length=8, max_length=120)
+    field_name: str = Field(min_length=1, max_length=120, pattern=r"^[a-z0-9_]+$")
+    observation_id: str | None = Field(default=None, min_length=8, max_length=120)
+    review_binding_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    review_decision_id: str = Field(min_length=8, max_length=160)
+    decision_kind: Literal["confirm", "correct"]
+    corrected_value: str | None = Field(default=None, max_length=500)
+
+
+class DocumentFieldDecisionResponse(BaseModel):
+    field_decision_id: str
+    document_id: str
+    source_version_id: str
+    field_name: str
+    review_decision_id: str
+    selected_observation_id: str | None = None
+    decision_kind: Literal["confirm", "correct"]
 
 
 class DocumentActionProposalView(BaseModel):

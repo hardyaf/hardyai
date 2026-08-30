@@ -8,7 +8,14 @@ from typing import Any, Protocol
 import httpx
 
 from app.accelerator.client import accelerator_request_headers
-from app.core.ollama_observability import OllamaCallObserver, OllamaMetricsCallback
+from app.core.ollama_observability import (
+    AdaptiveTokenBudgetPolicy,
+    OllamaCallObserver,
+    OllamaMetricsCallback,
+    OllamaThinkMode,
+    apply_ollama_think_mode,
+    normalize_ollama_think_mode,
+)
 from app.services.google.gmail_mime import ParsedGmailMessage
 
 
@@ -63,20 +70,24 @@ class OllamaEmailSummaryCompiler:
         model: str,
         timeout_seconds: float = 30.0,
         max_input_chars: int = 24_000,
-        num_ctx: int = 12288,
+        num_ctx: int = 32768,
         num_predict: int = 1024,
+        think: OllamaThinkMode = None,
         metrics_callback: OllamaMetricsCallback | None = None,
+        adaptive_policy: AdaptiveTokenBudgetPolicy | None = None,
     ) -> None:
         self._base_url = str(base_url or "").rstrip("/")
         self.model_name = str(model or "").strip()
         self._timeout = max(1.0, min(float(timeout_seconds), 120.0))
         self._max_input_chars = max(1000, min(int(max_input_chars), 50_000))
+        self._think = normalize_ollama_think_mode(think)
         self._observer = OllamaCallObserver(
             lane="email_summary",
             model=self.model_name,
             num_ctx=num_ctx,
             num_predict=num_predict,
             metrics_callback=metrics_callback,
+            adaptive_policy=adaptive_policy,
         )
 
     def summarize(self, message: ParsedGmailMessage) -> EmailSummary | None:
@@ -102,26 +113,39 @@ class OllamaEmailSummaryCompiler:
             f"{json.dumps(evidence, ensure_ascii=True)}\n"
             "--- UNTRUSTED_EMAIL_END ---\n"
         )
-        try:
+
+        def invoke(options: dict[str, Any]) -> dict[str, Any]:
+            request_payload: dict[str, Any] = {
+                "model": self.model_name,
+                "prompt": prompt,
+                "stream": False,
+                "format": "json",
+                "options": options,
+            }
+            apply_ollama_think_mode(request_payload, self._think)
             response = httpx.post(
                 f"{self._base_url}/api/generate",
                 headers=accelerator_request_headers("email_summary"),
-                json={
-                    "model": self.model_name,
-                    "prompt": prompt,
-                    "stream": False,
-                    "format": "json",
-                    "options": self._observer.options(temperature=0.0),
-                },
+                json=request_payload,
                 timeout=self._timeout,
             )
             response.raise_for_status()
-            response_payload = response.json()
-            self._observer.record(prompt=prompt, response_payload=response_payload, outcome="success")
+            value = response.json()
+            return value if isinstance(value, dict) else {}
+
+        try:
+            response_payload = self._observer.generate(
+                prompt=prompt,
+                temperature=0.0,
+                invoke=invoke,
+                is_valid_response=lambda value: _json_object(
+                    str(value.get("response") or "")
+                )
+                is not None,
+            )
             raw = str(response_payload.get("response") or "")
             parsed = _json_object(raw)
-        except Exception as exc:
-            self._observer.record(prompt=prompt, outcome="error", error_type=type(exc).__name__)
+        except Exception:
             return None
         if parsed is None:
             return None
@@ -144,7 +168,9 @@ class OllamaEmailSummaryCompiler:
         )
 
     def status(self) -> dict[str, Any]:
-        return self._observer.status()
+        status = self._observer.status()
+        status["thinking_mode"] = self._think
+        return status
 
 
 def deterministic_summary(message: ParsedGmailMessage) -> EmailSummary:

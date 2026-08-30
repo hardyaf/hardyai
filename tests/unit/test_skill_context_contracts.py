@@ -89,6 +89,144 @@ def test_documents_contract_binds_semantic_followup_but_not_unrelated_recent_tur
     assert unrelated.intent == Intent.UNKNOWN
 
 
+def test_documents_contract_normalizes_correction_fields_and_requirements():
+    contract = next(
+        item
+        for item in default_skill_context_contracts(documents_enabled=True)
+        if getattr(item, "contract_id", "") == "documents"
+    )
+
+    entities = contract.normalize_entities(
+        intent="documents.correct_field",
+        entities={"document": "doc-1", "field": "company", "new_value": "Field Works LLC"},
+    )
+
+    assert entities["document_id"] == "doc-1"
+    assert entities["field_name"] == "organization"
+    assert entities["corrected_value"] == "Field Works LLC"
+    assert contract.required_fields(
+        intent="documents.correct_field",
+        entities=entities,
+        resolver=ReferenceResolver(),
+    ) == []
+    assert contract.required_fields(
+        intent="documents.confirm_fields",
+        entities={},
+        resolver=ReferenceResolver(),
+    ) == ["document_id"]
+    assert contract.required_fields(
+        intent="documents.escalate_ocr",
+        entities={"document_id": "doc-1"},
+        resolver=ReferenceResolver(),
+    ) == []
+
+
+def test_documents_contract_binds_typed_ocr_escalation_to_recent_discord_attachment():
+    contract = next(
+        item
+        for item in default_skill_context_contracts(documents_enabled=True)
+        if getattr(item, "contract_id", "") == "documents"
+    )
+    decision = MicroDecision(
+        intent=Intent.DOCUMENTS_ESCALATE_OCR,
+        confidence=0.91,
+        entities={},
+        ambiguity_flags=["resolved_via_main_repair"],
+        recommended_owner=SessionOwner.MAIN,
+        reasoning="negative_ocr_feedback",
+    )
+
+    bound = contract.bind_request_decision(
+        decision=decision,
+        request_context={
+            "principal_kind": "discord_adapter",
+            "discord_channel_id": "200",
+            "document_attachment_ids": ["doc-1"],
+        },
+        working_context={},
+        text="it wasn't right",
+    )
+
+    assert bound.entities == {"document_id": "doc-1"}
+    assert "trusted_discord_attachment_binding" in bound.ambiguity_flags
+
+    incomplete_correction = contract.bind_request_decision(
+        decision=MicroDecision(
+            intent=Intent.DOCUMENTS_CORRECT_FIELD,
+            confidence=0.91,
+            entities={},
+            ambiguity_flags=["main_turn_commitment"],
+            recommended_owner=SessionOwner.MAIN,
+        ),
+        request_context={
+            "principal_kind": "discord_adapter",
+            "discord_channel_id": "200",
+            "document_attachment_ids": ["doc-1"],
+        },
+        working_context={},
+        text="it wasn't right",
+    )
+    assert incomplete_correction.intent == Intent.DOCUMENTS_ESCALATE_OCR
+    assert incomplete_correction.entities == {"document_id": "doc-1"}
+
+    exact_correction = contract.bind_request_decision(
+        decision=MicroDecision(
+            intent=Intent.DOCUMENTS_CORRECT_FIELD,
+            confidence=0.91,
+            entities={"field_name": "organization", "corrected_value": "Field Works"},
+            ambiguity_flags=["main_turn_commitment"],
+            recommended_owner=SessionOwner.MAIN,
+        ),
+        request_context={
+            "principal_kind": "discord_adapter",
+            "discord_channel_id": "200",
+            "document_attachment_ids": ["doc-1"],
+        },
+        working_context={},
+        text="the company is Field Works",
+    )
+    assert exact_correction.intent == Intent.DOCUMENTS_CORRECT_FIELD
+    assert exact_correction.entities == {
+        "document_id": "doc-1",
+        "field_name": "organization",
+        "corrected_value": "Field Works",
+    }
+
+
+def test_documents_contract_projects_result_shape_as_semantic_entity_context():
+    contract = next(
+        item
+        for item in default_skill_context_contracts(documents_enabled=True)
+        if getattr(item, "contract_id", "") == "documents"
+    )
+
+    enriched = contract.enrich_working_context(
+        request_context={
+            "document_attachment_ids": ["doc-1"],
+            "document_result_contexts": [
+                {
+                    "schema_version": 1,
+                    "document_id": "doc-1",
+                    "document_class": "business_card",
+                    "processing_state": "needs_review",
+                    "field_names": ["website", "email"],
+                }
+            ],
+        },
+        working_context={"entity_hints": []},
+    )
+
+    hint = enriched["entity_hints"][0]
+    assert hint["display_name"] == "recent business card OCR result"
+    assert "website" in hint["aliases"]
+    assert "website field" in hint["aliases"]
+    assert hint["resolution_hints"] == {
+        "document_id": "doc-1",
+        "source": "discord_document_result",
+    }
+    assert "incorrect.example" not in repr(enriched)
+
+
 def test_email_contract_emits_only_stable_reference_metadata():
     contract = next(
         item for item in default_skill_context_contracts()

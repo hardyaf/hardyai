@@ -4,6 +4,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.core.ollama_observability import OllamaThinkMode, normalize_ollama_think_mode
+
 
 def _load_dotenv_file() -> None:
     if os.getenv("JARVIS_SKIP_DOTENV", "").strip().lower() in {"1", "true", "yes", "on"}:
@@ -71,6 +73,11 @@ def _as_csv_list(name: str, default: list[str]) -> list[str]:
     return [item for item in items if item]
 
 
+def _as_ollama_think(name: str, default: OllamaThinkMode) -> OllamaThinkMode:
+    raw = os.getenv(name)
+    return normalize_ollama_think_mode(raw, default=default)
+
+
 def _secret_value(value_name: str, file_name: str) -> str:
     direct = str(os.getenv(value_name, "") or "").strip()
     if direct:
@@ -103,9 +110,16 @@ class Settings:
     main_repair_model_timeout_seconds: float
     main_repair_model_num_ctx: int
     main_repair_model_num_predict: int
+    main_repair_model_think: OllamaThinkMode
     main_conversation_model_timeout_seconds: float
     main_conversation_model_num_ctx: int
     main_conversation_model_num_predict: int
+    main_conversation_model_think: OllamaThinkMode
+    main_turn_decision_model_think: OllamaThinkMode
+    model_adaptive_token_budget_enabled: bool
+    model_adaptive_token_max_attempts: int
+    model_adaptive_token_growth_factor: float
+    model_adaptive_token_max_multiplier: int
     larger_model_micro_only_window_seconds: float
     skill_artifact_auto_compile_enabled: bool
     main_agent_loop_max_steps: int
@@ -129,6 +143,7 @@ class Settings:
     web_research_decision_timeout_seconds: float
     web_research_decision_model_num_ctx: int
     web_research_decision_model_num_predict: int
+    web_research_decision_model_think: OllamaThinkMode
     web_research_max_results: int
     web_research_safe_search: int
     web_research_children_enabled: bool
@@ -177,6 +192,8 @@ class Settings:
     email_agent_model_num_ctx: int
     email_agent_summary_num_predict: int
     email_agent_classifier_num_predict: int
+    email_agent_summary_model_think: OllamaThinkMode
+    email_agent_classifier_model_think: OllamaThinkMode
     email_agent_allow_remote_model: bool
     email_agent_attachment_extraction_enabled: bool
     email_agent_label_shadow_enabled: bool
@@ -208,6 +225,7 @@ class Settings:
     action_ticket_review_model_timeout_seconds: float
     action_ticket_review_model_num_ctx: int
     action_ticket_review_model_num_predict: int
+    action_ticket_review_model_think: OllamaThinkMode
     action_ticket_review_context_max_chars: int
     action_ticket_auto_remediation_enabled: bool
     plane_enabled: bool
@@ -315,14 +333,15 @@ settings = Settings(
     ),
     main_repair_model_name=os.getenv(
         "MAIN_REPAIR_MODEL_NAME",
-        "gpt-oss:20b",
+        "qwen3.8:27b",
     ),
     main_repair_model_timeout_seconds=_as_float(
         "MAIN_REPAIR_MODEL_TIMEOUT_SECONDS",
         _as_float("MICRO_MODEL_TIMEOUT_SECONDS", 6.0),
     ),
-    main_repair_model_num_ctx=max(512, _as_int("MAIN_REPAIR_MODEL_NUM_CTX", 12288)),
+    main_repair_model_num_ctx=max(512, _as_int("MAIN_REPAIR_MODEL_NUM_CTX", 32768)),
     main_repair_model_num_predict=max(1, _as_int("MAIN_REPAIR_MODEL_NUM_PREDICT", 512)),
+    main_repair_model_think=_as_ollama_think("MAIN_REPAIR_MODEL_THINK", False),
     main_conversation_model_timeout_seconds=_as_float(
         "MAIN_CONVERSATION_MODEL_TIMEOUT_SECONDS",
         max(
@@ -333,8 +352,23 @@ settings = Settings(
             20.0,
         ),
     ),
-    main_conversation_model_num_ctx=max(512, _as_int("MAIN_CONVERSATION_MODEL_NUM_CTX", 12288)),
+    main_conversation_model_num_ctx=max(512, _as_int("MAIN_CONVERSATION_MODEL_NUM_CTX", 32768)),
     main_conversation_model_num_predict=max(1, _as_int("MAIN_CONVERSATION_MODEL_NUM_PREDICT", 1024)),
+    main_conversation_model_think=_as_ollama_think("MAIN_CONVERSATION_MODEL_THINK", "low"),
+    main_turn_decision_model_think=_as_ollama_think("MAIN_TURN_DECISION_MODEL_THINK", False),
+    model_adaptive_token_budget_enabled=_as_bool("MODEL_ADAPTIVE_TOKEN_BUDGET_ENABLED", True),
+    model_adaptive_token_max_attempts=max(
+        1,
+        min(_as_int("MODEL_ADAPTIVE_TOKEN_MAX_ATTEMPTS", 4), 8),
+    ),
+    model_adaptive_token_growth_factor=max(
+        1.25,
+        min(_as_float("MODEL_ADAPTIVE_TOKEN_GROWTH_FACTOR", 2.0), 4.0),
+    ),
+    model_adaptive_token_max_multiplier=max(
+        1,
+        min(_as_int("MODEL_ADAPTIVE_TOKEN_MAX_MULTIPLIER", 8), 32),
+    ),
     larger_model_micro_only_window_seconds=_as_float(
         "LARGER_MODEL_MICRO_ONLY_WINDOW_SECONDS",
         180.0,
@@ -387,6 +421,10 @@ settings = Settings(
     web_research_decision_model_num_predict=max(
         1,
         _as_int("WEB_RESEARCH_DECISION_MODEL_NUM_PREDICT", 256),
+    ),
+    web_research_decision_model_think=_as_ollama_think(
+        "WEB_RESEARCH_DECISION_MODEL_THINK",
+        False,
     ),
     web_research_max_results=max(1, min(_as_int("WEB_RESEARCH_MAX_RESULTS", 5), 8)),
     web_research_safe_search=max(0, min(_as_int("WEB_RESEARCH_SAFE_SEARCH", 1), 2)),
@@ -509,9 +547,14 @@ settings = Settings(
         "EMAIL_AGENT_SUMMARY_MODEL_PROVIDER",
         "ollama",
     ).strip().casefold(),
-    email_agent_model_num_ctx=max(512, _as_int("EMAIL_AGENT_MODEL_NUM_CTX", 12288)),
+    email_agent_model_num_ctx=max(512, _as_int("EMAIL_AGENT_MODEL_NUM_CTX", 32768)),
     email_agent_summary_num_predict=max(1, _as_int("EMAIL_AGENT_SUMMARY_NUM_PREDICT", 1024)),
     email_agent_classifier_num_predict=max(1, _as_int("EMAIL_AGENT_CLASSIFIER_NUM_PREDICT", 256)),
+    email_agent_summary_model_think=_as_ollama_think("EMAIL_AGENT_SUMMARY_MODEL_THINK", "low"),
+    email_agent_classifier_model_think=_as_ollama_think(
+        "EMAIL_AGENT_CLASSIFIER_MODEL_THINK",
+        False,
+    ),
     email_agent_allow_remote_model=_as_bool("EMAIL_AGENT_ALLOW_REMOTE_MODEL", False),
     email_agent_attachment_extraction_enabled=_as_bool(
         "EMAIL_AGENT_ATTACHMENT_EXTRACTION_ENABLED",
@@ -601,8 +644,8 @@ settings = Settings(
     ),
     action_ticket_review_model_name=(
         os.getenv("ACTION_TICKET_REVIEW_MODEL_NAME", "").strip()
-        or os.getenv("MAIN_REPAIR_MODEL_NAME", "gpt-oss:20b").strip()
-        or "gpt-oss:20b"
+        or os.getenv("MAIN_REPAIR_MODEL_NAME", "qwen3.8:27b").strip()
+        or "qwen3.8:27b"
     ),
     action_ticket_review_model_timeout_seconds=max(
         1.0,
@@ -610,11 +653,15 @@ settings = Settings(
     ),
     action_ticket_review_model_num_ctx=max(
         512,
-        _as_int("ACTION_TICKET_REVIEW_MODEL_NUM_CTX", 12288),
+        _as_int("ACTION_TICKET_REVIEW_MODEL_NUM_CTX", 32768),
     ),
     action_ticket_review_model_num_predict=max(
         1,
         _as_int("ACTION_TICKET_REVIEW_MODEL_NUM_PREDICT", 1024),
+    ),
+    action_ticket_review_model_think=_as_ollama_think(
+        "ACTION_TICKET_REVIEW_MODEL_THINK",
+        False,
     ),
     action_ticket_review_context_max_chars=max(
         4096,
@@ -782,7 +829,7 @@ settings = Settings(
     ),
     paddleocr_vl_max_new_tokens=max(
         64,
-        min(_as_int("PADDLEOCR_VL_MAX_NEW_TOKENS", 512), 4096),
+        min(_as_int("PADDLEOCR_VL_MAX_NEW_TOKENS", 4096), 4096),
     ),
     paddleocr_vl_max_response_bytes=max(
         1024,

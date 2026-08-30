@@ -12,6 +12,43 @@ class ContextFlow:
     def __init__(self, router_ports: Any) -> None:
         self._router = router_ports
 
+    def _bind_request_decision(
+        self,
+        *,
+        session: SessionRecord,
+        decision: MicroDecision,
+        request_context: dict[str, Any],
+        working_context: dict[str, Any],
+        text: str,
+    ) -> MicroDecision:
+        """Apply trusted transport context after either Micro or Main chose an intent."""
+
+        router = self._router
+        for contract in router._skill_context_contracts:
+            bind_hook = getattr(contract, "bind_request_decision", None)
+            if not callable(bind_hook):
+                continue
+            try:
+                bound = bind_hook(
+                    decision=decision,
+                    request_context=request_context,
+                    working_context=working_context,
+                    text=text,
+                )
+            except Exception as exc:  # pragma: no cover - defensive contract isolation
+                router._event_log.record(
+                    event_type="context.contract.bind_request_decision.failed",
+                    session_id=session.session_id,
+                    payload={
+                        "contract_id": getattr(contract, "contract_id", "unknown"),
+                        "error": type(exc).__name__,
+                    },
+                )
+                continue
+            if isinstance(bound, MicroDecision):
+                decision = bound
+        return decision
+
     def _resolve_followup_entities(self, session: SessionRecord, decision: MicroDecision) -> MicroDecision:
         router = self._router
         registry = router._entity_registry_manager.get_registry(session=session)

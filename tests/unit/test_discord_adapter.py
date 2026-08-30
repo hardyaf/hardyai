@@ -288,6 +288,7 @@ def test_private_notes_channel_captures_silently_before_command_routing(tmp_path
             "        timezone: America/New_York\n"
             "        digest_at: \"18:00\"\n"
             "        raw_note_retention_days: 30\n"
+            "        compute_budget_notices: true\n"
         ),
         encoding="utf-8",
     )
@@ -323,6 +324,8 @@ def test_private_notes_channel_captures_silently_before_command_routing(tmp_path
     assert service.captures[0]["content"] == "maybe move the table; ask Jordan about Friday"
     assert service.captures[0]["config"].owner_user_id == "taylor"
     assert service.captures[0]["config"].raw_note_retention_days == 30
+    assert bot._compute_budget_notice_config is not None
+    assert bot._compute_budget_notice_config.compute_budget_notices is True
     channel.send.assert_not_awaited()
 
 

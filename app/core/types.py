@@ -60,8 +60,11 @@ class Intent(str, Enum):
     DOCUMENTS_GET = "documents.get"
     DOCUMENTS_SHOW_SOURCE = "documents.show_source"
     DOCUMENTS_REPROCESS = "documents.reprocess"
+    DOCUMENTS_ESCALATE_OCR = "documents.escalate_ocr"
     DOCUMENTS_LIST_REVIEWS = "documents.list_reviews"
     DOCUMENTS_PROPOSE_METADATA = "documents.propose_metadata"
+    DOCUMENTS_CORRECT_FIELD = "documents.correct_field"
+    DOCUMENTS_CONFIRM_FIELDS = "documents.confirm_fields"
     SYSTEM_WAKE = "system.wake"
     SYSTEM_SLEEP = "system.sleep"
     CONVERSATIONAL = "conversation.general"
@@ -113,8 +116,11 @@ DOCUMENT_INTENTS = {
     Intent.DOCUMENTS_GET,
     Intent.DOCUMENTS_SHOW_SOURCE,
     Intent.DOCUMENTS_REPROCESS,
+    Intent.DOCUMENTS_ESCALATE_OCR,
     Intent.DOCUMENTS_LIST_REVIEWS,
     Intent.DOCUMENTS_PROPOSE_METADATA,
+    Intent.DOCUMENTS_CORRECT_FIELD,
+    Intent.DOCUMENTS_CONFIRM_FIELDS,
 }
 
 

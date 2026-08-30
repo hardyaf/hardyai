@@ -267,6 +267,242 @@ def test_router_executes_trusted_discord_attachment_caption_without_main_model_c
     assert documents.executed[0][1] == {"document_id": "doc-1"}
 
 
+def test_main_repair_binds_negative_ocr_feedback_to_recent_discord_attachment():
+    class DocumentsService:
+        def __init__(self) -> None:
+            self.executed = []
+
+        def capability_access(self, *, context):
+            del context
+            return {
+                "configured": True,
+                "authorized_here": True,
+                "availability": "available",
+                "intent_contracts": [
+                    {
+                        "intent": "documents.escalate_ocr",
+                        "purpose": "Run deeper review-only OCR after negative image feedback.",
+                        "operation": "write",
+                        "entity_fields": ["document_id"],
+                    }
+                ],
+            }
+
+        def execute(self, *, intent, entities, context):
+            self.executed.append((intent, dict(entities), dict(context)))
+            return {
+                "status": "queued",
+                "message": "I got it - deeper GPU OCR is processing.",
+                "document_id": entities["document_id"],
+            }
+
+    class RepairBackend:
+        def repair_action(self, text: str, context=None):
+            del text, context
+            return {
+                "status": "needs_clarification",
+                "intent": "documents.escalate_ocr",
+                "confidence": 0.97,
+                "reasoning": "negative_ocr_feedback",
+                "entities": {},
+                "missing_fields": ["document_id"],
+                "question": "Which document do you mean?",
+                "source": "backend",
+            }
+
+    class DocumentsRegistry:
+        def resolve_agent_context(self, *, text, fallback_user_id, fallback_agent_id):
+            return {
+                "agent_id": fallback_agent_id,
+                "display_name": fallback_agent_id,
+                "wake_alias": None,
+                "normalized_text": text,
+                "resolved_user_id": fallback_user_id,
+                "personality_doc_path": None,
+            }
+
+        def resolve_skill(self, *, intent, user_id, agent_id):
+            del user_id, agent_id
+            if intent != "documents.escalate_ocr":
+                return None
+            return {
+                "skill_id": "skill.documents.local",
+                "intents": [intent],
+                "execution_ref": "app.skills.domains.documents.handler:run",
+                "micro_enabled": False,
+            }
+
+        def runtime_capability_catalog(self, *, user_id, agent_id):
+            del user_id, agent_id
+            return [
+                {
+                    "skill_id": "skill.documents.local",
+                    "skill_name": "Local Document Intelligence",
+                    "intents": ["documents.escalate_ocr"],
+                    "main_enabled": True,
+                    "micro_enabled": False,
+                    "micro_intents": [],
+                    "scheduled": False,
+                }
+            ]
+
+        def record_skill_run(self, **kwargs):
+            del kwargs
+
+    documents = DocumentsService()
+    router = JarvisRouter(
+        micro_jarvis=MicroJarvis(),
+        main_jarvis=MainJarvis(repair_backend=RepairBackend()),
+        session_store=SessionStore(),
+        runtime_power=RuntimePowerController(),
+        event_log=EventLogService(),
+        memory_service=None,
+        lists_service=ListsService(default_list_names=["groceries", "to-do"]),
+        calendar_service=CalendarService(),
+        home_service=HomeService(default_switch_names=["kitchen light"]),
+        documents_service=documents,
+        skill_registry=DocumentsRegistry(),
+    )
+
+    response = router.route(
+        AskRequest(
+            text="it wasn't right",
+            request_id="discord:ocr-negative-feedback-1",
+            session_id="discord-ocr-negative-feedback",
+            user_id="300",
+            source="discord",
+            context={
+                "principal_kind": "discord_adapter",
+                "discord_channel_id": "200",
+                "document_attachment_ids": ["doc-1"],
+                "micro_command_explicit": True,
+                "force_main_owner": True,
+            },
+        )
+    )
+
+    assert response["route"] == "main_jarvis_repair"
+    assert response["intent"] == "documents.escalate_ocr"
+    assert response["result"]["status"] == "queued"
+    assert documents.executed[0][0] == "documents.escalate_ocr"
+    assert documents.executed[0][1] == {"document_id": "doc-1"}
+
+    class UnexpectedRepairBackend:
+        def repair_action(self, text: str, context=None):
+            raise AssertionError("unprefixed Discord must reach Main's typed commitment directly")
+
+    class SemanticConversationBackend:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def decide_turn(self, text: str, context=None):
+            context = dict(context or {})
+            self.calls.append({"text": text, "context": context})
+            document_hints = [
+                item
+                for item in context.get("entity_hints") or []
+                if item.get("domain") == "documents" and item.get("entity_type") == "document"
+            ]
+            if not document_hints:
+                return {
+                    "mode": "conversation",
+                    "intent": None,
+                    "confidence": 0.96,
+                    "reasoning": "no_active_document_context",
+                    "entities": {},
+                    "missing_fields": [],
+                    "message": "I can discuss a website check once a site is specified.",
+                    "question": None,
+                    "source": "backend",
+                }
+            return {
+                "mode": "execute_action",
+                "intent": "documents.escalate_ocr",
+                "confidence": 0.96,
+                "reasoning": "feedback_refers_to_the_active_document",
+                "entities": {},
+                "missing_fields": [],
+                "message": "",
+                "question": None,
+                "source": "backend",
+            }
+
+        def respond(self, text: str, context=None):
+            raise AssertionError("the typed decision must be committed")
+
+    committed_documents = DocumentsService()
+    semantic_backend = SemanticConversationBackend()
+    commitment_router = JarvisRouter(
+        micro_jarvis=MicroJarvis(),
+        main_jarvis=MainJarvis(
+            repair_backend=UnexpectedRepairBackend(),
+            conversation_backend=semantic_backend,
+        ),
+        session_store=SessionStore(),
+        runtime_power=RuntimePowerController(),
+        event_log=EventLogService(),
+        memory_service=None,
+        lists_service=ListsService(default_list_names=["groceries", "to-do"]),
+        calendar_service=CalendarService(),
+        home_service=HomeService(default_switch_names=["kitchen light"]),
+        documents_service=committed_documents,
+        skill_registry=DocumentsRegistry(),
+    )
+
+    commitment_response = commitment_router.route(
+        AskRequest(
+            text="Check that website that's not right",
+            request_id="discord:ocr-negative-feedback-commitment-1",
+            session_id="discord-ocr-negative-feedback-commitment",
+            user_id="300",
+            source="discord",
+            context={
+                "principal_kind": "discord_adapter",
+                "discord_channel_id": "200",
+                "document_attachment_ids": ["doc-1"],
+                "micro_command_explicit": False,
+                "force_main_owner": True,
+            },
+        )
+    )
+
+    assert commitment_response["route"] == "main_jarvis_commitment"
+    assert commitment_response["intent"] == "documents.escalate_ocr"
+    assert commitment_response["result"]["status"] == "queued"
+    assert committed_documents.executed[0][0] == "documents.escalate_ocr"
+    assert committed_documents.executed[0][1] == {"document_id": "doc-1"}
+    main_context = semantic_backend.calls[0]["context"]
+    assert any(
+        item.get("resolution_hints", {}).get("document_id") == "doc-1"
+        for item in main_context["entity_hints"]
+    )
+    assert any(
+        contract.get("intent") == "documents.escalate_ocr"
+        for capability in main_context["runtime_capability_catalog"]
+        for contract in capability.get("intent_contracts") or []
+    )
+
+    unrelated_response = commitment_router.route(
+        AskRequest(
+            text="Check whether example.com is online",
+            request_id="discord:unrelated-website-1",
+            session_id="discord-unrelated-website",
+            user_id="300",
+            source="discord",
+            context={
+                "principal_kind": "discord_adapter",
+                "discord_channel_id": "200",
+                "micro_command_explicit": False,
+                "force_main_owner": True,
+            },
+        )
+    )
+
+    assert unrelated_response["route"] == "main_jarvis"
+    assert unrelated_response["result"]["status"] == "conversation"
+    assert len(committed_documents.executed) == 1
+
+
 def test_router_enriches_rotated_session_with_safe_email_anchor_before_micro_routing():
     class FakeEmailService:
         def __init__(self) -> None:

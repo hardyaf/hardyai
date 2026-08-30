@@ -160,6 +160,14 @@ def schema_for(document_class: DocumentClass | str) -> DocumentSchema:
     return _SCHEMA_BY_CLASS[DocumentClass(document_class)]
 
 
+def field_spec_for(document_class: DocumentClass | str, field_name: str) -> FieldSpec:
+    normalized = str(field_name or "").strip().casefold()
+    for field in schema_for(document_class).fields:
+        if field.name == normalized:
+            return field
+    raise ValueError("document field is not allowed for this class")
+
+
 def phase6_allowed_classes() -> tuple[DocumentClass, ...]:
     return tuple(
         document_class
@@ -197,6 +205,27 @@ def validate_extraction(result: ExtractionResult, *, document_class: DocumentCla
         ):
             raise ValueError("field observation contains an exact restricted value")
         _validate_value_kind(allowed[observation.field_name].value_kind, observation.value)
+
+
+def validate_field_correction(
+    *,
+    document_class: DocumentClass | str,
+    field_name: str,
+    value: str,
+) -> str:
+    field = field_spec_for(document_class, field_name)
+    normalized = " ".join(str(value or "").split())
+    if not normalized:
+        raise ValueError("corrected field value is required")
+    if len(normalized) > 500:
+        raise ValueError("corrected field value is too large")
+    encoded = json.dumps(normalized, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+    if len(encoded.encode("utf-8")) > 4096:
+        raise ValueError("corrected field value is too large")
+    if contains_unmasked_restricted_value(encoded):
+        raise ValueError("corrected field contains an exact restricted value")
+    _validate_value_kind(field.value_kind, normalized)
+    return normalized
 
 
 def _validate_value_kind(kind: str, value: Any) -> None:

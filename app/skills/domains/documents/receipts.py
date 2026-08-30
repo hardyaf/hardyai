@@ -12,7 +12,10 @@ def build_operation_receipt(
     services: dict[str, Any],
 ) -> dict[str, Any] | None:
     del entities, services
-    if intent != "documents.reprocess" or result.get("status") not in {"queued", "processing"}:
+    if intent not in {
+        "documents.reprocess",
+        "documents.escalate_ocr",
+    } or result.get("status") not in {"queued", "processing"}:
         return None
     run_id = str(result.get("run_id") or "").strip()
     document_id = str(result.get("document_id") or "").strip()

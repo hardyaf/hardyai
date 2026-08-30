@@ -243,19 +243,20 @@ def test_unprefixed_discord_statement_bypasses_micro_and_reaches_main():
     assert response["result"]["status"] == "conversation"
     assert response["classification"]["reasoning"] == "discord_unprefixed_main_handoff"
     assert "micro_bypassed_unprefixed_discord" in response["classification"]["ambiguity_flags"]
-    assert len(repair_backend.calls) == 1
+    assert repair_backend.calls == []
     assert len(conversation_backend.calls) == 1
-    repair_context = repair_backend.calls[0]["context"]
-    assert repair_context["micro_intent"] == "unknown"
-    assert repair_context["micro_confidence"] == 0.0
-    assert repair_context["micro_entities"] == {}
-    assert repair_context["micro_ambiguity_flags"] == ["micro_bypassed_unprefixed_discord"]
-    assert repair_context["required_missing_fields"] == []
-    assert repair_context["agent_id"] == "jarvis"
-    assert repair_context["agent_display_name"] == "jarvis"
-    assert isinstance(repair_context["session_summary"], dict)
+    main_context = conversation_backend.calls[0]["context"]
+    assert main_context["micro_intent"] == "unknown"
+    assert main_context["micro_confidence"] == 0.0
+    assert main_context["micro_entities"] == {}
+    assert main_context["micro_ambiguity_flags"] == ["micro_bypassed_unprefixed_discord"]
+    assert main_context["required_missing_fields"] == []
+    assert main_context["agent_id"] == "jarvis"
+    assert main_context["agent_display_name"] == "jarvis"
+    assert isinstance(main_context["session_summary"], dict)
     event_types = [item["event_type"] for item in event_log.recent(limit=50)]
     assert "pipeline.micro.bypassed" in event_types
+    assert "pipeline.main_repair.bypassed" in event_types
 
 
 def test_explicit_bang_discord_command_enters_micro():
@@ -328,22 +329,40 @@ def test_unresolved_bang_command_carries_full_micro_handoff_to_main():
 
 
 def test_unprefixed_child_action_repaired_by_main_is_still_policy_denied():
-    class _ResolvedActionRepairBackend:
-        def repair_action(self, text: str, context=None):
+    class _HomeCapabilityRegistry(_CapabilityRegistry):
+        def __init__(self) -> None:
+            super().__init__()
+            self._skills["skill.home.core"] = {
+                "skill_id": "skill.home.core",
+                "skill_name": "Home",
+                "intents": ["home.set_switch"],
+                "execution_ref": "app.skills.domains.lights.handler:run",
+                "micro_enabled": True,
+                "micro_intents": ["home.set_switch"],
+            }
+
+    class _ResolvedActionConversationBackend:
+        def decide_turn(self, text: str, context=None):
             return {
-                "status": "resolved_action",
+                "mode": "execute_action",
                 "intent": "home.set_switch",
                 "confidence": 0.96,
                 "reasoning": "main_detected_home_action",
                 "entities": {"switch_name": "kitchen light", "action": "on"},
                 "missing_fields": [],
+                "message": "",
+                "question": None,
                 "source": "backend",
             }
+
+        def respond(self, text: str, context=None):
+            raise AssertionError("the typed action must be policy checked")
 
     micro_backend = _RecordingMicroBackend()
     router, _ = _build_router(
         micro_backend=micro_backend,
-        repair_backend=_ResolvedActionRepairBackend(),
+        conversation_backend=_ResolvedActionConversationBackend(),
+        skill_registry=_HomeCapabilityRegistry(),
     )
     request = _discord_request(
         text="turn the kitchen light on",
@@ -425,29 +444,34 @@ def test_unprefixed_answer_to_bang_clarification_uses_main_without_micro_probe()
 
 
 def test_unprefixed_email_summary_routes_through_main_in_authorized_private_channel():
-    class _EmailRepairBackend:
+    class _EmailConversationBackend:
         def __init__(self) -> None:
             self.calls: list[dict[str, Any]] = []
 
-        def repair_action(self, text: str, context=None):
+        def decide_turn(self, text: str, context=None):
             self.calls.append({"text": text, "context": dict(context or {})})
             return {
-                "status": "resolved_action",
+                "mode": "execute_action",
                 "intent": "email.list_recent",
                 "confidence": 0.95,
                 "reasoning": "collection_email_summary",
                 "entities": {"query": text},
                 "missing_fields": [],
+                "message": "",
+                "question": None,
                 "source": "backend",
             }
+
+        def respond(self, text: str, context=None):
+            raise AssertionError("the typed action must execute")
 
     micro_backend = _RecordingMicroBackend()
     registry = _CapabilityRegistry()
     email_service = _ScopedEmailService()
-    repair_backend = _EmailRepairBackend()
+    conversation_backend = _EmailConversationBackend()
     router, _ = _build_router(
         micro_backend=micro_backend,
-        repair_backend=repair_backend,
+        conversation_backend=conversation_backend,
         skill_registry=registry,
         email_agent_service=email_service,
     )
@@ -469,12 +493,12 @@ def test_unprefixed_email_summary_routes_through_main_in_authorized_private_chan
     response = router.route(request)
 
     assert micro_backend.calls == []
-    assert response["route"] == "main_jarvis_repair"
+    assert response["route"] == "main_jarvis_commitment"
     assert response["intent"] == "email.list_recent"
     assert response["result"]["status"] == "ok"
     assert email_service.calls[0]["entities"]["query"] == "summarize today's emails please"
-    repair_catalog = repair_backend.calls[0]["context"]["runtime_capability_catalog"]
-    email_capability = next(item for item in repair_catalog if item["skill_id"] == "skill.email.agent")
+    main_catalog = conversation_backend.calls[0]["context"]["runtime_capability_catalog"]
+    email_capability = next(item for item in main_catalog if item["skill_id"] == "skill.email.agent")
     assert email_capability["authorized_here"] is True
 
 
@@ -548,7 +572,15 @@ def test_main_repaired_email_request_cannot_bypass_private_channel_scope():
     repair_backend = _EmailRepairBackend()
     email_service = _ScopedEmailService()
     router, _ = _build_router(
-        micro_backend=_RecordingMicroBackend(),
+        micro_backend=_RecordingMicroBackend(
+            payload={
+                "intent": "unknown",
+                "confidence": 0.2,
+                "entities": {},
+                "ambiguity_flags": ["unknown_intent"],
+                "reasoning": "explicit_command_unresolved",
+            }
+        ),
         repair_backend=repair_backend,
         skill_registry=_CapabilityRegistry(),
         email_agent_service=email_service,
@@ -557,7 +589,7 @@ def test_main_repaired_email_request_cannot_bypass_private_channel_scope():
     response = router.route(
         _discord_request(
             text="summarize today's emails",
-            explicit=False,
+            explicit=True,
             session_id="discord-unauthorized-email",
         )
     )

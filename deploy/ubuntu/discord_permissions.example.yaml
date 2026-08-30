@@ -42,6 +42,8 @@ guilds:
     private_notes_channels:
       - channel_id: 333333333333333333
         delivery_channel_id: 333333333333333333
+        # Deliver content-free adaptive model-budget notices to this private channel.
+        compute_budget_notices: true
         allowed_user_ids:
           - 444444444444444444
         owner_user_id: example_user

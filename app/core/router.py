@@ -399,6 +399,7 @@ class JarvisRouter:
             request_text=request_text,
             request_id=self._request_id_var.get(),
             open_tool_followup=self._maybe_open_tool_followup,
+            bind_request_decision=self._bind_request_decision,
         )
 
     def _maybe_open_conversation_followup(
@@ -640,6 +641,23 @@ class JarvisRouter:
     ) -> dict[str, Any]:
         self._domain_context.set_contracts(self._skill_context_contracts)
         return self._domain_context.normalize_entities(intent=intent, entities=entities)
+
+    def _bind_request_decision(
+        self,
+        *,
+        session: SessionRecord,
+        decision: MicroDecision,
+        request_context: dict[str, Any],
+        working_context: dict[str, Any],
+        text: str,
+    ) -> MicroDecision:
+        return self._context_flow._bind_request_decision(
+            session=session,
+            decision=decision,
+            request_context=request_context,
+            working_context=working_context,
+            text=text,
+        )
 
     def _apply_text_constraints(
         self,

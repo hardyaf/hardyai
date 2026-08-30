@@ -22,11 +22,29 @@ _PHONE = re.compile(r"(?<!\d)(?:\+?1[ .-]?)?\(?\d{3}\)?[ .-]\d{3}[ .-]\d{4}(?!\d
 _URL = re.compile(r"\b(?:https?://|www\.)[^\s]+", re.IGNORECASE)
 _MASKED = re.compile(r"<REDACTED:(?:NUMBER|IDENTIFIER):\*{4}([A-Z0-9]{0,4})>")
 _USAGE = re.compile(r"(?i)\busage\b\s*[:=-]?\s*([0-9]{1,9}(?:\.[0-9]{1,2})?)\s*([A-Za-z]{1,12})\b")
+_PERSON_NAME = re.compile(
+    r"^[A-Z][A-Z'\u2019.-]+(?:\s+[A-Z][A-Z'\u2019.-]+){1,3}(?:,?\s+(?:JR|SR|II|III|IV)\.?)?$",
+    re.IGNORECASE,
+)
+_JOB_TITLE = re.compile(
+    r"\b(?:owner|founder|co-founder|president|vice president|vp|chief|ceo|cfo|coo|cto|"
+    r"director|manager|supervisor|coordinator|specialist|consultant|engineer|architect|"
+    r"attorney|accountant|broker|agent|representative|technician|administrator|principal|"
+    r"partner|sales|marketing|operations)\b",
+    re.IGNORECASE,
+)
+_ORGANIZATION = re.compile(
+    r"(?:\b(?:llc|l\.l\.c\.|inc|incorporated|corp|corporation|company|co\.|group|services|"
+    r"solutions|associates|agency|department|township|university|college|foundation|church|"
+    r"club|construction|contracting|plumbing|electric|electrical|landscaping|realty|insurance|"
+    r"consulting|design|studio|works)\b|&)",
+    re.IGNORECASE,
+)
 
 
 class DeterministicStructuredExtractor:
     name = "deterministic-structured-extractor"
-    version = "1"
+    version = "2"
 
     def extract(self, request: ExtractionInput) -> ExtractionResult:
         if request.contract_version != EXTRACTION_CONTRACT_VERSION:
@@ -132,9 +150,38 @@ class DeterministicStructuredExtractor:
 
     def _business_card(self, request: ExtractionInput) -> list[FieldObservation]:
         values: list[FieldObservation] = []
-        first = _first_plain_line(request)
-        if first:
-            values.append(self._observation(first[0], "full_name", first[1], Sensitivity.PRIVATE, 0.7))
+        lines = _business_card_lines(request)
+        organization = next(
+            ((block, text) for block, text in lines if _ORGANIZATION.search(text)),
+            None,
+        )
+        job_title = next(
+            (
+                (block, text)
+                for block, text in lines
+                if _JOB_TITLE.search(text) and not _ORGANIZATION.search(text)
+            ),
+            None,
+        )
+        full_name = _business_card_name(lines, organization=organization, job_title=job_title)
+        if full_name:
+            values.append(
+                self._observation(
+                    full_name[0], "full_name", full_name[1], Sensitivity.PRIVATE, 0.82
+                )
+            )
+        if organization:
+            values.append(
+                self._observation(
+                    organization[0], "organization", organization[1], Sensitivity.PRIVATE, 0.86
+                )
+            )
+        if job_title:
+            values.append(
+                self._observation(
+                    job_title[0], "job_title", job_title[1], Sensitivity.PRIVATE, 0.88
+                )
+            )
         for block in request.blocks:
             for field_name, pattern in (("email", _EMAIL), ("phone", _PHONE), ("website", _URL)):
                 match = pattern.search(block.text)
@@ -181,6 +228,57 @@ def _first_plain_line(request: ExtractionInput):
         if text and "<REDACTED:" not in text:
             return block, text
     return None
+
+
+def _business_card_lines(request: ExtractionInput) -> list[tuple[object, str]]:
+    lines: list[tuple[object, str]] = []
+    seen: set[str] = set()
+    for block in request.blocks[:32]:
+        text = " ".join(block.text.split())[:200]
+        folded = text.casefold()
+        if not text or folded in seen or "<redacted:" in folded:
+            continue
+        seen.add(folded)
+        lines.append((block, text))
+    return lines
+
+
+def _business_card_name(
+    lines: list[tuple[object, str]],
+    *,
+    organization: tuple[object, str] | None,
+    job_title: tuple[object, str] | None,
+) -> tuple[object, str] | None:
+    excluded = {
+        item[1].casefold()
+        for item in (organization, job_title)
+        if item is not None
+    }
+    candidates = [
+        item
+        for item in lines
+        if item[1].casefold() not in excluded
+        and _PERSON_NAME.fullmatch(item[1])
+        and not _contact_line(item[1])
+        and not _ORGANIZATION.search(item[1])
+        and not _JOB_TITLE.search(item[1])
+    ]
+    if not candidates:
+        return None
+    if job_title is not None:
+        title_index = next(
+            (index for index, item in enumerate(lines) if item[1] == job_title[1]),
+            None,
+        )
+        if title_index is not None:
+            preceding = [item for item in candidates if lines.index(item) < title_index]
+            if preceding:
+                return preceding[-1]
+    return candidates[0]
+
+
+def _contact_line(text: str) -> bool:
+    return bool(_EMAIL.search(text) or _PHONE.search(text) or _URL.search(text))
 
 
 def _labeled_date(request: ExtractionInput, labels: tuple[str, ...]):

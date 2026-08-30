@@ -23,6 +23,7 @@ from app.schemas.documents import (
     DocumentEvidenceResponse,
     DocumentReprocessRequest,
     DocumentReprocessResponse,
+    DocumentProcessingRunResponse,
     DocumentMetadataProposalRequest,
     DocumentMetadataProposalResponse,
     DocumentMetadataReviewBindingRequest,
@@ -30,6 +31,8 @@ from app.schemas.documents import (
     DocumentUploadResponse,
     DocumentClassificationsResponse,
     DocumentFieldsResponse,
+    DocumentFieldDecisionRequest,
+    DocumentFieldDecisionResponse,
     DocumentActionExecutionBindingRequest,
     DocumentActionProposalView,
     DocumentProposalsResponse,
@@ -340,6 +343,7 @@ async def reprocess_document(
             document_id=_document_id(document_id),
             owner_id=principal.user_id,
             idempotency_key=body.idempotency_key,
+            processing_tier=body.processing_tier,
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="document_not_found") from exc
@@ -348,6 +352,39 @@ async def reprocess_document(
         raise HTTPException(status_code=409, detail=code) from exc
     payload = DocumentReprocessResponse(**result)
     return JSONResponse(status_code=202, content=payload.model_dump())
+
+
+@router.get(
+    "/{document_id}/processing-runs/{run_id}",
+    response_model=DocumentProcessingRunResponse,
+)
+async def get_document_processing_run(
+    document_id: str,
+    run_id: str,
+    request: Request,
+    principal: RequestPrincipal = Depends(require_operator),
+) -> DocumentProcessingRunResponse:
+    container = _container(request)
+    _enabled(container)
+    if container.repository is None:
+        raise HTTPException(status_code=503, detail="document_processing_unavailable")
+    canonical_id = _document_id(document_id)
+    try:
+        canonical_run_id = str(UUID(str(run_id)))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="document_processing_run_not_found") from exc
+    record = container.repository.get(canonical_id, owner_id=principal.user_id)
+    run = container.repository.get_processing_run(canonical_run_id)
+    if record is None or run is None or str(run.get("document_id") or "") != canonical_id:
+        raise HTTPException(status_code=404, detail="document_processing_run_not_found")
+    route = str(run.get("route") or "")
+    return DocumentProcessingRunResponse(
+        document_id=canonical_id,
+        run_id=canonical_run_id,
+        status=str(run.get("status") or ""),
+        route=route,
+        processing_tier=("review_fallback" if route == "vlm_fallback" else "default"),
+    )
 
 
 @router.get("/{document_id}/evidence", response_model=DocumentEvidenceResponse)
@@ -579,11 +616,54 @@ async def get_document_fields(
         raise HTTPException(status_code=404, detail="document_not_found")
     if not DocumentAccessPolicy.can_read_fields(record=record, user_id=principal.user_id):
         raise HTTPException(status_code=403, detail="protected_fields_unavailable")
+    if container.field_corrections is None:
+        raise HTTPException(status_code=503, detail="document_field_corrections_unavailable")
     return DocumentFieldsResponse(
         document_id=canonical_id,
         source_version_id=str(record.source_version_id or ""),
-        fields=container.repository.effective_fields(document_id=canonical_id),
+        fields=container.field_corrections.list_fields(
+            record=record,
+            user_id=principal.user_id,
+        ),
     )
+
+
+@router.post(
+    "/{document_id}/field-decisions",
+    response_model=DocumentFieldDecisionResponse,
+)
+async def apply_document_field_decision(
+    document_id: str,
+    body: DocumentFieldDecisionRequest,
+    request: Request,
+    principal: RequestPrincipal = Depends(require_operator),
+) -> DocumentFieldDecisionResponse:
+    container = _container(request)
+    _enabled(container)
+    if container.repository is None or container.field_corrections is None:
+        raise HTTPException(status_code=503, detail="document_field_corrections_unavailable")
+    canonical_id = _document_id(document_id)
+    record = container.repository.get(canonical_id, owner_id=principal.user_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="document_not_found")
+    try:
+        result = await asyncio.to_thread(
+            container.field_corrections.apply,
+            record=record,
+            user_id=principal.user_id,
+            source_version_id=body.source_version_id,
+            field_name=body.field_name,
+            observation_id=body.observation_id,
+            review_binding_hash=body.review_binding_hash,
+            review_decision_id=body.review_decision_id,
+            decision_kind=body.decision_kind,
+            corrected_value=body.corrected_value,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return DocumentFieldDecisionResponse(**result)
 
 
 @router.get("/{document_id}/proposals", response_model=DocumentProposalsResponse)

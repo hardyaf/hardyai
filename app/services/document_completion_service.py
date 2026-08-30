@@ -23,6 +23,7 @@ class PreparedDocumentCompletion:
     disposition: Literal["waiting", "ready", "already_delivered", "rejected"]
     message: str | None = None
     error_code: str | None = None
+    context_anchor: dict[str, Any] | None = None
 
 
 class DocumentCompletionNotificationService:
@@ -62,20 +63,39 @@ class DocumentCompletionNotificationService:
             return PreparedDocumentCompletion(disposition="already_delivered")
         payload = self._validated_payload(job)
         document_id = str(payload["document_id"])
+        context = {
+            "principal_kind": "discord_adapter",
+            "source": "discord",
+            "request_source": "discord",
+            "request_id": str(job.get("idempotency_key") or job.get("job_id") or ""),
+            "discord_guild_id": str(payload.get("guild_id") or "dm"),
+            "discord_channel_id": str(payload["channel_id"]),
+            "external_user_id": str(payload["user_id"]),
+            "document_attachment_ids": [document_id],
+            "current_document_attachment_ids": [document_id],
+        }
+        operation_id = str(payload.get("operation_id") or "").strip()
+        if operation_id:
+            run = self.documents.processing_run_status(
+                document_id=document_id,
+                run_id=operation_id,
+                context=context,
+            )
+            run_state = str(run.get("status") or "").strip().casefold()
+            if run_state not in _TERMINAL_PROCESSING_STATES:
+                return PreparedDocumentCompletion(disposition="waiting")
+            if run_state in {"failed", "cancelled"}:
+                return PreparedDocumentCompletion(
+                    disposition="ready",
+                    message=(
+                        "The deeper local OCR pass did not complete. The original result and source "
+                        "were preserved for another retry or manual correction."
+                    ),
+                )
         result = self.documents.execute(
             intent="documents.get",
             entities={"document_id": document_id},
-            context={
-                "principal_kind": "discord_adapter",
-                "source": "discord",
-                "request_source": "discord",
-                "request_id": str(job.get("idempotency_key") or job.get("job_id") or ""),
-                "discord_guild_id": str(payload.get("guild_id") or "dm"),
-                "discord_channel_id": str(payload["channel_id"]),
-                "external_user_id": str(payload["user_id"]),
-                "document_attachment_ids": [document_id],
-                "current_document_attachment_ids": [document_id],
-            },
+            context=context,
         )
         status = str(result.get("status") or "").strip().casefold()
         if status == "denied":
@@ -95,7 +115,14 @@ class DocumentCompletionNotificationService:
         message = str(result.get("message") or "").strip()
         if not message:
             raise RuntimeError("document_presentation_empty")
-        return PreparedDocumentCompletion(disposition="ready", message=message[:1900])
+        return PreparedDocumentCompletion(
+            disposition="ready",
+            message=message[:1900],
+            context_anchor=self._presentation_context_anchor(
+                document_id=document_id,
+                result=result,
+            ),
+        )
 
     def defer(self, job: dict[str, Any]) -> bool:
         return self.repository.defer_job(
@@ -176,6 +203,51 @@ class DocumentCompletionNotificationService:
         }
 
     @staticmethod
+    def _presentation_context_anchor(
+        *,
+        document_id: str,
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Project content-free result shape for a later semantic follow-up."""
+
+        document = result.get("document")
+        document = document if isinstance(document, dict) else {}
+        document_class = str(
+            document.get("document_class")
+            or document.get("selected_document_class")
+            or ""
+        ).strip().casefold()[:64]
+        processing_state = str(document.get("processing_state") or "").strip().casefold()[:40]
+        raw_fields = result.get("structured_fields")
+        if not isinstance(raw_fields, list):
+            raw_fields = result.get("unverified_structured_fields")
+        field_names: list[str] = []
+        seen: set[str] = set()
+        if isinstance(raw_fields, list):
+            for row in raw_fields[:64]:
+                if not isinstance(row, dict):
+                    continue
+                field_name = str(row.get("field_name") or "").strip().casefold()
+                if (
+                    not field_name
+                    or len(field_name) > 64
+                    or not all(character.isalnum() or character == "_" for character in field_name)
+                    or field_name in seen
+                ):
+                    continue
+                seen.add(field_name)
+                field_names.append(field_name)
+                if len(field_names) >= 16:
+                    break
+        return {
+            "schema_version": 1,
+            "document_id": str(document_id),
+            "document_class": document_class or None,
+            "processing_state": processing_state or None,
+            "field_names": field_names,
+        }
+
+    @staticmethod
     def _validated_payload(job: dict[str, Any]) -> dict[str, Any]:
         payload = job.get("payload")
         if not isinstance(payload, dict) or payload.get("schema_version") != 1:
@@ -185,10 +257,27 @@ class DocumentCompletionNotificationService:
         document_id = str(payload.get("document_id") or "").strip()
         if not document_id or document_id != str(job.get("aggregate_id") or "").strip():
             raise ValueError("document_completion_aggregate_mismatch")
-        for name in ("channel_id", "user_id", "message_id", "attachment_id"):
+        for name in ("channel_id", "user_id", "message_id"):
             value = str(payload.get(name) or "").strip()
             if not value.isdigit() or len(value) > 32 or int(value) <= 0:
                 raise ValueError(f"invalid_document_completion_{name}")
+        attachment_id = payload.get("attachment_id")
+        if attachment_id is not None:
+            normalized_attachment_id = str(attachment_id).strip()
+            if (
+                not normalized_attachment_id.isdigit()
+                or len(normalized_attachment_id) > 32
+                or int(normalized_attachment_id) <= 0
+            ):
+                raise ValueError("invalid_document_completion_attachment_id")
+        operation_id = str(payload.get("operation_id") or "").strip()
+        if operation_id and (
+            len(operation_id) > 128
+            or any(ord(character) < 33 or ord(character) == 127 for character in operation_id)
+        ):
+            raise ValueError("invalid_document_completion_operation_id")
+        if attachment_id is None and not operation_id:
+            raise ValueError("document_completion_source_missing")
         guild_id = payload.get("guild_id")
         if guild_id is not None:
             normalized_guild = str(guild_id).strip()

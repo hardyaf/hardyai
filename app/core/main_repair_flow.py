@@ -113,6 +113,30 @@ class MainRepairFlow:
             },
         )
         repair_status = str(repair.get("status") or "").strip().lower()
+        if repair_status in {"resolved_action", "needs_clarification"}:
+            request_bound = router._repair_decision_from_main(repair, micro_decision)
+            if request_bound is not None:
+                request_bound = router._bind_request_decision(
+                    session=session,
+                    decision=request_bound,
+                    request_context=payload.context,
+                    working_context=repair_working_context,
+                    text=payload.text,
+                )
+                request_bound = router._resolve_followup_entities(
+                    session=session,
+                    decision=request_bound,
+                )
+                repair["intent"] = request_bound.intent.value
+                repair["entities"] = dict(request_bound.entities)
+                request_bound_missing = router._required_fields_for_intent(
+                    intent=request_bound.intent,
+                    entities=request_bound.entities,
+                )
+                if repair_status == "needs_clarification" and not request_bound_missing:
+                    repair["status"] = "resolved_action"
+                    repair["missing_fields"] = []
+                    repair_status = "resolved_action"
         if repair_status == "resolved_action":
             repaired = router._repair_decision_from_main(repair, micro_decision)
             if repaired is None:

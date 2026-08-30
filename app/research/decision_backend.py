@@ -7,7 +7,14 @@ from typing import Any
 import httpx
 
 from app.accelerator.client import accelerator_request_headers
-from app.core.ollama_observability import OllamaCallObserver, OllamaMetricsCallback
+from app.core.ollama_observability import (
+    AdaptiveTokenBudgetPolicy,
+    OllamaCallObserver,
+    OllamaMetricsCallback,
+    OllamaThinkMode,
+    apply_ollama_think_mode,
+    normalize_ollama_think_mode,
+)
 from app.research.types import ResearchDecision
 
 
@@ -21,20 +28,24 @@ class OllamaResearchDecisionBackend:
         model: str,
         timeout_seconds: float = 60.0,
         keep_alive_seconds: float | None = None,
-        num_ctx: int = 12288,
+        num_ctx: int = 32768,
         num_predict: int = 256,
+        think: OllamaThinkMode = None,
         metrics_callback: OllamaMetricsCallback | None = None,
+        adaptive_policy: AdaptiveTokenBudgetPolicy | None = None,
     ) -> None:
         self._base_url = str(base_url or "").rstrip("/")
         self._model = str(model or "").strip()
         self._timeout = max(1.0, float(timeout_seconds))
         self._keep_alive_seconds = keep_alive_seconds
+        self._think = normalize_ollama_think_mode(think)
         self._observer = OllamaCallObserver(
             lane="research_decision",
             model=self._model,
             num_ctx=num_ctx,
             num_predict=num_predict,
             metrics_callback=metrics_callback,
+            adaptive_policy=adaptive_policy,
         )
 
     def decide(self, *, text: str, context: dict[str, Any]) -> ResearchDecision | None:
@@ -53,16 +64,17 @@ class OllamaResearchDecisionBackend:
             f"Recent conversation: {recent_turns}\n"
             f"User question: {str(text or '').strip()}\n"
         )
-        request_payload: dict[str, Any] = {
-            "model": self._model,
-            "prompt": prompt,
-            "stream": False,
-            "format": "json",
-            "options": self._observer.options(temperature=0.0),
-        }
-        if self._keep_alive_seconds is not None:
-            request_payload["keep_alive"] = f"{int(max(self._keep_alive_seconds, 1.0))}s"
-        try:
+        def invoke(options: dict[str, Any]) -> dict[str, Any]:
+            request_payload: dict[str, Any] = {
+                "model": self._model,
+                "prompt": prompt,
+                "stream": False,
+                "format": "json",
+                "options": options,
+            }
+            apply_ollama_think_mode(request_payload, self._think)
+            if self._keep_alive_seconds is not None:
+                request_payload["keep_alive"] = f"{int(max(self._keep_alive_seconds, 1.0))}s"
             response = httpx.post(
                 f"{self._base_url}/api/generate",
                 headers=accelerator_request_headers("research_decision"),
@@ -70,12 +82,22 @@ class OllamaResearchDecisionBackend:
                 timeout=self._timeout,
             )
             response.raise_for_status()
-            payload = response.json()
+            value = response.json()
+            return value if isinstance(value, dict) else {}
+
+        try:
+            payload = self._observer.generate(
+                prompt=prompt,
+                temperature=0.0,
+                invoke=invoke,
+                is_valid_response=lambda value: self._first_json_object(
+                    str(value.get("response") or "")
+                )
+                is not None,
+            )
             parsed = self._first_json_object(str(payload.get("response") or ""))
-        except Exception as exc:
-            self._observer.record(prompt=prompt, outcome="error", error_type=type(exc).__name__)
+        except Exception:
             return None
-        self._observer.record(prompt=prompt, response_payload=payload, outcome="success")
         if not isinstance(parsed, dict):
             return None
         mode = str(parsed.get("mode") or "").strip().lower()
@@ -94,7 +116,9 @@ class OllamaResearchDecisionBackend:
         )
 
     def status(self) -> dict[str, Any]:
-        return self._observer.status()
+        status = self._observer.status()
+        status["thinking_mode"] = self._think
+        return status
 
     @staticmethod
     def _compact_recent_turns(context: dict[str, Any]) -> str:

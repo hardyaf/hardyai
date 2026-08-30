@@ -19,6 +19,7 @@ from app.accelerator.service import (
     AcceleratorLeaseGuard,
 )
 from app.accelerator.types import AcceleratorAdmissionError
+from app.core.ollama_observability import normalize_ollama_think_mode
 from app.integrations.local_service import validate_local_http_service_url
 
 
@@ -56,23 +57,31 @@ _VLM_ENABLED = str(os.getenv("DOCUMENTS_PADDLEOCR_VL_ENABLED", "false")).strip()
     "yes",
     "on",
 }
-_ALLOWED_MODELS = frozenset(
+_CONFIGURED_MODELS = frozenset(
     item.strip()
-    for item in str(os.getenv("ACCELERATOR_OLLAMA_MODELS", "qwen2.5:7b,gpt-oss:20b")).split(",")
+    for item in str(os.getenv("ACCELERATOR_OLLAMA_MODELS", "qwen2.5:7b,qwen3.8:27b")).split(",")
     if item.strip()
 )
-_EVICTABLE_MODELS = frozenset(
+_CANDIDATE_MODELS = frozenset(
     item.strip()
-    for item in str(os.getenv("ACCELERATOR_OLLAMA_EVICTABLE_MODELS", "qwen2.5:7b")).split(",")
+    for item in str(os.getenv("ACCELERATOR_OLLAMA_CANDIDATE_MODELS", "qwen3.8:27b")).split(",")
     if item.strip()
 )
 _PROTECTED_MODELS = frozenset(
     item.strip()
-    for item in str(os.getenv("ACCELERATOR_OLLAMA_PROTECTED_MODELS", "gpt-oss:20b")).split(",")
+    for item in str(os.getenv("ACCELERATOR_OLLAMA_PROTECTED_MODELS", "qwen3.8:27b")).split(",")
     if item.strip()
 )
+_CONFIGURED_EVICTABLE_MODELS = frozenset(
+    item.strip()
+    for item in str(os.getenv("ACCELERATOR_OLLAMA_EVICTABLE_MODELS", "qwen2.5:7b")).split(",")
+    if item.strip()
+)
+_ALLOWED_MODELS = _CONFIGURED_MODELS | _CANDIDATE_MODELS
+_EVICTABLE_MODELS = (_CONFIGURED_EVICTABLE_MODELS | _CANDIDATE_MODELS) - _PROTECTED_MODELS
 if (
-    not _EVICTABLE_MODELS
+    not _CONFIGURED_MODELS
+    or not _EVICTABLE_MODELS
     or not _PROTECTED_MODELS
     or not _EVICTABLE_MODELS.issubset(_ALLOWED_MODELS)
     or not _PROTECTED_MODELS.issubset(_ALLOWED_MODELS)
@@ -171,6 +180,7 @@ def _ollama_payload(value: dict[str, Any]) -> dict[str, Any]:
         "raw",
         "context",
         "suffix",
+        "think",
     }
     if set(value) - allowed_keys or "images" in value:
         raise HTTPException(status_code=400, detail="accelerator_ollama_fields_rejected")
@@ -185,7 +195,15 @@ def _ollama_payload(value: dict[str, Any]) -> dict[str, Any]:
     options = value.get("options")
     if options is not None and not isinstance(options, dict):
         raise HTTPException(status_code=400, detail="accelerator_options_invalid")
-    return {key: item for key, item in value.items() if key in allowed_keys}
+    sanitized = {key: item for key, item in value.items() if key in allowed_keys}
+    if "think" in value:
+        try:
+            sanitized["think"] = normalize_ollama_think_mode(value.get("think"))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="accelerator_think_invalid") from exc
+        if sanitized["think"] is None:
+            raise HTTPException(status_code=400, detail="accelerator_think_invalid")
+    return sanitized
 
 
 async def _bounded_upstream(
@@ -286,6 +304,7 @@ async def ready(_: None = Depends(_require_key)) -> dict[str, Any]:
         "vlm_ready": vlm_ready,
         "evictable_model_count": len(_EVICTABLE_MODELS),
         "protected_model_count": len(_PROTECTED_MODELS),
+        "candidate_model_count": len(_CANDIDATE_MODELS),
     }
 
 

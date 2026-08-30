@@ -98,3 +98,14 @@ class HumanReviewService:
             subject_type=subject_type,
             limit=limit,
         )
+
+    def latest_decision(self, *, review_id: str) -> dict[str, Any] | None:
+        return self.repository.latest_decision(str(review_id))
+
+    def mark_applied(self, *, decision_id: str, action_receipt_ref: str | None = None) -> bool:
+        return self.repository.mark_applied(
+            decision_id=str(decision_id),
+            action_receipt_ref=(
+                str(action_receipt_ref).strip()[:240] if action_receipt_ref else None
+            ),
+        )

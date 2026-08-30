@@ -9,6 +9,7 @@ from app.accelerator.client import accelerator_request_headers
 from app.config import settings
 from app.core.main_backend import OllamaMainConversationBackend, OllamaMainRepairBackend
 from app.core.micro_backend import OllamaMicroInferenceBackend
+from app.core.ollama_observability import AdaptiveTokenBudgetPolicy
 from app.core.main_jarvis import MainJarvis
 from app.core.micro_jarvis import MicroJarvis
 from app.core.router import JarvisRouter
@@ -68,8 +69,10 @@ from app.integrations.local_service import validate_local_http_service_url
 from app.reviews.repository import HumanReviewRepository
 from app.reviews.service import HumanReviewService
 from app.skills.domains.documents.query_service import DocumentQueryService
+from app.skills.domains.documents.review_corrections import DocumentFieldReviewCoordinator
 from app.provenance.repository import ProvenanceRepository
 from app.services.document_proposal_execution_service import DocumentProposalExecutionService
+from app.services.model_compute_budget_service import ModelComputeBudgetNotificationService
 from app.research.decision_backend import OllamaResearchDecisionBackend
 from app.research.searxng import SearxngSearchProvider
 from app.research.service import WebResearchService
@@ -87,6 +90,13 @@ runtime_state_repository = RuntimeStateRepository(sqlite_store)
 skill_catalog_repository = SkillCatalogRepository(sqlite_store)
 scheduled_jobs_repository = ScheduledJobsRepository(sqlite_store)
 event_log = EventLogService(persistence=runtime_state_repository)
+model_compute_budget_notifications: ModelComputeBudgetNotificationService | None = None
+adaptive_token_budget_policy = AdaptiveTokenBudgetPolicy(
+    enabled=settings.model_adaptive_token_budget_enabled,
+    max_attempts=settings.model_adaptive_token_max_attempts,
+    growth_factor=settings.model_adaptive_token_growth_factor,
+    max_predict_multiplier=settings.model_adaptive_token_max_multiplier,
+)
 
 
 def _record_ollama_call(metrics: dict[str, Any]) -> None:
@@ -95,10 +105,77 @@ def _record_ollama_call(metrics: dict[str, Any]) -> None:
         session_id="system:model-runtime",
         payload=metrics,
     )
+    if metrics.get("escalated_to_num_predict") is not None:
+        event_log.record(
+            event_type="model.compute_budget.escalated",
+            session_id="system:model-runtime",
+            payload={
+                "lane": metrics.get("lane"),
+                "model": metrics.get("model"),
+                "reason": metrics.get("escalation_reason"),
+                "attempt": metrics.get("attempt"),
+                "from_num_predict": metrics.get("requested_num_predict"),
+                "to_num_predict": metrics.get("escalated_to_num_predict"),
+                "prompt_chars": metrics.get("prompt_chars"),
+                "estimated_prompt_tokens": metrics.get("estimated_prompt_tokens"),
+                "prompt_eval_count": metrics.get("prompt_eval_count"),
+                "eval_count": metrics.get("eval_count"),
+                "done_reason": metrics.get("done_reason"),
+                "total_duration_ms": metrics.get("total_duration_ms"),
+                "call_id": metrics.get("call_id"),
+            },
+        )
+        if (
+            model_compute_budget_notifications is not None
+            and int(metrics.get("attempt") or 1) == 1
+        ):
+            try:
+                model_compute_budget_notifications.enqueue_escalation(metrics)
+            except Exception as exc:
+                event_log.record(
+                    event_type="model.compute_budget.notice_enqueue_failed",
+                    session_id="system:model-runtime",
+                    payload={
+                        "lane": metrics.get("lane"),
+                        "model": metrics.get("model"),
+                        "error_type": type(exc).__name__,
+                    },
+                )
+    if metrics.get("failed_loop") is True:
+        event_log.record(
+            event_type="model.compute_budget.failed_loop",
+            session_id="system:model-runtime",
+            payload={
+                "lane": metrics.get("lane"),
+                "model": metrics.get("model"),
+                "reason": metrics.get("done_reason") or metrics.get("escalation_reason"),
+                "attempt": metrics.get("attempt"),
+                "final_num_predict": metrics.get("requested_num_predict"),
+                "call_id": metrics.get("call_id"),
+            },
+        )
+        if model_compute_budget_notifications is not None:
+            try:
+                model_compute_budget_notifications.enqueue_failed_loop(metrics)
+            except Exception as exc:
+                event_log.record(
+                    event_type="model.compute_budget.notice_enqueue_failed",
+                    session_id="system:model-runtime",
+                    payload={
+                        "lane": metrics.get("lane"),
+                        "model": metrics.get("model"),
+                        "notice_kind": "failed_loop",
+                        "error_type": type(exc).__name__,
+                    },
+                )
 
 
 ticket_repository = TicketRepository(database_path=sqlite_store.database_path)
 job_repository = ticket_repository.job_repository
+model_compute_budget_notifications = ModelComputeBudgetNotificationService(
+    repository=job_repository,
+    worker_id="model-compute-budget-enqueuer",
+)
 human_review_repository = HumanReviewRepository(database_path=settings.database_path)
 human_review_service = HumanReviewService(human_review_repository)
 action_ticket_service = ActionTicketService(
@@ -126,6 +203,7 @@ if settings.micro_model_enabled and settings.micro_model_provider.strip().lower(
         num_ctx=settings.micro_model_num_ctx,
         num_predict=settings.micro_model_num_predict,
         metrics_callback=_record_ollama_call,
+        adaptive_policy=adaptive_token_budget_policy,
     )
 main_repair_backend = None
 if settings.main_repair_model_enabled and settings.main_repair_model_provider.strip().lower() == "ollama":
@@ -137,7 +215,9 @@ if settings.main_repair_model_enabled and settings.main_repair_model_provider.st
         skill_registry=skill_registry,
         num_ctx=settings.main_repair_model_num_ctx,
         num_predict=settings.main_repair_model_num_predict,
+        think=settings.main_repair_model_think,
         metrics_callback=_record_ollama_call,
+        adaptive_policy=adaptive_token_budget_policy,
     )
 main_conversation_backend = None
 conversation_model_name = None
@@ -160,7 +240,10 @@ if conversation_model_name:
         skill_registry=skill_registry,
         num_ctx=settings.main_conversation_model_num_ctx,
         num_predict=settings.main_conversation_model_num_predict,
+        think=settings.main_conversation_model_think,
+        turn_decision_think=settings.main_turn_decision_model_think,
         metrics_callback=_record_ollama_call,
+        adaptive_policy=adaptive_token_budget_policy,
     )
 
 web_research_service = None
@@ -178,7 +261,9 @@ if settings.web_research_enabled and settings.web_research_provider == "searxng"
             ),
             num_ctx=settings.web_research_decision_model_num_ctx,
             num_predict=settings.web_research_decision_model_num_predict,
+            think=settings.web_research_decision_model_think,
             metrics_callback=_record_ollama_call,
+            adaptive_policy=adaptive_token_budget_policy,
         )
     web_research_service = WebResearchService(
         provider=SearxngSearchProvider(
@@ -342,7 +427,9 @@ if settings.email_agent_enabled:
             timeout_seconds=settings.main_conversation_model_timeout_seconds,
             num_ctx=settings.email_agent_model_num_ctx,
             num_predict=settings.email_agent_summary_num_predict,
+            think=settings.email_agent_summary_model_think,
             metrics_callback=_record_ollama_call,
+            adaptive_policy=adaptive_token_budget_policy,
         )
         email_model_classifier = OllamaEmailModelClassifier(
             base_url=settings.local_model_url,
@@ -350,7 +437,9 @@ if settings.email_agent_enabled:
             timeout_seconds=settings.main_conversation_model_timeout_seconds,
             num_ctx=settings.email_agent_model_num_ctx,
             num_predict=settings.email_agent_classifier_num_predict,
+            think=settings.email_agent_classifier_model_think,
             metrics_callback=_record_ollama_call,
+            adaptive_policy=adaptive_token_budget_policy,
         )
     email_agent_service = EmailAgentService(
         storage=email_agent_storage,
@@ -398,6 +487,10 @@ if settings.documents_enabled:
     documents_service = DocumentQueryService(
         gateway=document_gateway_client,
         reviews=human_review_service,
+        field_reviews=DocumentFieldReviewCoordinator(
+            gateway=document_gateway_client,
+            reviews=human_review_service,
+        ),
     )
 
 ticket_verifier_registry = VerifierRegistry()
@@ -415,7 +508,9 @@ if settings.action_ticket_review_model_provider.strip().lower() == "ollama":
         timeout_seconds=settings.action_ticket_review_model_timeout_seconds,
         num_ctx=settings.action_ticket_review_model_num_ctx,
         num_predict=settings.action_ticket_review_model_num_predict,
+        think=settings.action_ticket_review_model_think,
         metrics_callback=_record_ollama_call,
+        adaptive_policy=adaptive_token_budget_policy,
     )
 else:
     ticket_review_backend = EvidenceOnlyReviewBackend()

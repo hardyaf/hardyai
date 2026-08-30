@@ -24,6 +24,10 @@ class DocumentReprocessingService:
         conventional_parser_version: str | None = None,
         conventional_parser_image_digest: str | None = None,
         conventional_configuration_sha256: str | None = None,
+        review_fallback_parser_name: str | None = None,
+        review_fallback_parser_version: str | None = None,
+        review_fallback_parser_image_digest: str | None = None,
+        review_fallback_configuration_sha256: str | None = None,
     ) -> None:
         self.repository = repository
         self.enqueuer = enqueuer
@@ -35,6 +39,14 @@ class DocumentReprocessingService:
         self.conventional_parser_version = str(conventional_parser_version or "")[:80]
         self.conventional_parser_image_digest = str(conventional_parser_image_digest or "")[:160]
         self.conventional_configuration_sha256 = str(conventional_configuration_sha256 or "")
+        self.review_fallback_parser_name = str(review_fallback_parser_name or "")[:80]
+        self.review_fallback_parser_version = str(review_fallback_parser_version or "")[:80]
+        self.review_fallback_parser_image_digest = str(
+            review_fallback_parser_image_digest or ""
+        )[:160]
+        self.review_fallback_configuration_sha256 = str(
+            review_fallback_configuration_sha256 or ""
+        )
 
     def request(
         self,
@@ -42,13 +54,40 @@ class DocumentReprocessingService:
         document_id: str,
         owner_id: str,
         idempotency_key: str,
+        processing_tier: str = "default",
     ) -> dict[str, Any]:
         record = self.repository.get(document_id, owner_id=owner_id)
         if record is None or not DocumentAccessPolicy.can_read(record=record, user_id=owner_id):
             raise KeyError(document_id)
         if record.state != DocumentState.READY or not record.source_version_id:
             raise DocumentStorageError("document_source_not_ready")
-        if record.media_type == "application/pdf" and self.parser_name:
+        normalized_tier = str(processing_tier or "default").strip().casefold()
+        fallback_from_run_id: str | None = None
+        if normalized_tier == "review_fallback":
+            if (
+                record.media_type not in {"image/jpeg", "image/png"}
+                or not self.review_fallback_parser_name
+            ):
+                raise DocumentStorageError("document_review_fallback_unavailable")
+            route = ProcessingRoute.VLM_FALLBACK
+            parser_name = self.review_fallback_parser_name
+            parser_version = self.review_fallback_parser_version
+            parser_image_digest = self.review_fallback_parser_image_digest
+            configuration_sha256 = self.review_fallback_configuration_sha256
+            resource_lane = "gpu_vlm"
+            conventional = self.repository.latest_processing_run(
+                document_id=document_id,
+                source_version_id=str(record.source_version_id),
+                route=ProcessingRoute.CONVENTIONAL_OCR,
+            )
+            fallback_from_run_id = (
+                str(conventional["run_id"])
+                if conventional is not None and conventional.get("run_id")
+                else None
+            )
+        elif normalized_tier != "default":
+            raise DocumentStorageError("document_processing_tier_unsupported")
+        elif record.media_type == "application/pdf" and self.parser_name:
             route = ProcessingRoute.NATIVE_DOCLING
             parser_name = self.parser_name
             parser_version = self.parser_version
@@ -64,7 +103,11 @@ class DocumentReprocessingService:
             resource_lane = "cpu_ocr"
         else:
             raise DocumentStorageError("document_processing_route_unavailable")
-        request_key = f"reprocess:{document_id}:{str(idempotency_key).strip()}"
+        request_key = (
+            f"reprocess:{document_id}:{str(idempotency_key).strip()}"
+            if normalized_tier == "default"
+            else f"reprocess:{document_id}:{normalized_tier}:{str(idempotency_key).strip()}"
+        )
         run = self.repository.create_processing_run(
             document_id=document_id,
             route=route,
@@ -73,6 +116,7 @@ class DocumentReprocessingService:
             parser_image_digest=parser_image_digest,
             configuration_sha256=configuration_sha256,
             resource_lane=resource_lane,
+            fallback_from_run_id=fallback_from_run_id,
             request_key=request_key,
         )
         enqueue_confirmed = True
@@ -91,6 +135,8 @@ class DocumentReprocessingService:
             "processing_state": str(run["status"]),
             "job_id": job_id,
             "enqueue_confirmed": enqueue_confirmed,
+            "processing_tier": normalized_tier,
+            "route": route.value,
         }
 
     def recover_pending(self, *, limit: int = 100) -> int:

@@ -16,6 +16,7 @@ from app.services.event_log import EventLogService
 
 
 ToolFollowup = Callable[..., dict[str, Any] | None]
+RequestDecisionBinder = Callable[..., MicroDecision]
 
 
 class MainTurnCommitmentCoordinator:
@@ -57,6 +58,7 @@ class MainTurnCommitmentCoordinator:
         request_text: str,
         request_id: str | None,
         open_tool_followup: ToolFollowup,
+        bind_request_decision: RequestDecisionBinder,
     ) -> dict[str, Any] | None:
         if str(response.get("status") or "").strip().lower() != "main_turn_decision":
             return None
@@ -68,6 +70,37 @@ class MainTurnCommitmentCoordinator:
         mode = str(turn_decision.get("mode") or "").strip().lower()
         if intent is None or intent not in MAIN_ACTION_INTENTS or mode not in {"clarify_action", "execute_action"}:
             return None
+
+        entities_raw = turn_decision.get("entities")
+        entities = self._domain_context.normalize_entities(
+            intent=intent,
+            entities=dict(entities_raw) if isinstance(entities_raw, dict) else {},
+        )
+        confidence_raw = turn_decision.get("confidence")
+        confidence = float(confidence_raw) if isinstance(confidence_raw, (int, float)) else 0.0
+        reasoning = str(turn_decision.get("reasoning") or "main_turn_commitment").strip()
+        original_intent = intent
+        committed = bind_request_decision(
+            session=session,
+            decision=MicroDecision(
+                intent=intent,
+                confidence=max(0.0, min(confidence, 1.0)),
+                entities=entities,
+                ambiguity_flags=["main_turn_commitment"],
+                recommended_owner=SessionOwner.MAIN,
+                reasoning=reasoning,
+            ),
+            request_context=payload.context,
+            working_context=dict(session.context_reference),
+            text=request_text,
+        )
+        intent = committed.intent
+        entities = self._domain_context.normalize_entities(
+            intent=intent,
+            entities=dict(committed.entities),
+        )
+        committed.entities = entities
+        confidence = committed.confidence
 
         capability = self._capability_for_intent(
             intent=intent,
@@ -120,18 +153,23 @@ class MainTurnCommitmentCoordinator:
                 user_id=payload.user_id,
             )
 
-        entities_raw = turn_decision.get("entities")
-        entities = self._domain_context.normalize_entities(
-            intent=intent,
-            entities=dict(entities_raw) if isinstance(entities_raw, dict) else {},
-        )
         missing_fields = self._domain_context.required_fields(intent=intent, entities=entities)
         decision_missing = turn_decision.get("missing_fields")
-        if isinstance(decision_missing, list):
-            missing_fields = self._domain_context.merge_missing_fields(missing_fields, decision_missing)
-        confidence_raw = turn_decision.get("confidence")
-        confidence = float(confidence_raw) if isinstance(confidence_raw, (int, float)) else 0.0
-        reasoning = str(turn_decision.get("reasoning") or "main_turn_commitment").strip()
+        if intent == original_intent and isinstance(decision_missing, list):
+            missing_fields = self._domain_context.merge_missing_fields(
+                missing_fields,
+                [
+                    str(field_name)
+                    for field_name in decision_missing
+                    if str(field_name).strip()
+                    and not str(entities.get(str(field_name)) or "").strip()
+                ],
+            )
+        if (
+            "trusted_discord_attachment_binding" in committed.ambiguity_flags
+            and not missing_fields
+        ):
+            mode = "execute_action"
         agent_id = self._session_transitions.active_agent_id(session)
         resolved_skill = self._action_execution.resolve(
             intent=intent.value,
@@ -154,14 +192,6 @@ class MainTurnCommitmentCoordinator:
                 resolved_skill=resolved_skill,
             )
 
-        committed = MicroDecision(
-            intent=intent,
-            confidence=max(0.0, min(confidence, 1.0)),
-            entities=entities,
-            ambiguity_flags=["main_turn_commitment"],
-            recommended_owner=SessionOwner.MAIN,
-            reasoning=reasoning,
-        )
         if committed.confidence < self._low_confidence_floor:
             self._session_transitions.set_owner(session=session, owner=SessionOwner.MAIN)
             self._session_transitions.set_state(session=session, state=SessionState.CONVERSATIONAL)

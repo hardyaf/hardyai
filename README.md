@@ -17,8 +17,9 @@ Micro, Main, skills, sessions, memory, and adapters.
   settings can silently fall back to disabled or loopback defaults.
 - The production GPU profile is sized for an NVIDIA RTX 3090 with 24 GB VRAM.
 - MicroJarvis uses `qwen2.5:7b`. It is an explicit, fast command classifier/executor.
-- Main repair and conversation use `gpt-oss:20b`. Main owns general conversation, semantic action
-  repair, clarification, and typed multi-step plans.
+- Main repair and conversation are migrating from `gpt-oss:20b` to `qwen3.8:27b` under the gated
+  [Main model migration plan](docs/QWEN38-MAIN-MIGRATION-PLAN.md). The protected Hardybot `.env`
+  remains authoritative during rollout; `gpt-oss:20b` is retained as the rollback model.
 - SQLite is authoritative for sessions, skills, domain state, action tickets, and the durable job
   ledger. Runtime data and protected configuration never belong in Git.
 - Optional web research is SearXNG-only, snippets-only, read-only, bounded, and disabled by default.
@@ -108,9 +109,13 @@ python -m pytest -q
 Create `.env` from `.env.example`, keep it untracked, and set at least the UID/GID, bind address,
 operator key, and desired integration flags. Pull the selected models once:
 
+The production `OLLAMA_MODELS_ROOT` must be a pre-created, root-owned directory on the storage NVMe
+(currently `/mnt/hardyai-documents/models/ollama`). Compose refuses to create this path implicitly.
+
 ```text
 docker compose --env-file .env -f deploy/docker/compose.yaml up -d ollama
 docker compose --env-file .env -f deploy/docker/compose.yaml exec ollama ollama pull qwen2.5:7b
+docker compose --env-file .env -f deploy/docker/compose.yaml exec ollama ollama pull qwen3.8:27b
 docker compose --env-file .env -f deploy/docker/compose.yaml exec ollama ollama pull gpt-oss:20b
 docker compose --env-file .env -f deploy/docker/compose.yaml up -d --build
 docker compose --env-file .env -f deploy/docker/compose.yaml ps

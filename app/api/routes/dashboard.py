@@ -75,6 +75,11 @@ async def dashboard_status(
     latest_pending_transition_event = _latest_event(events, event_type="context.pending_interaction.transition")
     latest_entity_registry_event = _latest_event(events, event_type="context.entity_registry.updated")
     latest_summary_update_event = _latest_event(events, event_type="context.session_summary.updated")
+    compute_budget_escalations = [
+        _safe_status_event(row)
+        for row in events
+        if str(row.get("event_type") or "") == "model.compute_budget.escalated"
+    ]
 
     latest_payload = latest_response.get("payload") if isinstance(latest_response, dict) else {}
     if not isinstance(latest_payload, dict):
@@ -130,6 +135,16 @@ async def dashboard_status(
         "configured_models": {
             "micro_model_name": settings.micro_model_name,
             "main_model_name": settings.main_repair_model_name,
+        },
+        "adaptive_compute_budget": {
+            "enabled": settings.model_adaptive_token_budget_enabled,
+            "max_attempts": settings.model_adaptive_token_max_attempts,
+            "growth_factor": settings.model_adaptive_token_growth_factor,
+            "max_multiplier": settings.model_adaptive_token_max_multiplier,
+            "recent_escalation_count": len(compute_budget_escalations),
+            "latest_escalation": (
+                compute_budget_escalations[-1] if compute_budget_escalations else None
+            ),
         },
         "latest_input": _safe_status_event(latest_input),
         "latest_response": latest_response,

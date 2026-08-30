@@ -12,7 +12,9 @@ from app.jobs.enqueue_ipc import UnixDocumentEnqueueClient
 from app.skills.domains.documents.configuration import (
     conventional_ocr_configuration_sha256,
     native_docling_configuration_sha256,
+    vlm_fallback_configuration_sha256,
 )
+from app.skills.domains.documents.corrections import DocumentFieldCorrectionService
 from app.skills.domains.documents.ingestion import TransientDocumentSpool
 from app.skills.domains.documents.service import DocumentIngestionService
 from app.skills.domains.documents.reprocessing import DocumentReprocessingService
@@ -29,6 +31,7 @@ class DocumentGatewayContainer:
     archive_client: PaperlessClient | None = None
     enqueuer: UnixDocumentEnqueueClient | None = None
     reprocessing: DocumentReprocessingService | None = None
+    field_corrections: DocumentFieldCorrectionService | None = None
 
     @classmethod
     def from_settings(cls, settings: Any) -> "DocumentGatewayContainer":
@@ -81,11 +84,26 @@ class DocumentGatewayContainer:
                         if settings.documents_paddleocr_enabled
                         else None
                     ),
+                    review_fallback_parser_name=(
+                        "paddleocr-vl" if settings.documents_paddleocr_vl_enabled else None
+                    ),
+                    review_fallback_parser_version=settings.paddleocr_vl_framework_version,
+                    review_fallback_parser_image_digest=settings.paddleocr_vl_image_digest,
+                    review_fallback_configuration_sha256=(
+                        vlm_fallback_configuration_sha256(settings)
+                        if settings.documents_paddleocr_vl_enabled
+                        else None
+                    ),
                 )
                 if settings.documents_processing_enabled
-                and (settings.documents_docling_enabled or settings.documents_paddleocr_enabled)
+                and (
+                    settings.documents_docling_enabled
+                    or settings.documents_paddleocr_enabled
+                    or settings.documents_paddleocr_vl_enabled
+                )
                 else None
             ),
+            field_corrections=DocumentFieldCorrectionService(repository),
         )
 
     @property

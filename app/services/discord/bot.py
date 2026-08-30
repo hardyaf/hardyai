@@ -17,6 +17,7 @@ from app.integrations.discord_attachment.types import (
 )
 from app.schemas.api import AskRequest
 from app.services.document_completion_service import DocumentCompletionNotificationService
+from app.services.model_compute_budget_service import ModelComputeBudgetNotificationService
 from app.skills.domains.private_notes.service import PrivateNotesChannelConfig
 
 try:
@@ -249,6 +250,10 @@ def load_discord_permissions_policy(permissions_path: str | None) -> dict[str, A
                     "digest_at": str(private_row.get("digest_at") or "18:00").strip(),
                     "skip_if_empty": _as_bool_value(private_row.get("skip_if_empty"), True),
                     "raw_note_retention_days": private_row.get("raw_note_retention_days", 30),
+                    "compute_budget_notices": _as_bool_value(
+                        private_row.get("compute_budget_notices"),
+                        False,
+                    ),
                 }
             )
         skill_rows = row.get("skill_channel_access")
@@ -540,6 +545,7 @@ def build_ask_request_payload(
     skill_scopes: list[str] | None = None,
     document_attachment_ids: list[str] | None = None,
     current_document_attachment_ids: list[str] | None = None,
+    document_result_contexts: list[dict[str, Any]] | None = None,
     micro_command_explicit: bool = False,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
@@ -582,6 +588,12 @@ def build_ask_request_payload(
             str(item).strip()
             for item in current_document_attachment_ids[:4]
             if str(item).strip()
+        ]
+    if document_result_contexts:
+        payload["context"]["document_result_contexts"] = [
+            dict(item)
+            for item in document_result_contexts[:4]
+            if isinstance(item, dict)
         ]
     session_value = str(session_id).strip() if isinstance(session_id, str) else ""
     if session_value:
@@ -664,6 +676,7 @@ if discord is not None:
             turn_service: Any | None = None,
             attachment_ingress: DiscordAttachmentIngressPort | None = None,
             document_completion_notifications: DocumentCompletionNotificationService | None = None,
+            model_compute_budget_notifications: ModelComputeBudgetNotificationService | None = None,
             document_notification_poll_seconds: float = 2.0,
             attachment_max_bytes: int = 52428800,
             attachment_max_per_message: int = 4,
@@ -678,15 +691,21 @@ if discord is not None:
             self._turn_service = turn_service
             self._attachment_ingress = attachment_ingress
             self._document_completion_notifications = document_completion_notifications
+            self._model_compute_budget_notifications = model_compute_budget_notifications
             self._document_notification_poll_seconds = max(
                 1.0,
                 min(float(document_notification_poll_seconds), 60.0),
             )
             self._document_notification_task: asyncio.Task[None] | None = None
+            self._model_compute_budget_notification_task: asyncio.Task[None] | None = None
             self._attachment_max_bytes = max(1024, min(int(attachment_max_bytes), 104857600))
             self._attachment_max_per_message = max(1, min(int(attachment_max_per_message), 10))
             self._attachment_context_ttl_seconds = 1800.0
             self._attachment_context: dict[tuple[str, str, str], list[tuple[str, float]]] = {}
+            self._document_result_context: dict[
+                tuple[str, str, str],
+                list[tuple[dict[str, Any], float]],
+            ] = {}
             self._private_notes_poll_seconds = max(5.0, float(private_notes_poll_seconds))
             self._private_notes_digest_task: asyncio.Task[None] | None = None
             self._private_notes_channels: dict[tuple[str, str], PrivateNotesChannelConfig] = {}
@@ -711,6 +730,19 @@ if discord is not None:
                         duplicate_private_notes_channels.add(key)
                         continue
                     self._private_notes_channels[key] = config
+            compute_notice_configs = [
+                config
+                for config in self._private_notes_channels.values()
+                if config.compute_budget_notices
+            ]
+            self._compute_budget_notice_config = (
+                compute_notice_configs[0] if len(compute_notice_configs) == 1 else None
+            )
+            if len(compute_notice_configs) > 1:
+                print(
+                    "[discord] compute budget notices disabled: configure exactly one private "
+                    "notes delivery channel"
+                )
             raw_skill_channel_access = self._permissions_policy.get("skill_channel_access")
             if isinstance(raw_skill_channel_access, list):
                 for row in raw_skill_channel_access:
@@ -747,8 +779,22 @@ if discord is not None:
                     self._document_notification_loop(),
                     name="jarvis-document-discord-notifications",
                 )
+            if (
+                self._model_compute_budget_notifications is not None
+                and self._compute_budget_notice_config is not None
+            ):
+                self._model_compute_budget_notification_task = asyncio.create_task(
+                    self._model_compute_budget_notification_loop(),
+                    name="jarvis-model-compute-budget-notifications",
+                )
 
         async def close(self) -> None:
+            compute_task = self._model_compute_budget_notification_task
+            self._model_compute_budget_notification_task = None
+            if compute_task is not None:
+                compute_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await compute_task
             document_task = self._document_notification_task
             self._document_notification_task = None
             if document_task is not None:
@@ -858,6 +904,64 @@ if discord is not None:
                     )
                 await asyncio.sleep(self._document_notification_poll_seconds)
 
+        async def _model_compute_budget_notification_loop(self) -> None:
+            await self.wait_until_ready()
+            while not self.is_closed():
+                try:
+                    await self._run_model_compute_budget_notifications_once()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # pragma: no cover - defensive scheduler boundary
+                    print(
+                        "[discord] model compute notification scheduler error: "
+                        f"{summarize_discord_api_error(exc)}"
+                    )
+                await asyncio.sleep(self._document_notification_poll_seconds)
+
+        async def _run_model_compute_budget_notifications_once(self) -> int:
+            service = self._model_compute_budget_notifications
+            config = self._compute_budget_notice_config
+            if service is None or config is None:
+                return 0
+            jobs = await asyncio.to_thread(service.claim)
+            delivered = 0
+            for job in jobs:
+                try:
+                    if service.already_delivered(job):
+                        if not await asyncio.to_thread(service.complete, job):
+                            raise RuntimeError("model_compute_notice_completion_lost")
+                        continue
+                    channel = self.get_channel(int(config.delivery_channel_id))
+                    if channel is None:
+                        channel = await self.fetch_channel(int(config.delivery_channel_id))
+                    sent = await channel.send(
+                        service.message(job),
+                        allowed_mentions=discord.AllowedMentions.none(),
+                        nonce=service.delivery_nonce(job),
+                    )
+                    sent_id = str(getattr(sent, "id", "") or "").strip()
+                    if not sent_id:
+                        raise RuntimeError("model_compute_notice_missing_message_id")
+                    if not await asyncio.to_thread(service.record_delivery, job, message_id=sent_id):
+                        raise RuntimeError("model_compute_notice_receipt_lost")
+                    if not await asyncio.to_thread(service.complete, job):
+                        raise RuntimeError("model_compute_notice_completion_lost")
+                    delivered += 1
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    print(
+                        "[discord] model compute notice delivery failed "
+                        f"job={str(job.get('job_id') or '')[:36]} "
+                        f"error={summarize_discord_api_error(exc)}"
+                    )
+                    await asyncio.to_thread(
+                        service.retry,
+                        job,
+                        error_code=f"model_compute_notice_{type(exc).__name__}"[:120],
+                    )
+            return delivered
+
         async def _run_document_notifications_once(self) -> int:
             service = self._document_completion_notifications
             if service is None:
@@ -918,6 +1022,10 @@ if discord is not None:
                         raise RuntimeError("document_notification_receipt_lost")
                     if not await asyncio.to_thread(service.complete, job):
                         raise RuntimeError("document_notification_completion_lost")
+                    self._remember_document_result_context(
+                        target=target,
+                        context_anchor=prepared.context_anchor,
+                    )
                     delivered += 1
                 except asyncio.CancelledError:
                     raise
@@ -1159,6 +1267,98 @@ if discord is not None:
                 self._attachment_context.pop(key, None)
             return [document_id for document_id, _expiry in current]
 
+        def _remember_document_result_context(
+            self,
+            *,
+            target: dict[str, str | None],
+            context_anchor: dict[str, Any] | None,
+        ) -> None:
+            if not isinstance(context_anchor, dict):
+                return
+            document_id = str(context_anchor.get("document_id") or "").strip()
+            channel_id = str(target.get("channel_id") or "").strip()
+            user_id = str(target.get("user_id") or "").strip()
+            if not document_id or not channel_id or not user_id:
+                return
+            guild_id = str(target.get("guild_id") or "dm").strip() or "dm"
+            now = asyncio.get_running_loop().time()
+            expires_at = now + self._attachment_context_ttl_seconds
+            key = (guild_id, channel_id, user_id)
+            current = [
+                (dict(item), expiry)
+                for item, expiry in self._document_result_context.get(key, [])
+                if expiry > now and str(item.get("document_id") or "").strip() != document_id
+            ]
+            current.append((dict(context_anchor), expires_at))
+            self._document_result_context[key] = current[-4:]
+
+        def _active_document_result_contexts(
+            self,
+            message: discord.Message,
+        ) -> list[dict[str, Any]]:
+            now = asyncio.get_running_loop().time()
+            key = self._attachment_context_key(message)
+            current = [
+                (dict(item), expiry)
+                for item, expiry in self._document_result_context.get(key, [])
+                if expiry > now
+            ]
+            if current:
+                self._document_result_context[key] = current
+            else:
+                self._document_result_context.pop(key, None)
+            return [dict(item) for item, _expiry in current]
+
+        async def _register_result_document_followup(
+            self,
+            *,
+            message: discord.Message,
+            payload: dict[str, Any],
+            allowed_document_ids: list[str],
+        ) -> bool:
+            """Translate a content-free application follow-up receipt into a Discord subscription."""
+
+            result = payload.get("result")
+            if not isinstance(result, dict):
+                return True
+            followup = result.get("async_followup")
+            if not isinstance(followup, dict):
+                return True
+            if followup.get("kind") != "document_processing":
+                return True
+            document_id = str(followup.get("document_id") or "").strip()
+            operation_id = str(followup.get("operation_id") or "").strip()
+            if (
+                not document_id
+                or document_id not in set(allowed_document_ids[:4])
+                or not operation_id
+                or self._document_completion_notifications is None
+            ):
+                return False
+            if not discord_document_response_allowed(
+                self._permissions_policy,
+                guild_id=(message.guild.id if message.guild else None),
+                channel_id=int(message.channel.id),
+            ):
+                return False
+            try:
+                await asyncio.to_thread(
+                    self._document_completion_notifications.register_discord,
+                    document_id=document_id,
+                    guild_id=(str(message.guild.id) if message.guild else None),
+                    channel_id=str(message.channel.id),
+                    user_id=str(message.author.id),
+                    message_id=str(message.id),
+                    operation_id=operation_id,
+                )
+            except Exception as exc:
+                print(
+                    "[discord] document follow-up registration failed "
+                    f"document={document_id[:36]} error={summarize_discord_api_error(exc)}"
+                )
+                return False
+            return True
+
         async def on_message(self, message: discord.Message) -> None:
             if message.author.bot:
                 return
@@ -1314,6 +1514,7 @@ if discord is not None:
                 skill_scopes=skill_scopes,
                 document_attachment_ids=self._active_document_attachment_ids(message),
                 current_document_attachment_ids=current_document_attachment_ids,
+                document_result_contexts=self._active_document_result_contexts(message),
                 micro_command_explicit=command_envelope.micro_command_explicit,
             )
 
@@ -1332,7 +1533,19 @@ if discord is not None:
                 await message.channel.send(f"Jarvis API error ({trace_id}): {error_summary}")
                 return
 
+            followup_registered = await self._register_result_document_followup(
+                message=message,
+                payload=payload,
+                allowed_document_ids=list(
+                    request_payload.get("context", {}).get("document_attachment_ids") or []
+                ),
+            )
             response_text = summarize_ask_response(payload)
+            if not followup_registered:
+                response_text = (
+                    f"{response_text}\nAutomatic completion delivery could not be queued; "
+                    "ask me for the image status."
+                )
             for part in split_discord_message(response_text):
                 await message.channel.send(
                     part,
@@ -1353,6 +1566,7 @@ else:
             turn_service: Any | None = None,
             attachment_ingress: DiscordAttachmentIngressPort | None = None,
             document_completion_notifications: DocumentCompletionNotificationService | None = None,
+            model_compute_budget_notifications: ModelComputeBudgetNotificationService | None = None,
             document_notification_poll_seconds: float = 2.0,
             attachment_max_bytes: int = 52428800,
             attachment_max_per_message: int = 4,
@@ -1362,6 +1576,7 @@ else:
             del turn_service
             del attachment_ingress
             del document_completion_notifications
+            del model_compute_budget_notifications
             del document_notification_poll_seconds
             del attachment_max_bytes
             del attachment_max_per_message

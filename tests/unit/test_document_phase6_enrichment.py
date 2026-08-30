@@ -6,6 +6,10 @@ import pytest
 
 from app.skills.domains.documents.classification import DeterministicDocumentClassifier
 from app.skills.domains.documents.artifacts import ContentAddressedArtifactStore
+from app.skills.domains.documents.corrections import (
+    DocumentFieldCorrectionService,
+    field_review_binding_hash,
+)
 from app.skills.domains.documents.enrichment import DocumentEnrichmentService
 from app.skills.domains.documents.extraction import DeterministicStructuredExtractor
 from app.skills.domains.documents.ingestion import TransientDocumentSpool
@@ -197,6 +201,41 @@ def test_safe_unredacted_document_receives_archive_read_access_after_classificat
     repository.close()
 
 
+def test_business_card_extracts_name_organization_title_and_contact_channels(tmp_path) -> None:
+    repository, record, run = _ready_run(tmp_path)
+    outcome = _service(repository).enrich(
+        _artifact(
+            record,
+            run,
+            [
+                "Field Works LLC",
+                "Jordan Lee",
+                "Operations Manager",
+                "jordan@example.test",
+                "555-123-4567",
+                "www.example.test",
+            ],
+        )
+    )
+
+    assert outcome.document_class == DocumentClass.BUSINESS_CARD
+    assert outcome.extraction is not None
+    assert outcome.extraction.extractor_version == "2"
+    fields = {
+        row["field_name"]: row["value"]
+        for row in repository.effective_fields(document_id=record.document_id)
+    }
+    assert fields == {
+        "email": "jordan@example.test",
+        "full_name": "Jordan Lee",
+        "job_title": "Operations Manager",
+        "organization": "Field Works LLC",
+        "phone": "555-123-4567",
+        "website": "www.example.test",
+    }
+    repository.close()
+
+
 def test_schema_rejects_unknown_fields_missing_evidence_and_exact_restricted_values() -> None:
     base = dict(
         contract_version="document-extraction-v1",
@@ -265,6 +304,74 @@ def test_human_correction_precedes_reprocessed_machine_observation(tmp_path) -> 
     assert effective["amount_due"]["decision_kind"] == "correct"
     assert effective["amount_due"]["observation_state"] == "conflicted"
     assert first.extraction is not None
+    repository.close()
+
+
+def test_field_correction_service_is_version_bound_and_can_add_missing_schema_field(tmp_path) -> None:
+    repository, record, run = _ready_run(tmp_path)
+    outcome = _service(repository).enrich(
+        _artifact(
+            record,
+            run,
+            [
+                "Field Warks LLC",
+                "Jordan Lee",
+                "jordan@example.test",
+                "555-123-4567",
+            ],
+        )
+    )
+    assert outcome.document_class == DocumentClass.BUSINESS_CARD
+    current_record = repository.get(record.document_id)
+    assert current_record is not None
+    corrections = DocumentFieldCorrectionService(repository)
+    fields = corrections.list_fields(record=current_record, user_id="operator")
+    organization = next(row for row in fields if row["field_name"] == "organization")
+
+    corrected = corrections.apply(
+        record=current_record,
+        user_id="operator",
+        source_version_id=str(current_record.source_version_id),
+        field_name="organization",
+        observation_id=str(organization["observation_id"]),
+        review_binding_hash=str(organization["review_binding_hash"]),
+        review_decision_id="review-decision-correct-company",
+        decision_kind="correct",
+        corrected_value="Field Works LLC",
+    )
+    fields_after_correction = corrections.list_fields(record=current_record, user_id="operator")
+
+    missing_title = corrections.apply(
+        record=current_record,
+        user_id="operator",
+        source_version_id=str(current_record.source_version_id),
+        field_name="job_title",
+        observation_id=None,
+        review_binding_hash=field_review_binding_hash(
+            document_id=record.document_id,
+            source_version_id=str(current_record.source_version_id),
+            field_name="job_title",
+            observation_id=None,
+            observation_item_hash=None,
+            review_decision_id=None,
+            effective_value=None,
+        ),
+        review_decision_id="review-decision-add-title",
+        decision_kind="correct",
+        corrected_value="Field Director",
+    )
+
+    effective = {
+        row["field_name"]: row
+        for row in corrections.list_fields(record=current_record, user_id="operator")
+    }
+    assert corrected["decision_kind"] == missing_title["decision_kind"] == "correct"
+    assert effective["organization"]["value"] == "Field Works LLC"
+    assert effective["organization"]["review_binding_hash"] != organization["review_binding_hash"]
+    assert effective["job_title"]["value"] == "Field Director"
+    assert effective["job_title"]["observation_id"] is None
+    assert effective["job_title"]["observation_state"] == "human_corrected"
+    assert any(row["field_name"] == "organization" for row in fields_after_correction)
     repository.close()
 
 

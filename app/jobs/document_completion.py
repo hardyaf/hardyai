@@ -41,28 +41,47 @@ class DurableDocumentCompletionEnqueuer:
         channel_id: str | int,
         user_id: str | int,
         message_id: str | int,
-        attachment_id: str | int,
+        attachment_id: str | int | None = None,
+        operation_id: str | None = None,
     ) -> dict[str, Any]:
         normalized_document_id = str(document_id or "").strip()
         if not normalized_document_id or len(normalized_document_id) > 128:
             raise ValueError("invalid document ID")
+        normalized_attachment_id = _numeric_id(
+            attachment_id,
+            label="Discord attachment ID",
+            optional=True,
+        )
+        normalized_operation_id = str(operation_id or "").strip()
+        if normalized_operation_id and (
+            len(normalized_operation_id) > 128
+            or any(ord(character) < 33 or ord(character) == 127 for character in normalized_operation_id)
+        ):
+            raise ValueError("invalid document operation ID")
+        if normalized_attachment_id is None and not normalized_operation_id:
+            raise ValueError("a Discord attachment or document operation ID is required")
         target = {
             "sink": "discord",
             "guild_id": _numeric_id(guild_id, label="Discord guild ID", optional=True),
             "channel_id": _numeric_id(channel_id, label="Discord channel ID"),
             "user_id": _numeric_id(user_id, label="Discord user ID"),
             "message_id": _numeric_id(message_id, label="Discord message ID"),
-            "attachment_id": _numeric_id(attachment_id, label="Discord attachment ID"),
         }
-        identity = ":".join(
-            (
-                str(target["guild_id"] or "dm"),
-                str(target["channel_id"]),
-                str(target["user_id"]),
-                str(target["message_id"]),
-                str(target["attachment_id"]),
-            )
-        )
+        if normalized_attachment_id is not None:
+            target["attachment_id"] = normalized_attachment_id
+        if normalized_operation_id:
+            target["operation_id"] = normalized_operation_id
+        identity_parts = [
+            str(target["guild_id"] or "dm"),
+            str(target["channel_id"]),
+            str(target["user_id"]),
+            str(target["message_id"]),
+        ]
+        if normalized_operation_id:
+            identity_parts.append(f"operation:{normalized_operation_id}")
+        else:
+            identity_parts.append(str(normalized_attachment_id))
+        identity = ":".join(identity_parts)
         digest = hashlib.sha256(identity.encode("ascii")).hexdigest()
         deadline = datetime.now(UTC) + timedelta(seconds=self.deadline_seconds)
         return self.repository.enqueue_job(

@@ -776,6 +776,28 @@ class DocumentRepository:
             ).fetchone()
         return dict(row) if row is not None else None
 
+    def latest_processing_run(
+        self,
+        *,
+        document_id: str,
+        source_version_id: str,
+        route: ProcessingRoute | str,
+    ) -> dict[str, Any] | None:
+        """Return the newest immutable run for one source and processing route."""
+
+        route_value = ProcessingRoute(route).value
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT * FROM document_processing_runs
+                WHERE document_id = ? AND source_version_id = ? AND route = ?
+                ORDER BY created_at DESC, run_id DESC
+                LIMIT 1
+                """,
+                (str(document_id), str(source_version_id), route_value),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
     def processing_run_blocks(self, run_id: str, *, limit: int = 2000) -> list[dict[str, Any]]:
         """Return bounded normalized evidence for internal fallback comparison only."""
 
@@ -1441,7 +1463,20 @@ class DocumentRepository:
             ).fetchone()
         if row is None:
             raise RuntimeError("field decision did not produce a row")
-        return dict(row)
+        persisted = dict(row)
+        if (
+            str(persisted.get("document_id")) != str(document_id)
+            or str(persisted.get("source_version_id")) != str(source_version_id)
+            or str(persisted.get("field_name")) != str(field_name)[:120]
+            or str(persisted.get("decision_kind")) != normalized_kind
+            or (
+                str(persisted.get("selected_observation_id") or "")
+                != str(selected_observation_id or "")
+            )
+            or str(persisted.get("applied_value_json") or "") != str(encoded or "")
+        ):
+            raise ValueError("field_decision_payload_changed")
+        return persisted
 
     def create_action_proposal(
         self,
@@ -2094,12 +2129,70 @@ class DocumentRepository:
                 """,
                 (document_id,),
             ).fetchall()
+            human_only_rows = self._conn.execute(
+                """
+                SELECT fd.*
+                FROM document_field_decisions AS fd
+                JOIN documents AS d ON d.document_id = fd.document_id
+                WHERE fd.document_id = ?
+                  AND fd.source_version_id = d.active_source_version_id
+                  AND fd.selected_observation_id IS NULL
+                  AND fd.applied_value_json IS NOT NULL
+                  AND fd.created_at = (
+                      SELECT MAX(fd2.created_at) FROM document_field_decisions AS fd2
+                      WHERE fd2.document_id = fd.document_id
+                        AND fd2.source_version_id = fd.source_version_id
+                        AND fd2.field_name = fd.field_name
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM document_field_observations AS o
+                      WHERE o.document_id = fd.document_id
+                        AND o.source_version_id = fd.source_version_id
+                        AND o.field_name = fd.field_name
+                  )
+                ORDER BY fd.field_name
+                """,
+                (document_id,),
+            ).fetchall()
+            document_row = self._conn.execute(
+                "SELECT active_source_version_id, selected_document_class FROM documents WHERE document_id = ?",
+                (document_id,),
+            ).fetchone()
         result = []
         for row in rows:
             value = dict(row)
             value["value"] = json.loads(str(value.pop("value_json")))
             value["evidence"] = json.loads(str(value.pop("evidence_json")))
             result.append(value)
+        if human_only_rows and document_row is not None and document_row["selected_document_class"]:
+            from app.skills.domains.documents.schemas import field_spec_for
+
+            document_class = DocumentClass(str(document_row["selected_document_class"]))
+            source_version_id = str(document_row["active_source_version_id"] or "")
+            for row in human_only_rows:
+                value = dict(row)
+                field_name = str(value["field_name"])
+                spec = field_spec_for(document_class, field_name)
+                item_hash = hashlib.sha256(
+                    f"{document_id}\0{source_version_id}\0{field_name}\0human-only".encode("utf-8")
+                ).hexdigest()
+                result.append(
+                    {
+                        "observation_id": None,
+                        "field_name": field_name,
+                        "value": json.loads(str(value["applied_value_json"])),
+                        "literal_text": "",
+                        "sensitivity": spec.sensitivity.value,
+                        "confidence": 1.0,
+                        "evidence": [],
+                        "observation_state": "human_corrected",
+                        "item_hash": item_hash,
+                        "created_at": str(value["created_at"]),
+                        "review_decision_id": str(value["review_decision_id"]),
+                        "decision_kind": str(value["decision_kind"]),
+                    }
+                )
+        result.sort(key=lambda item: str(item.get("field_name") or ""))
         return result
 
     def search_blocks(self, *, owner_id: str, query: str, limit: int = 20) -> list[dict[str, Any]]:

@@ -510,29 +510,13 @@ class RequestFlowCoordinator:
                     "target_owner": SessionOwner.MAIN.value,
                 },
             )
-        for contract in router._skill_context_contracts:
-            bind_hook = getattr(contract, "bind_request_decision", None)
-            if not callable(bind_hook):
-                continue
-            try:
-                bound = bind_hook(
-                    decision=decision,
-                    request_context=effective_payload.context,
-                    working_context=working_context_payload,
-                    text=effective_payload.text,
-                )
-            except Exception as exc:  # pragma: no cover - defensive contract isolation
-                router._event_log.record(
-                    event_type="context.contract.bind_request_decision.failed",
-                    session_id=session.session_id,
-                    payload={
-                        "contract_id": getattr(contract, "contract_id", "unknown"),
-                        "error": type(exc).__name__,
-                    },
-                )
-                continue
-            if isinstance(bound, MicroDecision):
-                decision = bound
+        decision = router._bind_request_decision(
+            session=session,
+            decision=decision,
+            request_context=effective_payload.context,
+            working_context=working_context_payload,
+            text=effective_payload.text,
+        )
         decision = router._resolve_followup_entities(session=session, decision=decision)
         decision = router._resolve_handoff_followup_entities(
             session=session,
@@ -699,16 +683,35 @@ class RequestFlowCoordinator:
                 session.touch()
                 router._session_store.save(session)
 
-        repair_response = router._attempt_main_repair(
-            payload=effective_payload,
-            session=session,
-            micro_decision=decision,
-            required_missing_fields=required_missing_fields,
-            working_context_payload=working_context_payload,
-            contextual_followup=contextual_followup if isinstance(contextual_followup, dict) else None,
+        unprefixed_discord_main_handoff = (
+            str(effective_payload.source or "").strip().casefold() == "discord"
+            and decision.recommended_owner == SessionOwner.MAIN
+            and "micro_bypassed_unprefixed_discord" in decision.ambiguity_flags
         )
-        if repair_response is not None:
-            return None, repair_response
+        if unprefixed_discord_main_handoff:
+            # The Discord envelope has already assigned this turn to Main. Let
+            # Main's typed commitment boundary make the one semantic decision;
+            # the legacy repair pass must not preempt it with a second model
+            # interpretation of the same context.
+            router._event_log.record(
+                event_type="pipeline.main_repair.bypassed",
+                session_id=session.session_id,
+                payload={
+                    "reason": "unprefixed_discord_main_commitment",
+                    "target_owner": SessionOwner.MAIN.value,
+                },
+            )
+        else:
+            repair_response = router._attempt_main_repair(
+                payload=effective_payload,
+                session=session,
+                micro_decision=decision,
+                required_missing_fields=required_missing_fields,
+                working_context_payload=working_context_payload,
+                contextual_followup=contextual_followup if isinstance(contextual_followup, dict) else None,
+            )
+            if repair_response is not None:
+                return None, repair_response
 
         routing_decision = router._agent_routing_policy.decide(
             intent=decision.intent,

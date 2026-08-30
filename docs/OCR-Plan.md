@@ -1,11 +1,17 @@
 # HardyAI Document Intelligence Implementation Plan
 
+## 2026-08-26 runtime-quality update
+
+- Asynchronous Discord OCR completions now project a bounded, content-free result anchor containing only document ID, document class, processing state, and available field names. The next turn can therefore relate feedback such as a wrong website to the presented business-card result without router phrase branches or OCR values in session context.
+- Model output budgets are platform-wide efficiency starting points rather than quality ceilings. Ollama lanes automatically grow a demonstrated exhausted budget through a bounded retry sequence, and PaddleOCR-VL starts at its bounded 4,096-token quality ceiling until that provider exposes reliable exhaustion metadata.
+- Compute escalation metrics are durable, visible on the operator status projection, and eligible for delivery to one protected private Discord channel. See `docs/adaptive-model-compute.md`.
+
 Status: Phases 1-9 and 11 are implemented and deployed; the Phase 10 fail-closed boundary is deployed,
 but restricted exact-value processing remains disabled pending its independent security prerequisites
 
 Prepared: 2026-08-24
 
-Updated: 2026-08-25
+Updated: 2026-08-26
 
 Requirements: `docs/OCR-Req.md`
 Repository baseline: HardyAI commit `0ab682d77256989772b07a432ce7c24698f82678`
@@ -24,6 +30,11 @@ store, extractor, or exact-value data plane is present. See
 restore/rollback evidence, and remaining boundaries. Office parsing, PP-Structure, restricted exact-field
 extraction, contact writes without a selected authority, fact-memory writes without a canonical service,
 and unreviewed downstream actions remain disabled.
+
+The business-card review presentation now also exposes Main-owned `documents.correct_field` and
+`documents.confirm_fields` actions for an authorized recent Discord attachment. These actions reuse the
+shared review authority and write version-bound corrected values only to the Documents database; they do
+not create or update a contact.
 
 ## Executive decision
 
@@ -210,7 +221,10 @@ The Markdown contract should expose intention-oriented operations, not provider 
 | `documents.search_text` | Search within one authorized document without loading all content into context. |
 | `documents.extract_fields` | Queue/retrieve schema-bound extraction; never execute derived actions. |
 | `documents.reprocess` | Queue an append-only run for a named policy/model version. |
+| `documents.escalate_ocr` | Route explicit negative feedback about a scoped image to the local review-only GPU fallback and post its terminal result back to the originating channel. |
 | `documents.propose_metadata` | Create a reviewable Paperless metadata proposal. |
+| `documents.correct_field` | Correct one allowlisted, version-bound field; the corrected value remains in the Documents authority. |
+| `documents.confirm_fields` | Confirm the current extracted fields without converting a correction into a machine value. |
 | `documents.list_review` / `documents.get_low_confidence` | Show authorized review work without exposing unrelated content. |
 | `documents.propose_tasks` | Create proposals only; approved execution uses the existing Lists/future Task authority. |
 | `documents.propose_memories` | Create proposals only; unavailable until canonical fact memory exists. |
@@ -1726,6 +1740,21 @@ Every initial task and memory promotion, all ambiguous dates/assignees, all sens
 **Implementation status (2026-08-25): deployed and capability-gated.** Provider-neutral people/contact
 ports, matching, comparisons, and provenance-aware proposals are present. ADR-002 records that no canonical
 write authority is selected, so production reports `capability_unavailable` and stores no parallel contacts.
+
+**Review-presentation correction (2026-08-26): deployed and verified.** An authorized
+uploader can receive a bounded, explicitly unverified preview of allowlisted business-card fields when a
+fallback result is held in `needs_review`. Raw OCR evidence remains behind the review gate, and the preview
+cannot create or update a contact. Deterministic extractor version 2 adds conservative organization and job
+title recognition while retaining field-level confidence and shared-review handling. See
+`docs/OCR-Business-Card-Review-Fix.md`.
+
+**Negative-feedback GPU escalation (2026-08-26): deployed and verified.** When the
+authorized uploader says a recent image was read incorrectly or incompletely, Main may select the typed
+`documents.escalate_ocr` intent. The Documents authority appends a linked `vlm_fallback` run on the shared
+GPU lane, and the existing durable Discord completion job waits for that exact run before posting the
+review-only result to the originating channel. Exact user corrections still use
+`documents.correct_field`. This is inference escalation, not model training, and neither the CPU nor GPU
+result is silently promoted. See `docs/OCR-Feedback-GPU-Escalation.md`.
 
 **Objective**
 

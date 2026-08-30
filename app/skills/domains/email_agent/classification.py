@@ -8,7 +8,14 @@ from typing import Any, Protocol
 import httpx
 
 from app.accelerator.client import accelerator_request_headers
-from app.core.ollama_observability import OllamaCallObserver, OllamaMetricsCallback
+from app.core.ollama_observability import (
+    AdaptiveTokenBudgetPolicy,
+    OllamaCallObserver,
+    OllamaMetricsCallback,
+    OllamaThinkMode,
+    apply_ollama_think_mode,
+    normalize_ollama_think_mode,
+)
 from app.services.google.gmail_mime import ParsedGmailMessage
 from app.skills.domains.email_agent.config import (
     EmailAgentPermissions,
@@ -45,19 +52,23 @@ class OllamaEmailModelClassifier:
         base_url: str,
         model: str,
         timeout_seconds: float = 30.0,
-        num_ctx: int = 12288,
+        num_ctx: int = 32768,
         num_predict: int = 256,
+        think: OllamaThinkMode = None,
         metrics_callback: OllamaMetricsCallback | None = None,
+        adaptive_policy: AdaptiveTokenBudgetPolicy | None = None,
     ) -> None:
         self._base_url = str(base_url or "").rstrip("/")
         self._model = str(model or "").strip()
         self._timeout = max(1.0, min(float(timeout_seconds), 120.0))
+        self._think = normalize_ollama_think_mode(think)
         self._observer = OllamaCallObserver(
             lane="email_classifier",
             model=self._model,
             num_ctx=num_ctx,
             num_predict=num_predict,
             metrics_callback=metrics_callback,
+            adaptive_policy=adaptive_policy,
         )
 
     def classify(
@@ -88,31 +99,50 @@ class OllamaEmailModelClassifier:
             f"{json.dumps(evidence, ensure_ascii=True)}\n"
             "--- UNTRUSTED_EMAIL_END ---\n"
         )
-        try:
+
+        def invoke(options: dict[str, Any]) -> dict[str, Any]:
+            request_payload: dict[str, Any] = {
+                "model": self._model,
+                "prompt": prompt,
+                "stream": False,
+                "format": "json",
+                "options": options,
+            }
+            apply_ollama_think_mode(request_payload, self._think)
             response = httpx.post(
                 f"{self._base_url}/api/generate",
                 headers=accelerator_request_headers("email_classifier"),
-                json={
-                    "model": self._model,
-                    "prompt": prompt,
-                    "stream": False,
-                    "format": "json",
-                    "options": self._observer.options(temperature=0.0),
-                },
+                json=request_payload,
                 timeout=self._timeout,
             )
             response.raise_for_status()
-            response_payload = response.json()
+            value = response.json()
+            return value if isinstance(value, dict) else {}
+
+        def is_valid(value: dict[str, Any]) -> bool:
+            try:
+                parsed_value = json.loads(str(value.get("response") or ""))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return False
+            return isinstance(parsed_value, dict)
+
+        try:
+            response_payload = self._observer.generate(
+                prompt=prompt,
+                temperature=0.0,
+                invoke=invoke,
+                is_valid_response=is_valid,
+            )
             raw = str(response_payload.get("response") or "")
             parsed = json.loads(raw)
-        except Exception as exc:
-            self._observer.record(prompt=prompt, outcome="error", error_type=type(exc).__name__)
+        except Exception:
             return None
-        self._observer.record(prompt=prompt, response_payload=response_payload, outcome="success")
         return parsed if isinstance(parsed, dict) else None
 
     def status(self) -> dict[str, Any]:
-        return self._observer.status()
+        status = self._observer.status()
+        status["thinking_mode"] = self._think
+        return status
 
 
 class EmailClassifier:

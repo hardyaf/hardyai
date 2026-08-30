@@ -39,10 +39,23 @@ post-classification on-demand loading because intent selection itself needs the 
 bounded to the projected skills and 64 candidate intents; restricted skills are not loaded as action
 candidates.
 
+An unprefixed Discord turn enters this commitment boundary directly after the deterministic Micro
+bypass. The legacy action-repair pass must not answer or terminate that turn first. This preserves one
+semantic owner for relating the current message to recent turns and trusted entity context, including
+a recent document attachment. Explicit Micro commands that fail classification may still use the
+Micro-to-Main repair handoff before this boundary.
+
 The decision prompt requires a scope/cardinality audit before choosing among similar intents. Main
 must compare semantic purposes, reject a lexical intent-name match that narrows or broadens the user's
 request, and ask only for fields that preserve the requested operation. This is a general reasoning
 rule, not an email phrase map.
+
+Evaluative feedback about a presented result follows the same semantic rule: an inaccurate, incomplete,
+or defective result selects an eligible repair, reprocess, or escalation contract. Acceptance and
+confirmation contracts are reserved for endorsement or an explicit verification-only request.
+When the affected field is known but no replacement value was supplied, Main uses an eligible
+reprocess/escalation contract instead of asking the user to perform a manual correction; correction
+clarification is reserved for a user who supplies or explicitly chooses to provide the replacement.
 
 ## Bound clarification lifecycle
 
@@ -73,3 +86,6 @@ The production Ollama conversation backend implements the typed decision method.
 GPT-OSS is prompted to return JSON and its output is parsed and normalized by Jarvis. Do not set
 Ollama's transport-level `format: json` option for this model: the deployed GPT-OSS/Ollama combination
 returns an empty response with that option even though it follows the same JSON instruction normally.
+The production decision budget is 2,048 output tokens. GPT-OSS may consume a substantial portion of
+that budget as internal reasoning before emitting the typed JSON; a `done_reason=length` response with
+an empty visible body is an exhausted decision budget, not a conversational decision.

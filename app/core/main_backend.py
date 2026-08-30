@@ -8,7 +8,14 @@ from typing import Any, TYPE_CHECKING
 import httpx
 
 from app.accelerator.client import accelerator_request_headers
-from app.core.ollama_observability import OllamaCallObserver, OllamaMetricsCallback
+from app.core.ollama_observability import (
+    AdaptiveTokenBudgetPolicy,
+    OllamaCallObserver,
+    OllamaMetricsCallback,
+    OllamaThinkMode,
+    apply_ollama_think_mode,
+    normalize_ollama_think_mode,
+)
 from app.core.types import MAIN_ACTION_INTENTS
 
 if TYPE_CHECKING:
@@ -321,21 +328,25 @@ class OllamaMainRepairBackend:
         keep_alive_seconds: float | None = None,
         prompt_profile_dir: str | None = None,
         skill_registry: "SkillRegistryService | None" = None,
-        num_ctx: int = 12288,
+        num_ctx: int = 32768,
         num_predict: int = 512,
+        think: OllamaThinkMode = None,
         metrics_callback: OllamaMetricsCallback | None = None,
+        adaptive_policy: AdaptiveTokenBudgetPolicy | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._timeout = timeout_seconds
         self._keep_alive_seconds = keep_alive_seconds
         self._skill_registry = skill_registry
+        self._think = normalize_ollama_think_mode(think)
         self._observer = OllamaCallObserver(
             lane="main_repair",
             model=model,
             num_ctx=num_ctx,
             num_predict=num_predict,
             metrics_callback=metrics_callback,
+            adaptive_policy=adaptive_policy,
         )
         base_dir = (
             Path(prompt_profile_dir).expanduser()
@@ -350,16 +361,18 @@ class OllamaMainRepairBackend:
 
     def repair_action(self, text: str, context: dict[str, Any] | None = None) -> dict[str, Any] | None:
         prompt = self._build_prompt(text=text, context=context or {})
-        request_payload: dict[str, Any] = {
-            "model": self._model,
-            "prompt": prompt,
-            "stream": False,
-            "options": self._observer.options(temperature=0.0),
-        }
         keep_alive = self._keep_alive_value()
-        if keep_alive is not None:
-            request_payload["keep_alive"] = keep_alive
-        try:
+
+        def invoke(options: dict[str, Any]) -> dict[str, Any]:
+            request_payload: dict[str, Any] = {
+                "model": self._model,
+                "prompt": prompt,
+                "stream": False,
+                "options": options,
+            }
+            apply_ollama_think_mode(request_payload, self._think)
+            if keep_alive is not None:
+                request_payload["keep_alive"] = keep_alive
             response = httpx.post(
                 f"{self._base_url}/api/generate",
                 headers=accelerator_request_headers("main_repair"),
@@ -367,17 +380,28 @@ class OllamaMainRepairBackend:
                 timeout=self._timeout,
             )
             response.raise_for_status()
-            data = response.json()
-        except Exception as exc:
-            self._observer.record(prompt=prompt, outcome="error", error_type=type(exc).__name__)
-            return None
+            value = response.json()
+            return value if isinstance(value, dict) else {}
 
-        self._observer.record(prompt=prompt, response_payload=data, outcome="success")
+        try:
+            data = self._observer.generate(
+                prompt=prompt,
+                temperature=0.0,
+                invoke=invoke,
+                is_valid_response=lambda value: _extract_first_json_object(
+                    str(value.get("response") or "")
+                )
+                is not None,
+            )
+        except Exception:
+            return None
         raw_text = str(data.get("response") or "")
         return _extract_first_json_object(raw_text)
 
     def status(self) -> dict[str, Any]:
-        return self._observer.status()
+        status = self._observer.status()
+        status["thinking_mode"] = self._think
+        return status
 
     def _keep_alive_value(self) -> str | None:
         if self._keep_alive_seconds is None:
@@ -623,21 +647,27 @@ class OllamaMainConversationBackend:
         keep_alive_seconds: float | None = None,
         prompt_profile_dir: str | None = None,
         skill_registry: "SkillRegistryService | None" = None,
-        num_ctx: int = 12288,
+        num_ctx: int = 32768,
         num_predict: int = 1024,
+        think: OllamaThinkMode = None,
+        turn_decision_think: OllamaThinkMode = None,
         metrics_callback: OllamaMetricsCallback | None = None,
+        adaptive_policy: AdaptiveTokenBudgetPolicy | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._timeout = timeout_seconds
         self._keep_alive_seconds = keep_alive_seconds
         self._skill_registry = skill_registry
+        self._think = normalize_ollama_think_mode(think)
+        self._turn_decision_think = normalize_ollama_think_mode(turn_decision_think)
         self._observer = OllamaCallObserver(
             lane="main_conversation",
             model=model,
             num_ctx=num_ctx,
             num_predict=num_predict,
             metrics_callback=metrics_callback,
+            adaptive_policy=adaptive_policy,
         )
         base_dir = (
             Path(prompt_profile_dir).expanduser()
@@ -652,16 +682,18 @@ class OllamaMainConversationBackend:
 
     def respond(self, text: str, context: dict[str, Any] | None = None) -> str | None:
         prompt = self._build_prompt(text=text, context=context or {})
-        request_payload: dict[str, Any] = {
-            "model": self._model,
-            "prompt": prompt,
-            "stream": False,
-            "options": self._observer.options(temperature=0.3),
-        }
         keep_alive = self._keep_alive_value()
-        if keep_alive is not None:
-            request_payload["keep_alive"] = keep_alive
-        try:
+
+        def invoke(options: dict[str, Any]) -> dict[str, Any]:
+            request_payload: dict[str, Any] = {
+                "model": self._model,
+                "prompt": prompt,
+                "stream": False,
+                "options": options,
+            }
+            apply_ollama_think_mode(request_payload, self._think)
+            if keep_alive is not None:
+                request_payload["keep_alive"] = keep_alive
             response = httpx.post(
                 f"{self._base_url}/api/generate",
                 headers=accelerator_request_headers("main_conversation"),
@@ -669,12 +701,20 @@ class OllamaMainConversationBackend:
                 timeout=self._timeout,
             )
             response.raise_for_status()
-            data = response.json()
-        except Exception as exc:
-            self._observer.record(prompt=prompt, outcome="error", error_type=type(exc).__name__)
-            return None
+            value = response.json()
+            return value if isinstance(value, dict) else {}
 
-        self._observer.record(prompt=prompt, response_payload=data, outcome="success")
+        try:
+            data = self._observer.generate(
+                prompt=prompt,
+                temperature=0.3,
+                invoke=invoke,
+                is_valid_response=lambda value: bool(
+                    self._clean_response(str(value.get("response") or ""))
+                ),
+            )
+        except Exception:
+            return None
         raw_text = str(data.get("response") or "")
         cleaned = self._clean_response(raw_text)
         return cleaned or None
@@ -683,16 +723,18 @@ class OllamaMainConversationBackend:
         """Return a typed commitment before Jarvis speaks or executes."""
 
         prompt = self._build_turn_decision_prompt(text=text, context=context or {})
-        request_payload: dict[str, Any] = {
-            "model": self._model,
-            "prompt": prompt,
-            "stream": False,
-            "options": self._observer.options(temperature=0.0),
-        }
         keep_alive = self._keep_alive_value()
-        if keep_alive is not None:
-            request_payload["keep_alive"] = keep_alive
-        try:
+
+        def invoke(options: dict[str, Any]) -> dict[str, Any]:
+            request_payload: dict[str, Any] = {
+                "model": self._model,
+                "prompt": prompt,
+                "stream": False,
+                "options": options,
+            }
+            apply_ollama_think_mode(request_payload, self._turn_decision_think)
+            if keep_alive is not None:
+                request_payload["keep_alive"] = keep_alive
             response = httpx.post(
                 f"{self._base_url}/api/generate",
                 headers=accelerator_request_headers("main_conversation"),
@@ -700,17 +742,31 @@ class OllamaMainConversationBackend:
                 timeout=self._timeout,
             )
             response.raise_for_status()
-            data = response.json()
-        except Exception as exc:
-            self._observer.record(prompt=prompt, outcome="error", error_type=type(exc).__name__)
-            return None
+            value = response.json()
+            return value if isinstance(value, dict) else {}
 
-        self._observer.record(prompt=prompt, response_payload=data, outcome="success")
+        try:
+            data = self._observer.generate(
+                prompt=prompt,
+                temperature=0.0,
+                invoke=invoke,
+                is_valid_response=lambda value: _extract_first_json_object(
+                    str(value.get("response") or "")
+                )
+                is not None,
+            )
+        except Exception:
+            return None
         raw_text = str(data.get("response") or "")
         return _extract_first_json_object(raw_text)
 
     def status(self) -> dict[str, Any]:
-        return self._observer.status()
+        status = self._observer.status()
+        status["thinking_mode"] = {
+            "conversation": self._think,
+            "turn_decision": self._turn_decision_think,
+        }
+        return status
 
     def _keep_alive_value(self) -> str | None:
         if self._keep_alive_seconds is None:
@@ -941,6 +997,11 @@ class OllamaMainConversationBackend:
             "- Choose execute_action when the request is actionable now. Put every available detail in entities.\n"
             "- Choose clarify_action when an action is understood but a user choice or required detail is missing. Bind the question to the intended action with partial entities and explicit missing_fields.\n"
             "- A short follow-up can complete an action established by recent turns or pending context; use that context instead of treating it as unrelated chat.\n"
+            "- Mandatory context-link audit before choosing a mode: resolve references, omitted subjects, and evaluated attributes against every trusted active entity; then compare the request with every eligible contract for that entity's domain.\n"
+            "- If an active entity makes the request a plausible workflow continuation, do not invent an unrelated topic. Select the matching action, or use clarify_action when the intended operation or a required detail remains genuinely unresolved.\n"
+            "- Feedback about information already presented for an active entity is a continuation of that entity's workflow; do not require the user to repeat the object name.\n"
+            "- Evaluative feedback that says a presented result is inaccurate, incomplete, or otherwise defective requests a repair, reprocess, or escalation contract when one is eligible. Do not select an accept, confirm, or verification contract unless the user is endorsing the current result or explicitly asking only to verify it.\n"
+            "- Do not turn defect feedback into a manual-correction clarification merely because the affected field can be identified. When no replacement value was supplied and an eligible reprocess or escalation contract can investigate the defect, select that contract; use manual correction only when the user supplies a replacement or explicitly chooses to provide one.\n"
             "- Mentioning a capability or describing a past situation is not by itself an action request.\n"
             "- Read-only actions may execute without confirmation. Mutating actions must still be explicit and obey their skill policy.\n"
             "- An action intent is eligible only when it appears in a runtime catalog entry's main_intents and that entry has configured=true and authorized_here=true.\n"

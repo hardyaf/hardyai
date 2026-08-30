@@ -13,6 +13,10 @@ def test_compose_makes_admission_the_only_ollama_network_peer() -> None:
     assert "ACCELERATOR_ADMISSION_REQUIRED: \"true\"" in compose
     assert "ACCELERATOR_OLLAMA_EVICTABLE_MODELS" in compose
     assert "ACCELERATOR_OLLAMA_PROTECTED_MODELS" in compose
+    assert "ACCELERATOR_OLLAMA_CANDIDATE_MODELS" in compose
+    assert 'OLLAMA_NO_CLOUD: "1"' in compose
+    assert 'device_ids: ["${JARVIS_OLLAMA_GPU_DEVICE_ID:-0}"]' in compose
+    assert 'device_ids: ["${PADDLEOCR_VL_GPU_DEVICE_ID:-0}"]' in compose
 
 
 def test_every_production_ollama_caller_attaches_accelerator_headers() -> None:

@@ -8,7 +8,11 @@ import httpx
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from app.accelerator.client import accelerator_request_headers
-from app.core.ollama_observability import OllamaCallObserver, OllamaMetricsCallback
+from app.core.ollama_observability import (
+    AdaptiveTokenBudgetPolicy,
+    OllamaCallObserver,
+    OllamaMetricsCallback,
+)
 from app.core.types import Intent
 
 if TYPE_CHECKING:
@@ -86,6 +90,7 @@ class OllamaMicroInferenceBackend:
         num_ctx: int = 4096,
         num_predict: int = 256,
         metrics_callback: OllamaMetricsCallback | None = None,
+        adaptive_policy: AdaptiveTokenBudgetPolicy | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._model = model
@@ -97,11 +102,13 @@ class OllamaMicroInferenceBackend:
             num_ctx=num_ctx,
             num_predict=num_predict,
             metrics_callback=metrics_callback,
+            adaptive_policy=adaptive_policy,
         )
 
     def classify(self, text: str, context: dict[str, Any] | None = None) -> dict[str, Any] | None:
         prompt = self._build_prompt(text=text, context=context or {})
-        try:
+
+        def invoke(options: dict[str, Any]) -> dict[str, Any]:
             response = httpx.post(
                 f"{self._base_url}/api/generate",
                 headers=accelerator_request_headers("micro"),
@@ -109,17 +116,27 @@ class OllamaMicroInferenceBackend:
                     "model": self._model,
                     "prompt": prompt,
                     "stream": False,
-                    "options": self._observer.options(temperature=0.0),
+                    "options": options,
                 },
                 timeout=self._timeout,
             )
             response.raise_for_status()
-            data = response.json()
-        except Exception as exc:
-            self._observer.record(prompt=prompt, outcome="error", error_type=type(exc).__name__)
-            return None
+            value = response.json()
+            return value if isinstance(value, dict) else {}
 
-        self._observer.record(prompt=prompt, response_payload=data, outcome="success")
+        def is_valid(value: dict[str, Any]) -> bool:
+            loaded = _extract_first_json_object(str(value.get("response") or ""))
+            return parse_backend_payload(loaded) is not None
+
+        try:
+            data = self._observer.generate(
+                prompt=prompt,
+                temperature=0.0,
+                invoke=invoke,
+                is_valid_response=is_valid,
+            )
+        except Exception:
+            return None
         raw_text = str(data.get("response") or "")
         loaded = _extract_first_json_object(raw_text)
         return parse_backend_payload(loaded)

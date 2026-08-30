@@ -20,10 +20,27 @@ from app.integrations.discord_attachment.types import DiscordAttachmentReceipt
 
 
 class DocumentsStub:
-    def __init__(self, *, processing_state: str, message: str = "OCR finished.") -> None:
+    def __init__(
+        self,
+        *,
+        processing_state: str,
+        message: str = "OCR finished.",
+        run_state: str | None = None,
+        document_class: str | None = None,
+        structured_fields: list[dict] | None = None,
+    ) -> None:
         self.processing_state = processing_state
         self.message = message
+        self.run_state = run_state
+        self.document_class = document_class
+        self.structured_fields = structured_fields
         self.contexts: list[dict] = []
+
+    def processing_run_status(self, *, document_id, run_id, context):
+        self.contexts.append(dict(context))
+        assert document_id == "doc-1"
+        assert run_id == "run-gpu-1"
+        return {"document_id": document_id, "run_id": run_id, "status": self.run_state}
 
     def execute(self, *, intent, entities, context):
         self.contexts.append(dict(context))
@@ -36,7 +53,9 @@ class DocumentsStub:
                 "document_id": "doc-1",
                 "state": "ready",
                 "processing_state": self.processing_state,
+                "document_class": self.document_class,
             },
+            "structured_fields": self.structured_fields,
         }
 
 
@@ -94,6 +113,88 @@ def test_registration_is_idempotent_and_content_free(tmp_path) -> None:
     assert "OCR finished" not in serialized
     assert "receipt.png" not in serialized
     repository.close()
+
+
+def test_operation_completion_waits_for_exact_gpu_run_even_if_document_was_already_complete(
+    tmp_path,
+) -> None:
+    repository = DurableJobRepository(str(tmp_path / "core.db"))
+    enqueuer = DurableDocumentCompletionEnqueuer(repository)
+    enqueuer.register_discord(
+        document_id="doc-1",
+        guild_id="100",
+        channel_id="200",
+        user_id="300",
+        message_id="401",
+        operation_id="run-gpu-1",
+    )
+    documents = DocumentsStub(processing_state="complete", run_state="processing")
+    service = DocumentCompletionNotificationService(
+        repository=repository,
+        documents=documents,
+        worker_id="notify-gpu",
+    )
+
+    job = service.claim()[0]
+    assert service.prepare(job).disposition == "waiting"
+    documents.run_state = "needs_review"
+    assert service.prepare(job).disposition == "ready"
+    payload = repository.get_job(str(job["job_id"]))["payload"]
+    assert payload["operation_id"] == "run-gpu-1"
+    assert "attachment_id" not in payload
+    assert "OCR finished" not in str(payload)
+    repository.close()
+
+
+def test_discord_adapter_registers_followup_from_escalation_receipt(tmp_path) -> None:
+    class NotificationsStub:
+        def __init__(self) -> None:
+            self.registrations = []
+
+        def register_discord(self, **kwargs):
+            self.registrations.append(kwargs)
+            return {"job_id": "notification-gpu", "status": "pending"}
+
+    notifications = NotificationsStub()
+    bot = DiscordJarvisBot(
+        command_prefix="!",
+        permissions_path=str(_permissions(tmp_path)),
+        document_completion_notifications=notifications,
+    )
+    message = SimpleNamespace(
+        id=401,
+        author=SimpleNamespace(id=300),
+        guild=SimpleNamespace(id=100),
+        channel=SimpleNamespace(id=200),
+    )
+    registered = asyncio.run(
+        bot._register_result_document_followup(
+            message=message,
+            payload={
+                "result": {
+                    "status": "queued",
+                    "async_followup": {
+                        "kind": "document_processing",
+                        "document_id": "doc-1",
+                        "operation_id": "run-gpu-1",
+                    },
+                }
+            },
+            allowed_document_ids=["doc-1"],
+        )
+    )
+
+    assert registered is True
+    assert notifications.registrations == [
+        {
+            "document_id": "doc-1",
+            "guild_id": "100",
+            "channel_id": "200",
+            "user_id": "300",
+            "message_id": "401",
+            "operation_id": "run-gpu-1",
+        }
+    ]
 
 
 def test_waiting_notification_defers_without_consuming_attempt_and_terminal_signal_wakes_it(
@@ -163,6 +264,38 @@ def test_terminal_presentation_records_delivery_before_completion_and_survives_r
     assert restarted.prepare(reclaimed).disposition == "already_delivered"
     assert restarted.complete(reclaimed) is True
     assert repository.get_job(str(job["job_id"]))["status"] == "completed"
+    repository.close()
+
+
+def test_terminal_presentation_projects_content_free_result_context(tmp_path) -> None:
+    repository = DurableJobRepository(str(tmp_path / "core.db"))
+    _register(DurableDocumentCompletionEnqueuer(repository))
+    documents = DocumentsStub(
+        processing_state="needs_review",
+        message="Website: incorrect.example and secret value",
+        document_class="business_card",
+        structured_fields=[
+            {"field_name": "website", "value": "incorrect.example"},
+            {"field_name": "email", "value": "private@example.com"},
+        ],
+    )
+    service = DocumentCompletionNotificationService(
+        repository=repository,
+        documents=documents,
+        worker_id="notify-context",
+    )
+
+    prepared = service.prepare(service.claim()[0])
+
+    assert prepared.context_anchor == {
+        "schema_version": 1,
+        "document_id": "doc-1",
+        "document_class": "business_card",
+        "processing_state": "needs_review",
+        "field_names": ["website", "email"],
+    }
+    assert "incorrect.example" not in repr(prepared.context_anchor)
+    assert "private@example.com" not in repr(prepared.context_anchor)
     repository.close()
 
 
@@ -301,3 +434,46 @@ def test_core_bot_dead_letters_if_response_channel_permission_was_removed(
     assert job["status"] == "dead_letter"
     assert job["last_error_code"] == "discord_document_response_not_authorized"
     repository.close()
+
+
+def test_discord_result_context_is_scoped_to_same_channel_and_user(tmp_path) -> None:
+    bot = DiscordJarvisBot(
+        command_prefix="!",
+        permissions_path=str(_permissions(tmp_path)),
+    )
+    target = {
+        "guild_id": "100",
+        "channel_id": "200",
+        "user_id": "300",
+        "document_id": "doc-1",
+    }
+    matching = SimpleNamespace(
+        guild=SimpleNamespace(id=100),
+        channel=SimpleNamespace(id=200),
+        author=SimpleNamespace(id=300),
+    )
+    different_user = SimpleNamespace(
+        guild=SimpleNamespace(id=100),
+        channel=SimpleNamespace(id=200),
+        author=SimpleNamespace(id=301),
+    )
+
+    async def scenario():
+        bot._remember_document_result_context(
+            target=target,
+            context_anchor={
+                "schema_version": 1,
+                "document_id": "doc-1",
+                "document_class": "business_card",
+                "processing_state": "needs_review",
+                "field_names": ["website"],
+            },
+        )
+        return (
+            bot._active_document_result_contexts(matching),
+            bot._active_document_result_contexts(different_user),
+        )
+
+    active, blocked = asyncio.run(scenario())
+    assert active[0]["field_names"] == ["website"]
+    assert blocked == []

@@ -20,9 +20,10 @@ and skill-scope authorization still runs independently.
 
 ## Main handoff behavior
 
-Unprefixed Discord input becomes a synthetic `unknown` decision owned by Main. Main may answer it as
-conversation, repair it into one allowlisted action, or produce a typed bounded plan. The synthetic
-decision intentionally cannot execute a tool directly.
+Unprefixed Discord input becomes a synthetic `unknown` decision owned by Main. It proceeds directly to
+Main's typed turn-commitment inference, which may answer as conversation, clarify one allowlisted
+action, execute one allowlisted action, or produce a typed bounded plan. The legacy action-repair pass
+does not preempt this lane. The synthetic decision intentionally cannot execute a tool directly.
 
 An explicit bang command that Micro cannot resolve follows the normal Micro -> Main failure handoff.
 The handoff includes intent, confidence, entities, ambiguity flags, required missing fields, agent

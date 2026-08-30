@@ -7,7 +7,14 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.accelerator.client import accelerator_request_headers
-from app.core.ollama_observability import OllamaCallObserver, OllamaMetricsCallback
+from app.core.ollama_observability import (
+    AdaptiveTokenBudgetPolicy,
+    OllamaCallObserver,
+    OllamaMetricsCallback,
+    OllamaThinkMode,
+    apply_ollama_think_mode,
+    normalize_ollama_think_mode,
+)
 from app.tickets.types import ReviewDecision, ReviewRepair, ReviewVerdict
 
 
@@ -81,19 +88,23 @@ class OllamaTicketReviewBackend:
         base_url: str,
         model: str,
         timeout_seconds: float,
-        num_ctx: int = 12288,
+        num_ctx: int = 32768,
         num_predict: int = 1024,
+        think: OllamaThinkMode = None,
         metrics_callback: OllamaMetricsCallback | None = None,
+        adaptive_policy: AdaptiveTokenBudgetPolicy | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self.model_name = model.strip()
         self._timeout_seconds = max(1.0, float(timeout_seconds))
+        self._think = normalize_ollama_think_mode(think)
         self._observer = OllamaCallObserver(
             lane="action_ticket_review",
             model=self.model_name,
             num_ctx=num_ctx,
             num_predict=num_predict,
             metrics_callback=metrics_callback,
+            adaptive_policy=adaptive_policy,
         )
 
     @staticmethod
@@ -113,25 +124,45 @@ class OllamaTicketReviewBackend:
 
     def review(self, context_pack: dict[str, Any]) -> ReviewDecision:
         prompt = self._prompt(context_pack)
-        try:
+
+        def invoke(options: dict[str, Any]) -> dict[str, Any]:
+            request_payload: dict[str, Any] = {
+                "model": self.model_name,
+                "prompt": prompt,
+                "stream": False,
+                "format": "json",
+                "options": options,
+            }
+            apply_ollama_think_mode(request_payload, self._think)
             response = httpx.post(
                 f"{self._base_url}/api/generate",
                 headers=accelerator_request_headers("action_ticket_review"),
-                json={
-                    "model": self.model_name,
-                    "prompt": prompt,
-                    "stream": False,
-                    "format": "json",
-                    "options": self._observer.options(temperature=0.0),
-                },
+                json=request_payload,
                 timeout=self._timeout_seconds,
             )
             response.raise_for_status()
-            payload = response.json()
-        except Exception as exc:
-            self._observer.record(prompt=prompt, outcome="error", error_type=type(exc).__name__)
+            value = response.json()
+            return value if isinstance(value, dict) else {}
+
+        def is_valid(value: dict[str, Any]) -> bool:
+            raw_value = value.get("response")
+            if not isinstance(raw_value, str) or not raw_value.strip():
+                return False
+            try:
+                _ReviewOutputModel.model_validate_json(raw_value)
+            except Exception:
+                return False
+            return True
+
+        try:
+            payload = self._observer.generate(
+                prompt=prompt,
+                temperature=0.0,
+                invoke=invoke,
+                is_valid_response=is_valid,
+            )
+        except Exception:
             raise
-        self._observer.record(prompt=prompt, response_payload=payload, outcome="success")
         raw = payload.get("response")
         if not isinstance(raw, str) or not raw.strip():
             raise ValueError("Review model returned no JSON response.")
@@ -153,4 +184,6 @@ class OllamaTicketReviewBackend:
         )
 
     def status(self) -> dict[str, Any]:
-        return self._observer.status()
+        status = self._observer.status()
+        status["thinking_mode"] = self._think
+        return status

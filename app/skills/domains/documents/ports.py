@@ -190,6 +190,19 @@ class DocumentQueryPort(Protocol):
 
     def fields(self, *, document_id: str) -> dict[str, Any]: ...
 
+    def apply_field_decision(
+        self,
+        *,
+        document_id: str,
+        source_version_id: str,
+        field_name: str,
+        observation_id: str | None,
+        review_binding_hash: str,
+        review_decision_id: str,
+        decision_kind: str,
+        corrected_value: str | None = None,
+    ) -> dict[str, Any]: ...
+
     def classifications(self, *, document_id: str) -> dict[str, Any]: ...
 
     def action_proposal(self, *, proposal_id: str) -> dict[str, Any]: ...
@@ -203,7 +216,15 @@ class DocumentQueryPort(Protocol):
         target_item_ref: str,
     ) -> dict[str, Any]: ...
 
-    def reprocess(self, *, document_id: str, idempotency_key: str) -> dict[str, Any]: ...
+    def reprocess(
+        self,
+        *,
+        document_id: str,
+        idempotency_key: str,
+        processing_tier: str = "default",
+    ) -> dict[str, Any]: ...
+
+    def processing_run(self, *, document_id: str, run_id: str) -> dict[str, Any]: ...
 
     def propose_metadata(
         self,

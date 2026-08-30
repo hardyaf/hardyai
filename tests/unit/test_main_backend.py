@@ -277,6 +277,13 @@ def test_main_turn_decision_prompt_enforces_action_commitment_boundary():
     assert "the router will execute only a valid action envelope" in prompt
     assert "Never put a promise" in prompt
     assert "A short follow-up can complete an action" in prompt
+    assert "Mandatory context-link audit" in prompt
+    assert "compare the request with every eligible contract for that entity's domain" in prompt
+    assert "Feedback about information already presented for an active entity" in prompt
+    assert "Evaluative feedback that says a presented result is inaccurate" in prompt
+    assert "Do not select an accept, confirm, or verification contract" in prompt
+    assert "Do not turn defect feedback into a manual-correction clarification" in prompt
+    assert "When no replacement value was supplied" in prompt
     assert '"main_intents":["email.list_recent"]' in prompt
     assert "List or summarize a collection of recent messages" in prompt
     assert "do not invent field names" in prompt
@@ -342,6 +349,53 @@ def test_main_turn_decision_backend_parses_json_without_ollama_format_flag(monke
     assert decision is not None
     assert decision["mode"] == "execute_action"
     assert "format" not in calls[0]["json"]
+
+
+def test_main_conversation_and_turn_decision_apply_separate_thinking_policies(monkeypatch):
+    class Response:
+        def __init__(self, payload):
+            self._payload = payload
+
+        @staticmethod
+        def raise_for_status():
+            return None
+
+        def json(self):
+            return self._payload
+
+    calls = []
+
+    def fake_post(url, *, json, timeout, headers):
+        calls.append(dict(json))
+        if len(calls) == 1:
+            return Response({"response": "A concise answer.", "done_reason": "stop"})
+        return Response(
+            {
+                "response": (
+                    '{"mode":"conversation","intent":null,"confidence":0.95,'
+                    '"reasoning":"informational","entities":{},"missing_fields":[],'
+                    '"message":"Hello.","question":null,"source":"backend"}'
+                ),
+                "done_reason": "stop",
+            }
+        )
+
+    monkeypatch.setattr("app.core.main_backend.httpx.post", fake_post)
+    backend = OllamaMainConversationBackend(
+        base_url="http://localhost:11434",
+        model="test-model",
+        think="low",
+        turn_decision_think=False,
+    )
+
+    assert backend.respond("explain this", context={}) == "A concise answer."
+    assert backend.decide_turn("hello", context={}) is not None
+    assert calls[0]["think"] == "low"
+    assert calls[1]["think"] is False
+    assert backend.status()["thinking_mode"] == {
+        "conversation": "low",
+        "turn_decision": False,
+    }
 
 
 def test_main_turn_decision_loads_compact_contracts_for_authorized_candidate_skills():

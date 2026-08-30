@@ -96,6 +96,32 @@ class DocumentGatewayClient:
             f"/documents/{quote(document_id, safe='')}/fields",
         )
 
+    def apply_field_decision(
+        self,
+        *,
+        document_id: str,
+        source_version_id: str,
+        field_name: str,
+        observation_id: str | None,
+        review_binding_hash: str,
+        review_decision_id: str,
+        decision_kind: str,
+        corrected_value: str | None = None,
+    ) -> dict[str, Any]:
+        return self._json(
+            "POST",
+            f"/documents/{quote(document_id, safe='')}/field-decisions",
+            json={
+                "source_version_id": source_version_id,
+                "field_name": field_name,
+                "observation_id": observation_id,
+                "review_binding_hash": review_binding_hash,
+                "review_decision_id": review_decision_id,
+                "decision_kind": decision_kind,
+                "corrected_value": corrected_value,
+            },
+        )
+
     def classifications(self, *, document_id: str) -> dict[str, Any]:
         return self._json(
             "GET",
@@ -126,11 +152,29 @@ class DocumentGatewayClient:
             },
         )
 
-    def reprocess(self, *, document_id: str, idempotency_key: str) -> dict[str, Any]:
+    def reprocess(
+        self,
+        *,
+        document_id: str,
+        idempotency_key: str,
+        processing_tier: str = "default",
+    ) -> dict[str, Any]:
         return self._json(
             "POST",
             f"/documents/{quote(document_id, safe='')}/reprocess",
-            json={"idempotency_key": str(idempotency_key)[:120]},
+            json={
+                "idempotency_key": str(idempotency_key)[:120],
+                "processing_tier": str(processing_tier),
+            },
+        )
+
+    def processing_run(self, *, document_id: str, run_id: str) -> dict[str, Any]:
+        return self._json(
+            "GET",
+            (
+                f"/documents/{quote(document_id, safe='')}/processing-runs/"
+                f"{quote(run_id, safe='')}"
+            ),
         )
 
     def propose_metadata(

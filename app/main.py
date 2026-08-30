@@ -24,6 +24,7 @@ from app.integrations.discord_attachment.client import DiscordAttachmentIngressC
 from app.services.clock_scheduler import BoundedClockScheduler, ClockJob
 from app.services.discord.bot import DiscordJarvisBot
 from app.services.document_completion_service import DocumentCompletionNotificationService
+from app.services.model_compute_budget_service import ModelComputeBudgetNotificationService
 from app.services.offline_runtime_policy import validate_offline_runtime
 
 
@@ -98,6 +99,9 @@ async def _lifespan(application: FastAPI):
                 timeout_seconds=settings.discord_attachment_ingress_timeout_seconds,
             )
         document_completion_notifications = None
+        model_compute_budget_notifications = ModelComputeBudgetNotificationService(
+            repository=container.job_repository,
+        )
         if settings.discord_document_notifications_enabled:
             if not settings.discord_attachment_ingress_enabled or container.documents_service is None:
                 raise RuntimeError(
@@ -117,6 +121,7 @@ async def _lifespan(application: FastAPI):
             turn_service=container.turn_service,
             attachment_ingress=discord_attachment_ingress,
             document_completion_notifications=document_completion_notifications,
+            model_compute_budget_notifications=model_compute_budget_notifications,
             document_notification_poll_seconds=(
                 settings.discord_document_notification_poll_seconds
             ),
