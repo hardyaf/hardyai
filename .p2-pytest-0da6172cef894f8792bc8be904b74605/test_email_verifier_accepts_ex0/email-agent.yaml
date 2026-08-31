@@ -1,0 +1,22 @@
+version: 1
+gmail_profile: jarvis.house@example.com
+google_account_key: jarvis_personal
+taxonomy_version: test-v1
+source_routes:
+  - route_key: jordan
+    source_mailbox: jordan@example.com
+    destination_alias: jarvis.house+operator@example.com
+categories:
+  - key: needs_review
+    display_name: Needs Review
+    gmail_label_name: Jarvis/Needs Review
+  - key: spam
+    display_name: Spam
+    gmail_label_name: Jarvis/Spam
+access:
+  - user_id: jordan
+    discord_channel_id: '222222222222222222'
+    external_user_id: '42'
+    audiences: [shared]
+    agent_ids: [jarvis]
+    enabled: true

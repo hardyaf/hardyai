@@ -1,0 +1,10 @@
+version: 1
+defaults:
+  command_prefix: "!"
+  require_prefix: false
+  allowed_guild_ids: [100]
+guilds:
+  - guild_id: 100
+    allowed_channel_ids: [200]
+    allowed_user_ids: [300]
+    document_response_channel_ids: [200]

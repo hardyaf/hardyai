@@ -169,6 +169,10 @@ def _build_router(
     conversation_backend: Any = None,
     skill_registry: Any = None,
     email_agent_service: Any = None,
+    main_tool_execution_mode: str = "off",
+    main_tool_enabled_domains: tuple[str, ...] = (),
+    main_tool_enabled_operations: tuple[str, ...] = (),
+    legacy_micro_routing_enabled: bool = True,
 ) -> tuple[JarvisRouter, EventLogService]:
     event_log = EventLogService()
     router = JarvisRouter(
@@ -189,6 +193,11 @@ def _build_router(
         home_service=HomeService(default_switch_names=["kitchen light"]),
         skill_registry=skill_registry or PermissiveTestSkillRegistry(),
         email_agent_service=email_agent_service,
+        main_tool_model=conversation_backend,
+        main_tool_execution_mode=main_tool_execution_mode,
+        main_tool_enabled_domains=main_tool_enabled_domains,
+        main_tool_enabled_operations=main_tool_enabled_operations,
+        legacy_micro_routing_enabled=legacy_micro_routing_enabled,
     )
     return router, event_log
 
@@ -779,3 +788,181 @@ def test_main_turn_commitment_is_denied_outside_private_email_scope():
     assert response["result"]["status"] == "policy_denied"
     assert "authorized private email channel" in response["result"]["message"]
     assert email_service.calls == []
+
+
+class _ActiveNoMatchBackend:
+    def __init__(self) -> None:
+        self.commitment_calls = 0
+        self.selection_calls = 0
+
+    def decide_turn(self, text: str, context=None):
+        del text
+        assert (context or {}).get("main_tool_execution_mode") == "active"
+        self.commitment_calls += 1
+        return {
+            "mode": "execute_action",
+            "confidence": 0.96,
+            "reason_code": "plausible_action",
+        }
+
+    def select_skills(self, text, discovery_cards, context=None):
+        del text, discovery_cards, context
+        self.selection_calls += 1
+        return {
+            "mode": "no_match",
+            "selected_skill_ids": [],
+            "reason_code": "no_relevant_skill",
+        }
+
+    def next_tool_step(self, *args, **kwargs):
+        raise AssertionError("no effective tool may reach a step")
+
+    def respond(self, text: str, context=None):
+        raise AssertionError("active mode cannot enter legacy Main response planning")
+
+
+def test_active_mode_prefixed_and_unprefixed_requests_bypass_micro_and_legacy():
+    for explicit in (False, True):
+        micro_backend = _RecordingMicroBackend(
+            payload={
+                "intent": "calendar.view",
+                "confidence": 0.99,
+                "entities": {"window": "daily"},
+                "ambiguity_flags": [],
+                "reasoning": "must_not_run",
+            }
+        )
+        backend = _ActiveNoMatchBackend()
+        router, events = _build_router(
+            micro_backend=micro_backend,
+            conversation_backend=backend,
+            main_tool_execution_mode="active",
+        )
+
+        response = router.route(
+            _discord_request(
+                text="show my calendar today",
+                explicit=explicit,
+                session_id=f"active-no-legacy-{explicit}",
+            )
+        )
+
+        assert response["route"] == "main_tool_loop"
+        assert response["result"]["status"] == "unavailable"
+        assert response["result"]["stop_reason"] == "no_relevant_skill"
+        assert micro_backend.calls == []
+        assert backend.commitment_calls == 1
+        assert backend.selection_calls == 0
+        event_types = [item["event_type"] for item in events.recent(limit=100)]
+        assert "tool.executed" not in event_types
+        assert "main.plan.generated" not in event_types
+
+
+def test_active_mode_web_request_cannot_be_preempted_by_legacy_list_repair():
+    class _ForbiddenLegacyRepair:
+        def repair_action(self, text: str, context=None):
+            del text, context
+            raise AssertionError("active mode must not invoke legacy list repair")
+
+    micro_backend = _RecordingMicroBackend()
+    backend = _ActiveNoMatchBackend()
+    router, events = _build_router(
+        micro_backend=micro_backend,
+        repair_backend=_ForbiddenLegacyRepair(),
+        conversation_backend=backend,
+        main_tool_execution_mode="active",
+    )
+
+    response = router.route(
+        AskRequest(
+            text="Add screws and wall anchors to the hardware run list.",
+            session_id="active-web-no-legacy-list-repair",
+            user_id="operator",
+            source="web",
+            context={"agent_id": "jarvis"},
+        )
+    )
+
+    assert response["route"] == "main_tool_loop"
+    assert response["result"]["status"] == "unavailable"
+    assert response["result"]["stop_reason"] == "no_relevant_skill"
+    assert micro_backend.calls == []
+    assert backend.commitment_calls == 1
+    bypass = [
+        item
+        for item in events.recent(limit=100)
+        if item["event_type"] == "pipeline.main_repair.bypassed"
+    ]
+    assert bypass[-1]["payload"]["reason"] == "active_mode_main_tool_commitment"
+
+
+class _ShadowAndLegacyBackend:
+    def __init__(self) -> None:
+        self.shadow_commitments = 0
+        self.legacy_commitments = 0
+
+    def decide_turn(self, text: str, context=None):
+        del text
+        if (context or {}).get("main_tool_execution_mode") == "shadow":
+            self.shadow_commitments += 1
+            return {
+                "mode": "execute_action",
+                "confidence": 0.9,
+                "reason_code": "plausible_action",
+            }
+        self.legacy_commitments += 1
+        return {
+            "mode": "conversation",
+            "intent": None,
+            "confidence": 0.9,
+            "reasoning": "legacy_response_remains_authoritative",
+            "entities": {},
+            "missing_fields": [],
+            "message": "Legacy answer unchanged.",
+            "question": None,
+        }
+
+    def select_skills(self, text, discovery_cards, context=None):
+        del text, discovery_cards, context
+        return {
+            "mode": "no_match",
+            "selected_skill_ids": [],
+            "reason_code": "no_relevant_skill",
+        }
+
+    def next_tool_step(self, *args, **kwargs):
+        raise AssertionError("empty shadow allowlists cannot reach a step")
+
+    def respond(self, text: str, context=None):
+        raise AssertionError("the legacy commitment supplies the response")
+
+
+def test_shadow_observes_content_free_status_without_changing_legacy_response():
+    backend = _ShadowAndLegacyBackend()
+    micro = _RecordingMicroBackend()
+    router, events = _build_router(
+        micro_backend=micro,
+        conversation_backend=backend,
+        main_tool_execution_mode="shadow",
+    )
+
+    response = router.route(
+        _discord_request(
+            text="please do an unavailable action",
+            explicit=False,
+            session_id="shadow-legacy-authoritative",
+        )
+    )
+
+    assert response["route"] == "main_jarvis"
+    assert response["result"]["message"] == "Legacy answer unchanged."
+    assert backend.shadow_commitments == 1
+    assert backend.legacy_commitments == 1
+    assert micro.calls == []
+    shadow_events = [
+        item for item in events.recent(limit=100)
+        if ".shadow." in item["event_type"]
+    ]
+    assert shadow_events
+    assert "please do an unavailable action" not in str(shadow_events)
+    assert all(int(item["payload"].get("committed_effect_count") or 0) == 0 for item in shadow_events)

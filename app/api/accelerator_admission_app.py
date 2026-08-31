@@ -4,7 +4,6 @@ import asyncio
 import hmac
 import json
 import os
-import re
 from pathlib import Path
 from typing import Any
 
@@ -206,6 +205,79 @@ def _ollama_payload(value: dict[str, Any]) -> dict[str, Any]:
     return sanitized
 
 
+def _ollama_chat_payload(value: dict[str, Any]) -> dict[str, Any]:
+    """Allow only bounded, non-streaming typed-step chat submissions."""
+
+    allowed_keys = {
+        "model",
+        "messages",
+        "stream",
+        "format",
+        "options",
+        "keep_alive",
+        "tools",
+        "think",
+    }
+    if set(value) - allowed_keys or "images" in value:
+        raise HTTPException(status_code=400, detail="accelerator_ollama_chat_fields_rejected")
+    model = str(value.get("model") or "").strip()
+    if model not in _ALLOWED_MODELS:
+        raise HTTPException(status_code=400, detail="accelerator_model_not_allowed")
+    messages = value.get("messages")
+    if not isinstance(messages, list) or not 1 <= len(messages) <= 32:
+        raise HTTPException(status_code=400, detail="accelerator_chat_messages_invalid")
+    sanitized_messages: list[dict[str, str]] = []
+    total_content_chars = 0
+    for message in messages:
+        if not isinstance(message, dict) or set(message) - {"role", "content"}:
+            raise HTTPException(status_code=400, detail="accelerator_chat_message_invalid")
+        role = str(message.get("role") or "").strip().casefold()
+        content = message.get("content")
+        if role not in {"system", "user", "assistant"} or not isinstance(content, str):
+            raise HTTPException(status_code=400, detail="accelerator_chat_message_invalid")
+        total_content_chars += len(content)
+        if total_content_chars > 500_000:
+            raise HTTPException(status_code=400, detail="accelerator_chat_content_invalid")
+        sanitized_messages.append({"role": role, "content": content})
+    if value.get("stream") is not False:
+        raise HTTPException(status_code=400, detail="accelerator_streaming_disabled")
+    options = value.get("options")
+    if options is not None and not isinstance(options, dict):
+        raise HTTPException(status_code=400, detail="accelerator_options_invalid")
+
+    tools = value.get("tools")
+    if not isinstance(tools, list) or len(tools) != 1:
+        raise HTTPException(status_code=400, detail="accelerator_chat_typed_wrapper_required")
+    tool = tools[0]
+    if not isinstance(tool, dict) or set(tool) != {"type", "function"} or tool.get("type") != "function":
+        raise HTTPException(status_code=400, detail="accelerator_chat_tool_invalid")
+    function = tool.get("function")
+    if (
+        not isinstance(function, dict)
+        or set(function) - {"name", "description", "parameters"}
+        or function.get("name") != "submit_model_step"
+        or not isinstance(function.get("description"), str)
+        or not isinstance(function.get("parameters"), dict)
+        or len(json.dumps(function, ensure_ascii=True, separators=(",", ":"))) > 65_536
+    ):
+        raise HTTPException(status_code=400, detail="accelerator_chat_tool_invalid")
+    parameters = function["parameters"]
+    if parameters.get("type") != "object" or not isinstance(parameters.get("properties"), dict):
+        raise HTTPException(status_code=400, detail="accelerator_chat_tool_invalid")
+
+    sanitized = {key: item for key, item in value.items() if key in allowed_keys}
+    sanitized["messages"] = sanitized_messages
+    sanitized["tools"] = tools
+    if "think" in value:
+        try:
+            sanitized["think"] = normalize_ollama_think_mode(value.get("think"))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="accelerator_think_invalid") from exc
+        if sanitized["think"] is None:
+            raise HTTPException(status_code=400, detail="accelerator_think_invalid")
+    return sanitized
+
+
 async def _bounded_upstream(
     *,
     method: str,
@@ -340,6 +412,29 @@ async def ollama_generate(
                 guard,
                 method="POST",
                 url=f"{_OLLAMA_URL}/api/generate",
+                json_payload=payload,
+            )
+    except AcceleratorAdmissionError as exc:
+        raise HTTPException(status_code=503, detail=exc.code) from exc
+    return _safe_upstream_response(status, body, content_type)
+
+
+@app.post("/api/chat")
+async def ollama_chat(
+    request: Request,
+    x_hardyai_accelerator_lane: str | None = Header(default=None),
+    _: None = Depends(_require_key),
+) -> Response:
+    lane = _lane(x_hardyai_accelerator_lane)
+    if lane == "document_vlm":
+        raise HTTPException(status_code=400, detail="accelerator_lane_endpoint_mismatch")
+    payload = _ollama_chat_payload(await _json_body(request))
+    try:
+        async with _admission.lease(lane=lane, wait_seconds=_WAIT_SECONDS) as guard:
+            status, body, content_type = await _guarded_upstream(
+                guard,
+                method="POST",
+                url=f"{_OLLAMA_URL}/api/chat",
                 json_payload=payload,
             )
     except AcceleratorAdmissionError as exc:

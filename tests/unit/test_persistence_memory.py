@@ -2,9 +2,12 @@ import shutil
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
+
 from app.core.main_jarvis import MainJarvis
 from app.core.micro_jarvis import MicroJarvis
 from app.core.types import Intent, SessionOwner, SessionState
+from app.core.persistence_policy import persistence_policy
 from tests.router_support import RegistryBackedTestRouter as JarvisRouter
 from app.core.session_store import SessionStore
 from app.core.state_machine import RuntimePowerController
@@ -141,5 +144,84 @@ def test_document_intent_fails_closed_when_skill_error_loses_policy_marker():
         assert not store.recent_memory_entries(limit=20)
         persisted_session = store.get_session("document-policy-failure")
         assert canary not in str(persisted_session)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+def test_typed_seam_strengthens_legacy_policy_aliases_without_changing_legacy_default():
+    assert persistence_policy("restricted_read").name.value == "restricted_read"
+    assert persistence_policy(
+        "restricted_read",
+        canonicalize_legacy_aliases=True,
+    ).name.value == "no_store"
+    assert persistence_policy(
+        "sensitive_domain",
+        canonicalize_legacy_aliases=True,
+    ).name.value == "redacted"
+
+
+@pytest.mark.parametrize("policy", ["redacted", "no_store"])
+def test_typed_tool_policy_keeps_live_answer_out_of_every_generic_sink(policy):
+    data_root = (Path.cwd() / "data").resolve()
+    data_root.mkdir(parents=True, exist_ok=True)
+    scratch = data_root / f"jarvis-test-{uuid4().hex[:8]}"
+    scratch.mkdir(parents=True, exist_ok=True)
+    canary = f"TOOL-{policy.upper()}-PRIVATE-CONTENT"
+
+    try:
+        store = SQLiteStore(database_path=str(scratch / "jarvis_test.db"))
+        memory_chain = CompositeMemoryStore(
+            stores=[
+                SQLiteMemoryStore(store),
+                MarkdownMemoryStore(base_dir=str(scratch / "memory_md")),
+            ]
+        )
+        router = JarvisRouter(
+            micro_jarvis=MicroJarvis(),
+            main_jarvis=MainJarvis(),
+            session_store=SessionStore(persistence=store),
+            runtime_power=RuntimePowerController(),
+            event_log=EventLogService(persistence=store),
+            memory_service=MemoryService(store=memory_chain),
+            lists_service=ListsService(),
+            calendar_service=CalendarService(),
+            home_service=HomeService(),
+        )
+        session = router._session_store.get_or_create(
+            f"typed-policy-{policy}",
+            "operator",
+            "discord",
+        )
+        session.owner = SessionOwner.MAIN
+        session.state = SessionState.IDLE
+
+        response = router._build_response(
+            session=session,
+            intent=Intent.UNKNOWN,
+            classification={
+                "intent": "unknown",
+                "confidence": 1.0,
+                "entities": {},
+                "recommended_owner": "main_jarvis",
+            },
+            route="main_tool_loop",
+            result={
+                "status": "responded",
+                "message": f"Live answer containing {canary}",
+                "_persistence_policy": policy,
+            },
+            request_text=f"private request containing {canary}",
+            user_id="operator",
+        )
+
+        assert canary in response["assistant"]["text"]
+        assert response["delivery"]["memory"]["status"] == "not_applicable"
+        assert response["delivery"]["conversation_history"]["status"] == "not_applicable"
+        assert response["delivery"]["ticket"]["status"] == "not_applicable"
+        assert not store.recent_memory_entries(limit=20)
+        assert canary not in str(store.get_session(f"typed-policy-{policy}"))
+        assert canary not in str(store.recent_events(limit=100))
+        markdown_files = list((scratch / "memory_md").rglob("*.md"))
+        assert markdown_files == []
     finally:
         shutil.rmtree(scratch, ignore_errors=True)

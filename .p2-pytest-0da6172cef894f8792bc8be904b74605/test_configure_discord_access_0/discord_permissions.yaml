@@ -1,0 +1,12 @@
+version: 1
+guilds:
+- guild_id: 100
+  allowed_channel_ids:
+  - 200
+  skill_channel_access:
+  - skill_id: skill.email.agent
+    channel_id: '201'
+    allowed_user_ids:
+    - '42'
+    audiences:
+    - shared

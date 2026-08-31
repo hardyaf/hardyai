@@ -1,0 +1,6 @@
+version: 1
+defaults:
+  command_prefix: "!jarvis"
+  require_prefix: true
+  allow_direct_messages: true
+  allowed_role_ids: [123456789]

@@ -1,10 +1,10 @@
 {
   "artifact": "critical_skills",
-  "compiled_at": "2026-08-26T15:38:31.098255+00:00",
-  "content_hash": "f446113746856c6b7135153d5e341d2a2e87047434b727f708159032cf026ef4",
+  "compiled_at": "2026-08-31T20:59:10.058132+00:00",
+  "content_hash": "aeaf5f4000924784dc464c062dbd68b81d82a59a47f343a3d33050a7ade99cc5",
   "min_critical_level": 1,
   "missing_markdown_count": 0,
   "output_path": "app/prompts/skills/critical_skills.md",
-  "skill_count": 8,
-  "source_hash": "fd4255802bb3c4f5a477c9691d9501ac891120a014ccb273301d218e74df07f4"
+  "skill_count": 6,
+  "source_hash": "95eaaad4c4f5a0ad5fe86b8f77f62384ad78ecb850f15cb932ff5b76f3d84947"
 }

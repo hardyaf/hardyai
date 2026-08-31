@@ -1,11 +1,20 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import sqlite3
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from app.db.migrations import evaluate_schema_reader_compatibility  # noqa: E402
 
 
 def _resolve(value: str) -> Path:
@@ -59,6 +68,34 @@ def restore(source: Path, target: Path, *, replace: bool) -> Path | None:
     return preserved
 
 
+def reader_check(source: Path) -> int:
+    if not source.is_file() or source.is_symlink():
+        print('{"reason":"source_unavailable","result":"incompatible","version":null}')
+        return 1
+    try:
+        conn = sqlite3.connect(f"file:{source.as_posix()}?mode=ro&immutable=1", uri=True)
+        try:
+            conn.execute("PRAGMA query_only = ON")
+            decision = evaluate_schema_reader_compatibility(conn)
+        finally:
+            conn.close()
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        print('{"reason":"database_unreadable","result":"incompatible","version":null}')
+        return 1
+    print(
+        json.dumps(
+            {
+                "version": decision.version,
+                "result": decision.result,
+                "reason": decision.reason,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    )
+    return 0 if decision.compatible else 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Back up, verify, or restore the Jarvis SQLite database.")
     parser.add_argument(
@@ -71,6 +108,8 @@ def main() -> int:
     backup_parser.add_argument("--destination", default="./data/backups")
     verify_parser = commands.add_parser("verify")
     verify_parser.add_argument("--source")
+    reader_parser = commands.add_parser("reader-check")
+    reader_parser.add_argument("--source", required=True)
     restore_parser = commands.add_parser("restore")
     restore_parser.add_argument("source")
     restore_parser.add_argument("--replace", action="store_true")
@@ -85,6 +124,8 @@ def main() -> int:
         result = _integrity(_resolve(args.source) if args.source else database)
         print(f"integrity_check={result}")
         return 0 if result.lower() == "ok" else 1
+    if args.command == "reader-check":
+        return reader_check(_resolve(args.source))
     preserved = restore(_resolve(args.source), database, replace=bool(args.replace))
     print(f"restored={database}")
     if preserved:
@@ -94,4 +135,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

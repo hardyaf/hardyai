@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -73,6 +74,59 @@ def _as_csv_list(name: str, default: list[str]) -> list[str]:
     return [item for item in items if item]
 
 
+_MAIN_TOOL_DOMAIN_ID = re.compile(r"^[a-z][a-z0-9_]*$")
+_MAIN_TOOL_OPERATION_ID = re.compile(r"^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$")
+_MAIN_TOOL_SELECTED_SKILLS_SERVER_MAX = 3
+
+
+def _as_strict_choice(name: str, default: str, allowed: set[str]) -> str:
+    raw = os.getenv(name)
+    value = default if raw is None else raw.strip().lower()
+    if value not in allowed:
+        raise ValueError(f"{name} must be one of: {', '.join(sorted(allowed))}")
+    return value
+
+
+def _as_strict_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    value = raw.strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean")
+
+
+def _as_positive_int(name: str, default: int, *, maximum: int | None = None) -> int:
+    raw = os.getenv(name)
+    try:
+        value = default if raw is None else int(raw.strip())
+    except (AttributeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a positive integer") from exc
+    if value <= 0 or (maximum is not None and value > maximum):
+        suffix = f" no greater than {maximum}" if maximum is not None else ""
+        raise ValueError(f"{name} must be a positive integer{suffix}")
+    return value
+
+
+def _as_identifier_allowlist(
+    name: str,
+    *,
+    pattern: re.Pattern[str],
+) -> tuple[str, ...]:
+    raw = os.getenv(name, "")
+    if not raw.strip():
+        return ()
+    values = tuple(item.strip() for item in raw.split(","))
+    if any(not value or pattern.fullmatch(value) is None for value in values):
+        raise ValueError(f"{name} contains a malformed identifier")
+    if len(set(values)) != len(values):
+        raise ValueError(f"{name} contains a duplicate identifier")
+    return values
+
+
 def _as_ollama_think(name: str, default: OllamaThinkMode) -> OllamaThinkMode:
     raw = os.getenv(name)
     return normalize_ollama_think_mode(raw, default=default)
@@ -122,6 +176,17 @@ class Settings:
     model_adaptive_token_max_multiplier: int
     larger_model_micro_only_window_seconds: float
     skill_artifact_auto_compile_enabled: bool
+    main_tool_execution_mode: str
+    main_tool_enabled_domains: tuple[str, ...]
+    main_tool_enabled_operations: tuple[str, ...]
+    main_tool_max_selected_skills: int
+    main_tool_max_steps: int
+    main_tool_max_failures: int
+    main_tool_max_identical_read_calls: int
+    main_tool_max_observation_chars: int
+    main_tool_max_total_observation_chars: int
+    main_tool_timeout_seconds: int
+    legacy_micro_routing_enabled: bool
     main_agent_loop_max_steps: int
     main_agent_loop_max_failures: int
     main_agent_loop_context_max_chars: int
@@ -340,7 +405,7 @@ settings = Settings(
         _as_float("MICRO_MODEL_TIMEOUT_SECONDS", 6.0),
     ),
     main_repair_model_num_ctx=max(512, _as_int("MAIN_REPAIR_MODEL_NUM_CTX", 32768)),
-    main_repair_model_num_predict=max(1, _as_int("MAIN_REPAIR_MODEL_NUM_PREDICT", 512)),
+    main_repair_model_num_predict=max(1, _as_int("MAIN_REPAIR_MODEL_NUM_PREDICT", 1024)),
     main_repair_model_think=_as_ollama_think("MAIN_REPAIR_MODEL_THINK", False),
     main_conversation_model_timeout_seconds=_as_float(
         "MAIN_CONVERSATION_MODEL_TIMEOUT_SECONDS",
@@ -377,6 +442,40 @@ settings = Settings(
         "SKILL_ARTIFACT_AUTO_COMPILE_ENABLED",
         True,
     ),
+    main_tool_execution_mode=_as_strict_choice(
+        "MAIN_TOOL_EXECUTION_MODE",
+        "off",
+        {"off", "shadow", "active"},
+    ),
+    main_tool_enabled_domains=_as_identifier_allowlist(
+        "MAIN_TOOL_ENABLED_DOMAINS",
+        pattern=_MAIN_TOOL_DOMAIN_ID,
+    ),
+    main_tool_enabled_operations=_as_identifier_allowlist(
+        "MAIN_TOOL_ENABLED_OPERATIONS",
+        pattern=_MAIN_TOOL_OPERATION_ID,
+    ),
+    main_tool_max_selected_skills=_as_positive_int(
+        "MAIN_TOOL_MAX_SELECTED_SKILLS",
+        3,
+        maximum=_MAIN_TOOL_SELECTED_SKILLS_SERVER_MAX,
+    ),
+    main_tool_max_steps=_as_positive_int("MAIN_TOOL_MAX_STEPS", 8),
+    main_tool_max_failures=_as_positive_int("MAIN_TOOL_MAX_FAILURES", 2),
+    main_tool_max_identical_read_calls=_as_positive_int(
+        "MAIN_TOOL_MAX_IDENTICAL_READ_CALLS",
+        2,
+    ),
+    main_tool_max_observation_chars=_as_positive_int(
+        "MAIN_TOOL_MAX_OBSERVATION_CHARS",
+        8000,
+    ),
+    main_tool_max_total_observation_chars=_as_positive_int(
+        "MAIN_TOOL_MAX_TOTAL_OBSERVATION_CHARS",
+        24000,
+    ),
+    main_tool_timeout_seconds=_as_positive_int("MAIN_TOOL_TIMEOUT_SECONDS", 120),
+    legacy_micro_routing_enabled=_as_strict_bool("LEGACY_MICRO_ROUTING_ENABLED", True),
     main_agent_loop_max_steps=max(1, _as_int("MAIN_AGENT_LOOP_MAX_STEPS", 8)),
     main_agent_loop_max_failures=max(1, _as_int("MAIN_AGENT_LOOP_MAX_FAILURES", 2)),
     main_agent_loop_context_max_chars=max(256, _as_int("MAIN_AGENT_LOOP_CONTEXT_MAX_CHARS", 6000)),

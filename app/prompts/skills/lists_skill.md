@@ -72,6 +72,301 @@ main_handoff_context:
     - last_list_name
     - last_successful_action
     - pending_list_confirmation
+main_tools_contract_version: 1
+main_tools:
+  - tool_id: lists.list_collections
+    contract_version: 1
+    purpose: "Enumerate the current user's authorized personal and explicitly shared list collections. Call this with no arguments when a requested list name is missing or must be resolved."
+    interactive: true
+    effect: read
+    approval_rule: none
+    approval_conditions: []
+    idempotency: not_applicable
+    sensitivity: private
+    persistence: redacted
+    effect_cardinality: single
+    runtime_dependencies: []
+    transferable_observation_fields:
+      - pattern: /collections/*/collection_ref
+        scope: same_domain
+      - pattern: /collections/*/name
+        scope: same_domain
+    timeout_seconds: 5
+    max_result_items: 100
+    max_observation_chars: 4000
+    legacy_intents: []
+    input_schema:
+      type: object
+      additionalProperties: false
+      required: []
+      properties: {}
+    observation_schema:
+      type: object
+      additionalProperties: false
+      required:
+        - collections
+        - owner_scope
+        - truncated
+      properties:
+        collections:
+          type: array
+          minItems: 0
+          maxItems: 100
+          items: &lists_collection_observation
+            type: object
+            additionalProperties: false
+            required:
+              - collection_ref
+              - name
+              - owner_scope
+              - item_count
+              - updated_at
+            properties:
+              collection_ref:
+                type: string
+                minLength: 1
+                maxLength: 255
+              name:
+                type: string
+                minLength: 1
+                maxLength: 100
+              owner_scope:
+                type: string
+                enum:
+                  - personal
+                  - shared
+              item_count:
+                type: integer
+                minimum: 0
+                maximum: 1000000
+              updated_at:
+                type: string
+                minLength: 0
+                maxLength: 64
+        owner_scope:
+          type: string
+          enum:
+            - personal_and_shared
+        truncated:
+          type: boolean
+
+  - tool_id: lists.get_collection
+    contract_version: 1
+    purpose: "Read one exact authorized list collection and a bounded ordered item set."
+    interactive: true
+    effect: read
+    approval_rule: none
+    approval_conditions: []
+    idempotency: not_applicable
+    sensitivity: private
+    persistence: redacted
+    effect_cardinality: single
+    runtime_dependencies: []
+    transferable_observation_fields:
+      - pattern: /collection/collection_ref
+        scope: same_domain
+      - pattern: /items/*/item_ref
+        scope: same_domain
+    timeout_seconds: 5
+    max_result_items: 100
+    max_observation_chars: 6000
+    legacy_intents:
+      - lists.get_items
+    input_schema: &lists_collection_selector_input
+      type: object
+      additionalProperties: false
+      required: []
+      properties:
+        collection_ref:
+          type: string
+          minLength: 1
+          maxLength: 255
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+    observation_schema:
+      type: object
+      additionalProperties: false
+      required:
+        - items
+        - owner_scope
+        - truncated
+        - candidates
+      properties:
+        collection: *lists_collection_observation
+        items:
+          type: array
+          minItems: 0
+          maxItems: 100
+          items: &lists_item_observation
+            type: object
+            additionalProperties: false
+            required:
+              - item_ref
+              - text
+              - checked
+              - position
+            properties:
+              item_ref:
+                type: string
+                minLength: 1
+                maxLength: 255
+              text:
+                type: string
+                minLength: 1
+                maxLength: 500
+              checked:
+                type: boolean
+              position:
+                type: integer
+                minimum: 1
+                maximum: 1000000
+        owner_scope:
+          type: string
+          enum:
+            - personal
+            - shared
+            - unresolved
+        truncated:
+          type: boolean
+        candidates:
+          type: array
+          minItems: 0
+          maxItems: 5
+          items: *lists_collection_observation
+
+  - tool_id: lists.create_collection
+    contract_version: 1
+    purpose: "Create one named empty personal list collection only; this operation does not add items. Return its stable reference."
+    interactive: true
+    effect: local_write
+    approval_rule: none
+    approval_conditions: []
+    idempotency: required
+    sensitivity: private
+    persistence: redacted
+    effect_cardinality: single
+    runtime_dependencies: []
+    transferable_observation_fields:
+      - pattern: /collection/collection_ref
+        scope: same_domain
+    timeout_seconds: 10
+    max_result_items: 1
+    max_observation_chars: 3000
+    legacy_intents:
+      - lists.create_list
+    input_schema:
+      type: object
+      additionalProperties: false
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+    observation_schema:
+      type: object
+      additionalProperties: false
+      required:
+        - collection
+        - created
+        - idempotent_replay
+      properties:
+        collection: *lists_collection_observation
+        created:
+          type: boolean
+        idempotent_replay:
+          type: boolean
+
+  - tool_id: lists.add_items
+    contract_version: 1
+    purpose: "Atomically add one explicit ordered item array to one exact authorized list collection. Supply exactly one selector: before a trusted reference exists, put the human-supplied list name in name and omit collection_ref; after a tool returns collection_ref, copy that opaque collection_v1 value and omit name. If the named list is missing and the request clearly intends it to exist, inspect collections, create it, then retry this tool with the created collection_ref."
+    interactive: true
+    effect: local_write
+    approval_rule: none
+    approval_conditions: []
+    idempotency: required
+    sensitivity: private
+    persistence: redacted
+    effect_cardinality: atomic_batch
+    runtime_dependencies: []
+    transferable_observation_fields: []
+    timeout_seconds: 10
+    max_result_items: 50
+    max_observation_chars: 4000
+    legacy_intents:
+      - lists.add_item
+    input_schema:
+      type: object
+      description: "Exactly two properties: items and one of name or collection_ref. Never supply both selectors."
+      additionalProperties: false
+      required:
+        - items
+      minProperties: 2
+      maxProperties: 2
+      properties:
+        collection_ref:
+          type: string
+          description: "Opaque collection_v1 reference copied only from a trusted tool observation; never put a human list name here."
+          minLength: 1
+          maxLength: 255
+        name:
+          type: string
+          description: "Human-supplied list name from the request, used when no trusted collection_ref has been observed."
+          minLength: 1
+          maxLength: 100
+        items:
+          type: array
+          minItems: 1
+          maxItems: 50
+          items:
+            type: string
+            minLength: 1
+            maxLength: 500
+    observation_schema:
+      type: object
+      additionalProperties: false
+      required:
+        - added_items
+        - existing_item_count
+        - failed_items
+        - candidates
+        - idempotent_replay
+      properties:
+        collection_ref:
+          type: string
+          minLength: 1
+          maxLength: 255
+        added_items:
+          type: array
+          minItems: 0
+          maxItems: 50
+          items: *lists_item_observation
+        existing_item_count:
+          type: integer
+          minimum: 0
+          maximum: 1000000
+        failed_items:
+          type: array
+          minItems: 0
+          maxItems: 50
+          items:
+            type: string
+            minLength: 1
+            maxLength: 100
+        candidates:
+          type: array
+          minItems: 0
+          maxItems: 5
+          items: *lists_collection_observation
+        idempotent_replay:
+          type: boolean
 ---
 
 # Lists Skill
@@ -169,11 +464,12 @@ Common phrases:
 
 ### Compound Create And Add
 - A request that creates one list and immediately adds items is a typed Main plan.
-- Accept numbered or comma-separated items and optional separators such as `add:` or `add-`.
-- Preserve parenthetical owner labels such as `(Jordan)` as part of the item text.
-- Execute one `lists.create_list` step followed by one distinct `lists.add_item` step per item.
-- Allow at most seven items in one request so the plan remains within the bounded eight-step loop.
-- For larger requests, ask the user to split the items into bounded groups.
+- Main interprets the user's wording into the closed `items[]` schema; punctuation and conjunctions are
+  not parsed by the Lists domain.
+- Preserve the intended item text after model interpretation, including meaningful punctuation or labels.
+- Execute one `lists.create_collection` call, observe its stable reference, then execute one atomic
+  `lists.add_items` call for the complete bounded array.
+- The same path handles one through 50 items; item count does not select a different handler or workflow.
 
 ### Get Items
 - `list_name` required unless safely resolved from context
@@ -310,9 +606,9 @@ Main Jarvis should:
 - handle conversational phrasing
 - ask clarifying questions when needed
 - resolve deictic follow-ups safely
-- convert natural planning language into one-step list actions when appropriate
+- convert natural planning language into typed list tools without phrase-specific domain branches
 - preserve continuity across turns
-- execute bounded create-and-add requests as distinct typed list operations
+- execute bounded create-and-add requests as `create_collection` followed by one `add_items(items[])`
 
 ## Failure Behavior
 

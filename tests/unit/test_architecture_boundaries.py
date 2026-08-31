@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import ast
+import importlib
 from pathlib import Path
+
+import yaml
+
+from app.skills.registry_service import SkillRegistryService
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -23,6 +28,26 @@ def _imports_module(path: Path, module_name: str) -> bool:
             if imported == module_name or imported.startswith(f"{module_name}."):
                 return True
     return False
+
+
+def _imported_modules(path: Path) -> set[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            modules.add(node.module)
+    return modules
+
+
+def _skill_frontmatter(path: Path) -> dict:
+    source = path.read_text(encoding="utf-8")
+    assert source.startswith("---\n")
+    _, raw, _ = source.split("---", 2)
+    value = yaml.safe_load(raw)
+    assert isinstance(value, dict)
+    return value
 
 
 def test_http_adapters_do_not_import_runtime_composition_root() -> None:
@@ -124,3 +149,114 @@ def test_discord_core_adapter_passes_metadata_only_to_isolated_attachment_ingres
     assert "app.runtime" not in transfer_source
     assert "sqlite" not in transfer_source.casefold()
     assert "cdn.discordapp.com" in transfer_source
+
+
+def test_active_skill_declarations_have_unique_ownership_and_importable_handlers() -> None:
+    owners: dict[str, list[str]] = {}
+    unimportable: list[str] = []
+    for path in sorted((APP_ROOT / "prompts" / "skills").glob("*_skill.md")):
+        frontmatter = _skill_frontmatter(path)
+        if not bool(frontmatter.get("active", True)):
+            continue
+        skill_id = str(frontmatter.get("skill_id") or "")
+        operation_ids = {
+            str(item).strip()
+            for item in frontmatter.get("intents") or []
+            if str(item).strip()
+        }
+        operation_ids.update(
+            str(item.get("tool_id") or "").strip()
+            for item in frontmatter.get("main_tools") or []
+            if isinstance(item, dict) and str(item.get("tool_id") or "").strip()
+        )
+        for operation_id in operation_ids:
+            owners.setdefault(operation_id, []).append(skill_id)
+
+        execution_ref = str(frontmatter.get("execution_ref") or "").strip()
+        module_name, separator, attribute = execution_ref.partition(":")
+        try:
+            module = importlib.import_module(module_name) if separator and attribute else None
+        except Exception:
+            module = None
+        if module is None or not callable(getattr(module, attribute, None)):
+            unimportable.append(skill_id)
+
+    duplicates = {
+        operation_id: sorted(skill_ids)
+        for operation_id, skill_ids in owners.items()
+        if len(skill_ids) > 1
+    }
+    assert duplicates == {}
+    assert unimportable == []
+
+
+def test_runtime_capability_projection_excludes_implementation_and_storage_references() -> None:
+    class _Catalog:
+        @staticmethod
+        def list_skills(*, active_only: bool = True) -> list[dict]:
+            assert active_only is True
+            return [
+                {
+                    "skill_id": "skill.lists.core",
+                    "skill_name": "Lists",
+                    "skill_user": "all",
+                    "skill_agents": ["all"],
+                    "intents": ["lists.get_items"],
+                    "execution_ref": "app.skills.domains.lists.handler:run",
+                    "storage_ref": "must-not-project",
+                    "micro_enabled": False,
+                    "micro_functions": [],
+                }
+            ]
+
+    projection = SkillRegistryService(_Catalog()).runtime_capability_catalog(
+        user_id="fixture-user",
+        agent_id="jarvis",
+    )
+    assert len(projection) == 1
+    assert "execution_ref" not in projection[0]
+    assert "storage_ref" not in projection[0]
+
+
+def test_app_runtime_imports_are_limited_to_existing_compatibility_composition_paths() -> None:
+    approved = {
+        "app/container.py",
+        "app/workers/plane_sync_worker.py",
+        "app/workers/ticket_review_worker.py",
+    }
+    importers = {
+        path.relative_to(REPO_ROOT).as_posix()
+        for path in _python_files(APP_ROOT)
+        if _imports_module(path, "app.runtime")
+    }
+    assert importers <= approved
+
+
+def test_skill_domains_do_not_import_other_domains_handlers_or_stores() -> None:
+    domains_root = APP_ROOT / "skills" / "domains"
+    offenders: list[str] = []
+    for path in _python_files(domains_root):
+        source_domain = path.relative_to(domains_root).parts[0]
+        for module in _imported_modules(path):
+            parts = module.split(".")
+            if len(parts) < 5 or parts[:3] != ["app", "skills", "domains"]:
+                continue
+            target_domain = parts[3]
+            target_boundary = parts[4]
+            if target_domain != source_domain and target_boundary in {"handler", "storage"}:
+                offenders.append(f"{path.relative_to(REPO_ROOT).as_posix()} -> {module}")
+    assert offenders == []
+
+
+def test_p2_typed_tool_seam_is_not_reachable_from_main_or_router() -> None:
+    guarded_files = [
+        APP_ROOT / "core" / "router.py",
+        APP_ROOT / "core" / "request_flow.py",
+        APP_ROOT / "core" / "main_backend.py",
+        APP_ROOT / "core" / "main_turn_commitment.py",
+    ]
+    source = "\n".join(path.read_text(encoding="utf-8") for path in guarded_files)
+    assert ".execute_tool(" not in source
+    assert ".effective_tools(" not in source
+    assert ".discovery_cards(" not in source
+    assert "ToolCallEnvelope" not in source

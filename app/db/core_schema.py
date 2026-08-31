@@ -13,6 +13,8 @@ class CoreSchemaMigration:
     def apply(self) -> None:
         with self._lock:
             cur = self._conn.cursor()
+            cur.execute("PRAGMA user_version")
+            fresh_database = int(cur.fetchone()[0]) == 0
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS sessions (
@@ -127,6 +129,8 @@ class CoreSchemaMigration:
                     cron_enabled INTEGER NOT NULL DEFAULT 0,
                     cron_expr TEXT,
                     last_used_at TEXT,
+                    main_tools_json TEXT,
+                    main_tools_contract_version INTEGER,
                     updated_at TEXT NOT NULL
                 )
                 """
@@ -284,6 +288,22 @@ class CoreSchemaMigration:
                 column_name="operation_id",
                 column_sql="TEXT",
             )
+            if fresh_database:
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS list_operations (
+                        operation_id TEXT PRIMARY KEY,
+                        owner_user_id TEXT NOT NULL,
+                        action TEXT NOT NULL,
+                        target_ref TEXT NOT NULL,
+                        arguments_hash TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        result_json TEXT NOT NULL DEFAULT '{}',
+                        created_at TEXT NOT NULL,
+                        completed_at TEXT
+                    )
+                    """
+                )
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS conversation_topics (
@@ -368,6 +388,11 @@ class CoreSchemaMigration:
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_list_items_operation_id "
                 "ON list_items(operation_id) WHERE operation_id IS NOT NULL"
             )
+            if fresh_database:
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_list_operations_owner_action_created "
+                    "ON list_operations(owner_user_id, action, created_at DESC)"
+                )
             cur.execute(
                 "CREATE INDEX IF NOT EXISTS idx_conversation_topics_user_last_seen "
                 "ON conversation_topics(user_id, last_seen_at DESC)"

@@ -7,12 +7,18 @@ skill_agents:
 created_by: system
 intents:
   - home.set_switch
-  - home.get_switch_state
 execution_ref: app.skills.domains.lights.handler:run
 storage_type: sql
 storage_ref: app.skills.domains.lights.storage:SQLiteLightsStorage(switches,switch_actions_log)
 critical_level: 2
 active: true
+interactive: true
+operation_dispositions:
+  home.set_switch: migrate
+  home.list_devices: deferred
+  home.get_device_state: deferred
+  home.get_switch_state: deactivate_stale
+  home.list_switches: deactivate_stale
 version: 2
 
 micro_enabled: true
@@ -34,19 +40,6 @@ micro_functions:
       - scene_or_group_request
       - policy_restricted_target
       - unsafe_deictic_reference
-  - function_id: lights.get_switch_state
-    intent: home.get_switch_state
-    regex_contract: "direct single-switch state query with explicit or safely resolved target"
-    supported_actions:
-      - read_known_switch_state
-    required_entities:
-      - switch_name
-    unsupported_or_escalate:
-      - ambiguous_switch_reference
-      - missing_switch_name
-      - multi_switch_request
-      - unsafe_deictic_reference
-
 micro_failure_handoff:
   baseline_context_keys:
     - micro_intent
@@ -76,12 +69,11 @@ main_handoff_context:
 
 ## Purpose
 
-Control and inspect configured house light switches with safe, deterministic behavior.
+Control configured house light switches with safe, deterministic behavior.
 
 This skill is responsible for:
 - turning a known switch on
 - turning a known switch off
-- reporting the state of a known switch
 - preserving continuity for short follow-up references
 
 This skill is not responsible for:
@@ -97,7 +89,6 @@ Use this skill when the user wants to control or check a configured light switch
 Examples:
 - "turn on the kitchen light"
 - "switch off the mudroom light"
-- "is the porch light on?"
 - "turn it off" -> only if prior context safely resolves the switch
 
 ## Do Not Use This Skill
@@ -119,13 +110,9 @@ Common phrases:
 - "switch the mudroom light off"
 - "turn it on" -> only if context safely resolves target
 
-### `home.get_switch_state`
-Read the current state of a known switch.
-
-Common phrases:
-- "is the porch light on?"
-- "what's the state of the kitchen light?"
-- "did we leave the garage light on?"
+The future read operations are `home.list_devices` and `home.get_device_state`. They are deferred and
+must not be advertised or dispatched until their typed implementations are added. The historical names
+`home.get_switch_state` and `home.list_switches` are stale compatibility metadata only.
 
 ## Required Inputs
 
@@ -135,9 +122,6 @@ Common phrases:
   - allowed values:
     - `on`
     - `off`
-
-### Get Switch State
-- `switch_name` required unless safely resolved from context
 
 ## Context Resolution Rules
 
@@ -167,14 +151,13 @@ Optional payloads:
 - `switch_name`
 - `canonical_switch_name`
 - `state_after`
-- `state_current`
 - `available_switches`
 - `suggestions`
 - `pending_confirmation`
 
 ## Execution Rules
 
-1. Classify the request as `home.set_switch` or `home.get_switch_state`.
+1. Classify an executable request as `home.set_switch`.
 2. Extract `switch_name` and `action` if present.
 3. Normalize the switch reference:
    - ignore case
@@ -242,7 +225,6 @@ Examples:
 
 ### Allowed Directly by Micro
 - `home.set_switch`
-- `home.get_switch_state`
 
 ### Micro May Proceed Only When
 - the target switch is explicit or safely resolved

@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from app.db.connection import open_sqlite_connection
 from app.db.domain_schema import ensure_email_agent_schema
+from app.skills.domains.email_agent.query import EmailQuery
 
 
 def _utc_iso() -> str:
@@ -572,6 +573,155 @@ class EmailAgentSQLiteStorage:
             )
             WHERE {' AND '.join(clauses)}
             ORDER BY m.internal_date DESC, m.gmail_message_id DESC
+            LIMIT ?
+        """
+        with self._lock:
+            rows = self._conn.execute(sql, tuple(params)).fetchall()
+        return [self._decode_row(dict(row)) for row in rows]
+
+    def query_messages(
+        self,
+        *,
+        query: EmailQuery,
+        taxonomy_version: str,
+        user_id: str,
+        discord_channel_id: str,
+        allowed_source_keys: tuple[str, ...],
+        allowed_category_keys: tuple[str, ...],
+        now: str,
+    ) -> list[dict[str, Any]]:
+        """Read one typed, bounded query from the local Email projection."""
+
+        if not isinstance(query, EmailQuery):
+            raise ValueError("A validated EmailQuery is required.")
+        source_keys = tuple(
+            dict.fromkeys(
+                str(item or "").strip().casefold()
+                for item in allowed_source_keys
+                if str(item or "").strip()
+            )
+        )
+        category_keys = tuple(
+            dict.fromkeys(
+                str(item or "").strip().casefold()
+                for item in allowed_category_keys
+                if str(item or "").strip()
+            )
+        )
+        if not source_keys or len(source_keys) > 64:
+            raise ValueError("Email source allowlist is invalid.")
+        if not category_keys or len(category_keys) > 64:
+            raise ValueError("Email category allowlist is invalid.")
+        if query.source is not None and query.source not in source_keys:
+            raise ValueError("Unsupported email source filter.")
+        if query.category is not None and query.category not in category_keys:
+            raise ValueError("Unsupported email category filter.")
+
+        scope_user = str(user_id or "").strip().casefold()
+        scope_channel = str(discord_channel_id or "").strip()
+        clauses = [
+            "m.internal_date >= ?",
+            "m.internal_date < ?",
+            f"m.source_route_key IN ({','.join('?' for _ in source_keys)})",
+            (
+                "(c.logical_category_key IS NULL OR "
+                f"c.logical_category_key IN ({','.join('?' for _ in category_keys)}))"
+            ),
+        ]
+        params: list[Any] = [
+            taxonomy_version,
+            scope_user,
+            scope_channel,
+            query.start_internal_date,
+            query.end_internal_date,
+            *source_keys,
+            *category_keys,
+        ]
+
+        if query.visibility == "active":
+            clauses.append(
+                "(us.gmail_message_id IS NULL OR us.disposition='needs_reply' "
+                "OR us.review_state IN ('new','presented') "
+                "OR (us.review_state='snoozed' AND us.snoozed_until IS NOT NULL "
+                "AND us.snoozed_until<=?))"
+            )
+            params.append(str(now))
+        elif query.visibility == "unseen":
+            clauses.append("us.gmail_message_id IS NULL")
+        elif query.visibility == "needs_reply":
+            clauses.append("us.disposition='needs_reply'")
+        elif query.visibility == "completed":
+            clauses.append(
+                "(us.disposition='complete' OR "
+                "(us.disposition IS NULL AND us.review_state='reviewed'))"
+            )
+        elif query.visibility == "spam":
+            clauses.append("(us.disposition='spam' OR c.logical_category_key='spam')")
+        elif query.visibility != "all":
+            raise ValueError("Unsupported email visibility filter.")
+
+        if query.source is not None:
+            clauses.append("m.source_route_key = ?")
+            params.append(query.source)
+        if query.category is not None:
+            clauses.append("c.logical_category_key = ?")
+            params.append(query.category)
+        if query.senders:
+            clauses.append(
+                f"LOWER(m.sender_email) IN ({','.join('?' for _ in query.senders)})"
+            )
+            params.extend(query.senders)
+        if query.recipients:
+            clauses.append(
+                "EXISTS (SELECT 1 FROM json_each(m.recipient_headers_json) recipients "
+                f"WHERE LOWER(CAST(recipients.value AS TEXT)) IN "
+                f"({','.join('?' for _ in query.recipients)}))"
+            )
+            params.extend(query.recipients)
+        for term in query.text_terms:
+            escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            pattern = f"%{escaped}%"
+            clauses.append(
+                "(LOWER(m.subject) LIKE ? ESCAPE '\\' "
+                "OR LOWER(m.sender_email) LIKE ? ESCAPE '\\' "
+                "OR LOWER(m.sender_name) LIKE ? ESCAPE '\\' "
+                "OR LOWER(m.snippet) LIKE ? ESCAPE '\\')"
+            )
+            params.extend([pattern, pattern, pattern, pattern])
+        if query.has_attachment is True:
+            clauses.append(
+                "json_valid(m.attachment_metadata_json) "
+                "AND json_array_length(m.attachment_metadata_json) > 0"
+            )
+        elif query.has_attachment is False:
+            clauses.append(
+                "json_valid(m.attachment_metadata_json) "
+                "AND json_array_length(m.attachment_metadata_json) = 0"
+            )
+
+        direction = "ASC" if query.order == "oldest" else "DESC"
+        params.append(min(query.limit + 1, 101))
+        sql = f"""
+            SELECT m.*, c.logical_category_key, c.audience, c.confidence,
+                   c.decision_source, c.review_required,
+                   s.summary_text, s.structured_summary_json, s.model_provider, s.model_name,
+                   us.review_state AS user_review_state,
+                   us.disposition AS user_disposition,
+                   us.snoozed_until AS user_snoozed_until
+            FROM email_messages m
+            LEFT JOIN email_classifications c
+              ON c.gmail_message_id=m.gmail_message_id AND c.taxonomy_version=?
+            LEFT JOIN email_user_state us
+              ON us.gmail_message_id=m.gmail_message_id
+             AND us.user_id=? AND us.discord_channel_id=?
+            LEFT JOIN email_summaries s ON s.summary_id=(
+                SELECT s2.summary_id FROM email_summaries s2
+                WHERE s2.scope_type='message' AND s2.scope_id=m.gmail_message_id
+                      AND s2.source_hash=m.canonical_body_hash
+                ORDER BY s2.created_at DESC LIMIT 1
+            )
+            WHERE {' AND '.join(clauses)}
+            ORDER BY m.internal_date {direction}, m.gmail_message_id {direction}
             LIMIT ?
         """
         with self._lock:

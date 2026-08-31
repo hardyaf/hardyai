@@ -12,7 +12,7 @@ The candidate uses a 32,768-token Jarvis context even though the upstream model 
 
 ## Current verified baseline
 
-- HardyAI is the canonical source checkout; Hardybot `/home/codex/jarvis-poc` is the only build, test, model, GPU, and deployment host.
+- HardyAI is the canonical source checkout; `the protected authoritative deployment checkout` on Hardybot is the only build, test, model, GPU, and deployment location.
 - Production currently selects `gpt-oss:20b` for Main and `qwen2.5:7b` for Micro.
 - Main conversation, repair, web-research decision, email semantic work, and action-ticket review all derive from the configured Main model.
 - Production Main contexts are already 32,768; some source/example defaults were stale at 12,288 and are corrected by this migration.
@@ -68,7 +68,7 @@ Only the separate Ollama `thinking` response field may contain reasoning. Jarvis
 2. Back up the protected `.env` and identify the exact source revision/deployment image used for rollback.
 3. Use explicit GPU device IDs for Ollama and PaddleOCR-VL. If a second GPU is installed, assign Ollama and VLM deliberately by UUID after memory/load measurements; do not infer order from PCI numbering.
 4. Keep Ollama offline/cloud-disabled in production.
-5. Copy the existing Ollama model store into `/mnt/hardyai-documents/models/ollama`, verify its checksum/file count, and retain the old named volume as a rollback source until the observation window ends.
+5. Copy the existing Ollama model store into `the protected Ollama model-artifact path`, verify its checksum/file count, and retain the old named volume as a rollback source until the observation window ends.
 
 Gate: rollback commands are verified and the effective Compose configuration names only intended GPU devices.
 
@@ -146,14 +146,14 @@ This is the Main-model migration, not the later dual-GPU coding-mode plan. The s
 
 - Pre-migration application image: `sha256:5842c2285e3f8569ffe0ff5a0393e401368e8f855671dd5d2cc96e86ef6ca2d4`, retained as `jarvis-poc-app:pre-qwen38-20260826`.
 - Migration infrastructure image: `sha256:0cc178ebc3da0428b399612292f68518543bbe6a26d09530d88fcb50312af509`.
-- Protected rollback snapshot: `/mnt/hardyai-documents/backups/pre-qwen38-20260826/`.
+- Protected rollback snapshot: `the protected pre-migration rollback-snapshot path`.
 - Source archive SHA-256: `37647fa1e2613d162bdf879c7111d0ca431aa1b552a1c405f7510535ea3736b8`.
 - Protected `.env` backup SHA-256: `2d9ab27d5fb3670a6b7af0ab89af9fe9d3df5312abf924f104380744aa2c4f7f`.
 
 ### Model storage and bill of materials
 
 - The original named volume and the new NVMe store each contained 19 files with the same relative-path/size manifest hash, `0b8bd3e9543d51d48357e904c0ae6b2a2c8117018ef3aa0b5323515fe7cf0cf6`, before Qwen provisioning.
-- Ollama now uses the bind mount `/mnt/hardyai-documents/models/ollama`; the original named volume remains untouched for rollback.
+- Ollama now uses the bind mount at `the protected Ollama model-artifact path`; the original named volume remains untouched for rollback.
 - Qwen local manifest digest: `22130167c4c20e20c7b71454612966ca8e8171e9b3cc8ab6ce8aa6cbfec79643`.
 - Qwen model blob: `f5f1dd8920d417aac2718b0bda3403da274301efdd6760b4f0f4b864ff2ad57d`.
 - Qwen projector blob: `ac3714bfdddeca31351f2752bf1a63f266f4df87c0b68c895e44945ca704448e`.

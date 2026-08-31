@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.core.tool_loop_types import MainActionCommitment, ToolLoopContractError
 from app.core.types import MAIN_ACTION_INTENTS
 
 
@@ -13,10 +14,23 @@ MAIN_TURN_MODES = {
 MAIN_TURN_ACTION_INTENTS = {intent.value for intent in MAIN_ACTION_INTENTS}
 
 
-def normalize_main_turn_decision(raw: dict[str, Any] | None) -> dict[str, Any] | None:
+def normalize_main_turn_decision(
+    raw: dict[str, Any] | None,
+    *,
+    execution_mode: str = "off",
+) -> dict[str, Any] | None:
     """Validate Main's conversational/action commitment boundary."""
 
     if not isinstance(raw, dict):
+        return None
+
+    mode_setting = str(execution_mode or "off").strip().casefold()
+    if mode_setting in {"shadow", "active"}:
+        try:
+            return MainActionCommitment.from_mapping(raw).to_dict()
+        except ToolLoopContractError:
+            return None
+    if mode_setting != "off":
         return None
 
     mode = str(raw.get("mode") or "").strip().lower()

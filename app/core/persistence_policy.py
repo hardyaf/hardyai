@@ -6,6 +6,8 @@ from enum import StrEnum
 
 class PersistencePolicyName(StrEnum):
     STANDARD = "standard"
+    REDACTED = "redacted"
+    NO_STORE = "no_store"
     SENSITIVE_DOMAIN = "sensitive_domain"
     RESTRICTED_READ = "restricted_read"
     EPHEMERAL = "ephemeral"
@@ -29,6 +31,22 @@ _POLICIES = {
         record_conversation_history=True,
         record_memory=True,
         capture_ticket=True,
+    ),
+    PersistencePolicyName.REDACTED: PersistencePolicy(
+        name=PersistencePolicyName.REDACTED,
+        record_entity_context=False,
+        record_recent_turns=False,
+        record_conversation_history=False,
+        record_memory=False,
+        capture_ticket=False,
+    ),
+    PersistencePolicyName.NO_STORE: PersistencePolicy(
+        name=PersistencePolicyName.NO_STORE,
+        record_entity_context=False,
+        record_recent_turns=False,
+        record_conversation_history=False,
+        record_memory=False,
+        capture_ticket=False,
     ),
     PersistencePolicyName.SENSITIVE_DOMAIN: PersistencePolicy(
         name=PersistencePolicyName.SENSITIVE_DOMAIN,
@@ -58,17 +76,33 @@ _POLICIES = {
 
 _POLICY_RANK = {
     PersistencePolicyName.STANDARD: 0,
+    PersistencePolicyName.REDACTED: 1,
+    PersistencePolicyName.NO_STORE: 2,
     PersistencePolicyName.SENSITIVE_DOMAIN: 1,
     PersistencePolicyName.RESTRICTED_READ: 2,
     PersistencePolicyName.EPHEMERAL: 3,
 }
 
 
-def persistence_policy(value: PersistencePolicy | PersistencePolicyName | str | None) -> PersistencePolicy:
+def persistence_policy(
+    value: PersistencePolicy | PersistencePolicyName | str | None,
+    *,
+    canonicalize_legacy_aliases: bool = False,
+) -> PersistencePolicy:
     if isinstance(value, PersistencePolicy):
         return value
+    raw = str(value or PersistencePolicyName.STANDARD.value).strip().casefold()
+    aliases = (
+        {
+            PersistencePolicyName.SENSITIVE_DOMAIN.value: PersistencePolicyName.REDACTED,
+            PersistencePolicyName.RESTRICTED_READ.value: PersistencePolicyName.NO_STORE,
+            PersistencePolicyName.EPHEMERAL.value: PersistencePolicyName.NO_STORE,
+        }
+        if canonicalize_legacy_aliases
+        else {}
+    )
     try:
-        name = PersistencePolicyName(str(value or PersistencePolicyName.STANDARD.value))
+        name = aliases.get(raw, PersistencePolicyName(raw))
     except ValueError:
         name = PersistencePolicyName.EPHEMERAL
     return _POLICIES[name]

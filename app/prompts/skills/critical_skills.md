@@ -2,482 +2,9 @@
 
 Auto-generated from SQL `skills` registry.
 - min_critical_level: 1
-- skill_count: 8
+- skill_count: 6
 
-## 1. Memory (`skill.core.memory`)
-
-- critical_level: 3
-- intents: memory.store_fact, memory.get_fact, memory.update_fact, memory.delete_fact, memory.list_memories
-- markdown_path: `app/prompts/skills/memory_skill.md`
-
----
-skill_id: skill.core.memory
-skill_name: Memory
-skill_user: all
-skill_agents:
-  - all
-created_by: system
-intents:
-  - memory.store_fact
-  - memory.get_fact
-  - memory.update_fact
-  - memory.delete_fact
-  - memory.list_memories
-execution_ref: app.skills.domains.memory.handler:run
-storage_type: sql
-storage_ref: app.skills.domains.memory.storage:SQLiteMemoryStorage(memories,memory_tags,memory_access_log)
-critical_level: 3
-active: true
-version: 1
-
-micro_enabled: false
-micro_functions: []
-micro_failure_handoff:
-  baseline_context_keys:
-    - micro_intent
-    - micro_confidence
-    - micro_entities
-    - micro_ambiguity_flags
-    - required_missing_fields
-    - token_session_turn_summaries
-  capability_context_keys: []
-
-main_handoff_context:
-  always_pass_from_session:
-    - pending_clarification
-    - main_agent_token_session
-    - token_session_turn_summaries
-  domain_carryover:
-    - last_memory_reference
-    - last_memory_topic
-    - last_memory_action
-    - pending_memory_confirmation
----
-
-# Memory Skill
-
-## Purpose
-
-Store and retrieve durable household memory that improves continuity, personalization, and task execution over time.
-
-This skill is responsible for:
-- storing explicit user-provided facts meant to persist
-- recalling previously stored memories
-- updating stored memories when they change
-- deleting stored memories when asked
-- listing relevant memories by topic or scope
-
-This skill is not responsible for:
-- replacing normal conversational reasoning
-- storing every transient message
-- silently storing speculative or inferred facts as truth
-- acting as a raw conversation log
-
-## Memory Model
-
-This skill manages **persistent structured memory**, not temporary working context.
-
-Use this skill for information that is:
-- likely to matter again
-- stable or semi-stable over time
-- useful for future task execution
-- intentionally provided or confirmed by the user
-
-Examples:
-- preferred names
-- household routines
-- durable preferences
-- project conventions
-- known family roles
-- recurring constraints
-- device names and meanings
-- definitions Jarvis should reuse later
-
-Do not store:
-- one-off requests with no future value
-- raw emotional venting unless user explicitly wants it remembered
-- weak guesses or speculative inferences
-- highly sensitive personal data unless system policy explicitly allows it
-
-## When To Use This Skill
-
-Use this skill when the user wants Jarvis to remember, recall, update, forget, or review persistent information.
-
-Examples:
-- "remember that Casey hates scratchy socks"
-- "what do you remember about Taylor's schedule preferences?"
-- "update that, we moved watering plants to Sunday"
-- "forget the old internet password note"
-- "show me what you remember about the house lights"
-
-## Do Not Use This Skill
-
-Do not use this skill when:
-- the information is only needed for the current turn
-- the user is brainstorming and has not committed to a fact
-- the content is too vague to store cleanly
-- the content is a raw transcript better handled by session context
-- the memory would violate system privacy or sensitivity policy
-
-## Intent Mapping
-
-### `memory.store_fact`
-Store a new persistent memory.
-
-Common phrases:
-- "remember that..."
-- "save this for later"
-- "keep in mind that..."
-- "Jarvis should know that..."
-
-### `memory.get_fact`
-Retrieve one or more stored memories.
-
-Common phrases:
-- "what do you remember about..."
-- "do you know whether..."
-- "remind me what you know about..."
-- "what have we said about..."
-
-### `memory.update_fact`
-Change an existing memory.
-
-Common phrases:
-- "update that"
-- "actually, change it to..."
-- "that's no longer true"
-- "replace the old one with this"
-
-### `memory.delete_fact`
-Delete a stored memory.
-
-Common phrases:
-- "forget that"
-- "delete that memory"
-- "remove the old note about..."
-- "don't remember that anymore"
-
-### `memory.list_memories`
-List stored memories for a topic, category, or entity.
-
-Common phrases:
-- "what do you remember about the kids?"
-- "show me the house preferences"
-- "list what you know about our routines"
-
-## Required Inputs
-
-### Store Fact
-- `memory_text` required
-- `topic` recommended
-- `scope` optional
-  - examples:
-    - person
-    - household
-    - project
-    - device
-    - routine
-- `importance` optional
-  - allowed values:
-    - low
-    - normal
-    - high
-    - critical
-
-### Get Fact
-At least one of:
-- `topic`
-- `entity_name`
-- `query_text`
-
-### Update Fact
-- `memory_reference` required unless a single safe prior memory is in context
-- updated content required
-
-### Delete Fact
-- `memory_reference` required unless a single safe prior memory is in context
-
-### List Memories
-At least one of:
-- `topic`
-- `scope`
-- `entity_name`
-
-## Storage Criteria
-
-A fact is worth storing only if at least one of these is true:
-- the user explicitly asks to remember it
-- it will likely improve future task execution
-- it is a durable household preference or rule
-- it defines a recurring workflow, relationship, or system convention
-- it is a stable descriptor of how Jarvis should behave
-
-A fact should usually not be stored if:
-- it is only useful this turn
-- it is highly likely to change soon
-- it is redundant with already stored memory
-- it is too vague to retrieve later
-- it is an unverified inference
-
-## Memory Quality Rules
-
-Stored memories should be:
-- concise
-- atomic when possible
-- phrased as usable facts
-- tagged for retrieval
-- timestamped
-- attributable when relevant
-
-Good stored form:
-- "Taylor prefers short, direct summaries unless she asks for detail."
-- "Casey dislikes scratchy socks."
-- "The porch switch refers to the front exterior light."
-
-Bad stored form:
-- long raw paragraphs
-- ambiguous statements without subject
-- speculative guesses
-- duplicate near-copies of existing memories
-
-## Context Resolution Rules
-
-Jarvis may use `last_memory_reference` only when:
-- the immediately relevant prior turn clearly discussed a single memory
-- there is no competing memory candidate
-- the user uses follow-up phrasing such as:
-  - "update that"
-  - "forget it"
-  - "change that to Sunday"
-
-Jarvis must not assume when:
-- multiple memories were recently discussed
-- the topic is broad
-- the prior memory is stale or unclear
-
-When unsafe, ask a short clarification.
-
-## Output Schema
-
-Return:
-- `status`: `ok | needs_input | ambiguous_memory | not_found | duplicate | partial | error`
-- `message`: short user-facing summary
-
-Optional payloads:
-- `memory_id`
-- `memory_text`
-- `normalized_memory_text`
-- `topic`
-- `scope`
-- `importance`
-- `matching_memories`
-- `suggestions`
-- `pending_confirmation`
-
-## Execution Rules
-
-1. Classify the request into a memory intent.
-2. Extract structured fields:
-   - memory text
-   - topic
-   - scope
-   - entity
-   - reference target
-3. For store requests:
-   - check whether the content meets storage criteria
-   - normalize into a concise usable fact
-   - detect strong duplicates
-4. For retrieval requests:
-   - search by topic, entity, tags, and semantic text
-   - rank exact and high-confidence matches first
-5. For update/delete requests:
-   - resolve the target memory safely
-   - do not modify weak matches
-6. If ambiguity exists:
-   - return clarification with top candidates
-7. Execute only after target and action are clear.
-8. Update carryover context:
-   - `last_memory_reference`
-   - `last_memory_topic`
-   - `last_memory_action`
-9. Return a concise result summary.
-
-## Clarification Rules
-
-Ask for clarification when:
-- the fact is too vague to store well
-- multiple memories match a retrieval or update request
-- delete/update target is not safely identified
-- the user asks to remember something but the actual fact is unclear
-- topic or entity matters for future retrieval and is missing
-
-Preferred clarification style:
-- short
-- single question
-- include best suggestion when useful
-
-Examples:
-- "What exactly should I remember?"
-- "Which memory do you want me to update?"
-- "Do you want me to store that under Casey or under household routines?"
-
-## Duplicate Rules
-
-On store:
-- exact duplicates should not create new entries
-- very strong near-duplicates should return `duplicate` or offer update/merge behavior
-- weaker similarity should not block storage automatically
-
-On update:
-- prefer updating the existing canonical memory rather than creating a second version when clearly appropriate
-
-## Safe Defaults
-
-- do not store vague fragments as permanent memory
-- do not store inferred facts as confirmed truth
-- do not delete or overwrite memory without confident target resolution
-- do not claim something is remembered unless storage confirms success
-- prefer concise normalized memory text over raw user wording when meaning is preserved
-
-## MicroJarvis Contract
-
-### Micro functions that are allowed
-
-- None.
-
-### Escalation triggers to Main Jarvis
-
-- All memory requests route to Main Jarvis.
-
-### Failure handoff payload to Main Jarvis
-
-- Include baseline micro decision context for interpretability.
-- Include `required_missing_fields` when micro classification indicates missing required inputs.
-
-## Main Jarvis Responsibilities
-
-Since micro is disabled, all memory requests go through Main Jarvis.
-
-Main Jarvis must:
-- judge whether information is worth storing
-- normalize memories into concise durable facts
-- retrieve memories by meaning as well as keywords
-- ask clarifying questions when memory targets are ambiguous
-- distinguish between short-term conversational context and persistent memory
-- avoid over-storing transient clutter
-
-## Failure Behavior
-
-### `needs_input`
-Use when required information is missing or too vague.
-
-### `ambiguous_memory`
-Use when multiple memories could match the request.
-
-### `not_found`
-Use when no relevant memory is found.
-
-### `duplicate`
-Use when the same memory already exists strongly enough that a second copy should not be created.
-
-### `partial`
-Use when listing or batch operations only succeed in part.
-
-### `error`
-Use for storage failures, handler failures, or invalid requests.
-
-Never claim something is stored, updated, or deleted unless the execution layer confirmed it.
-
-## Storage Contract
-
-Primary tables:
-- `memories`
-- `memory_tags`
-- `memory_access_log`
-
-Minimum expectations:
-- stable memory identity
-- normalized memory text
-- optional raw source text
-- tags/topics/entities
-- timestamps for created and updated
-- importance level
-- soft delete or hard delete support according to system policy
-- access logging sufficient for debugging and ranking
-
-Suggested core fields for `memories`:
-- `id`
-- `owner`
-- `memory_text`
-- `normalized_text`
-- `topic`
-- `scope`
-- `entity_name`
-- `importance`
-- `created_at`
-- `updated_at`
-- `is_deleted`
-
-Suggested core fields for `memory_tags`:
-- `id`
-- `memory_id`
-- `tag`
-
-Suggested core fields for `memory_access_log`:
-- `id`
-- `memory_id`
-- `action`
-- `timestamp`
-
-## Retrieval Behavior
-
-When retrieving memory:
-- prefer exact topic/entity matches first
-- then high-confidence semantic matches
-- rank by:
-  - direct relevance
-  - importance
-  - recency
-  - frequency of access, if supported
-
-For user-facing results:
-- summarize cleanly
-- do not dump excessive raw storage detail unless asked
-- group related memories when helpful
-
-## Follow-Up Examples
-
-### Safe continuation
-User: "Remember that Casey hates scratchy socks."
-User: "Update that to wool socks, not all scratchy socks."
--> safe to resolve prior memory
-
-### Unsafe continuation
-User: "Remember that Casey hates scratchy socks."
-User: "Remember that Taylor prefers concise summaries."
-User: "Update that."
--> ask which memory
-
-### Duplicate flow
-User: "Remember that Taylor prefers concise summaries."
-User later: "Remember Taylor likes short direct answers."
--> likely duplicate or merge suggestion
-
-### Topic listing
-User: "What do you remember about house devices?"
--> list device-related memories, not all memories
-
-## Learnability Checklist
-
-- [x] Intent boundaries are explicit
-- [x] Required fields are explicit
-- [x] Persistent vs temporary memory is clearly separated
-- [x] Duplicate handling is defined
-- [x] Ambiguity handling is defined
-- [x] No silent storage of weak guesses
-- [x] No hallucinated memory operations
-
-## 2. Lists (`skill.lists.core`)
+## 1. Lists (`skill.lists.core`)
 
 - critical_level: 3
 - intents: lists.create_list, lists.add_item, lists.get_items, lists.delete_list, lists.remove_item, lists.mark_item_done
@@ -557,6 +84,301 @@ main_handoff_context:
     - last_list_name
     - last_successful_action
     - pending_list_confirmation
+main_tools_contract_version: 1
+main_tools:
+  - tool_id: lists.list_collections
+    contract_version: 1
+    purpose: "Enumerate the current user's authorized personal and explicitly shared list collections. Call this with no arguments when a requested list name is missing or must be resolved."
+    interactive: true
+    effect: read
+    approval_rule: none
+    approval_conditions: []
+    idempotency: not_applicable
+    sensitivity: private
+    persistence: redacted
+    effect_cardinality: single
+    runtime_dependencies: []
+    transferable_observation_fields:
+      - pattern: /collections/*/collection_ref
+        scope: same_domain
+      - pattern: /collections/*/name
+        scope: same_domain
+    timeout_seconds: 5
+    max_result_items: 100
+    max_observation_chars: 4000
+    legacy_intents: []
+    input_schema:
+      type: object
+      additionalProperties: false
+      required: []
+      properties: {}
+    observation_schema:
+      type: object
+      additionalProperties: false
+      required:
+        - collections
+        - owner_scope
+        - truncated
+      properties:
+        collections:
+          type: array
+          minItems: 0
+          maxItems: 100
+          items: &lists_collection_observation
+            type: object
+            additionalProperties: false
+            required:
+              - collection_ref
+              - name
+              - owner_scope
+              - item_count
+              - updated_at
+            properties:
+              collection_ref:
+                type: string
+                minLength: 1
+                maxLength: 255
+              name:
+                type: string
+                minLength: 1
+                maxLength: 100
+              owner_scope:
+                type: string
+                enum:
+                  - personal
+                  - shared
+              item_count:
+                type: integer
+                minimum: 0
+                maximum: 1000000
+              updated_at:
+                type: string
+                minLength: 0
+                maxLength: 64
+        owner_scope:
+          type: string
+          enum:
+            - personal_and_shared
+        truncated:
+          type: boolean
+
+  - tool_id: lists.get_collection
+    contract_version: 1
+    purpose: "Read one exact authorized list collection and a bounded ordered item set."
+    interactive: true
+    effect: read
+    approval_rule: none
+    approval_conditions: []
+    idempotency: not_applicable
+    sensitivity: private
+    persistence: redacted
+    effect_cardinality: single
+    runtime_dependencies: []
+    transferable_observation_fields:
+      - pattern: /collection/collection_ref
+        scope: same_domain
+      - pattern: /items/*/item_ref
+        scope: same_domain
+    timeout_seconds: 5
+    max_result_items: 100
+    max_observation_chars: 6000
+    legacy_intents:
+      - lists.get_items
+    input_schema: &lists_collection_selector_input
+      type: object
+      additionalProperties: false
+      required: []
+      properties:
+        collection_ref:
+          type: string
+          minLength: 1
+          maxLength: 255
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+    observation_schema:
+      type: object
+      additionalProperties: false
+      required:
+        - items
+        - owner_scope
+        - truncated
+        - candidates
+      properties:
+        collection: *lists_collection_observation
+        items:
+          type: array
+          minItems: 0
+          maxItems: 100
+          items: &lists_item_observation
+            type: object
+            additionalProperties: false
+            required:
+              - item_ref
+              - text
+              - checked
+              - position
+            properties:
+              item_ref:
+                type: string
+                minLength: 1
+                maxLength: 255
+              text:
+                type: string
+                minLength: 1
+                maxLength: 500
+              checked:
+                type: boolean
+              position:
+                type: integer
+                minimum: 1
+                maximum: 1000000
+        owner_scope:
+          type: string
+          enum:
+            - personal
+            - shared
+            - unresolved
+        truncated:
+          type: boolean
+        candidates:
+          type: array
+          minItems: 0
+          maxItems: 5
+          items: *lists_collection_observation
+
+  - tool_id: lists.create_collection
+    contract_version: 1
+    purpose: "Create one named empty personal list collection only; this operation does not add items. Return its stable reference."
+    interactive: true
+    effect: local_write
+    approval_rule: none
+    approval_conditions: []
+    idempotency: required
+    sensitivity: private
+    persistence: redacted
+    effect_cardinality: single
+    runtime_dependencies: []
+    transferable_observation_fields:
+      - pattern: /collection/collection_ref
+        scope: same_domain
+    timeout_seconds: 10
+    max_result_items: 1
+    max_observation_chars: 3000
+    legacy_intents:
+      - lists.create_list
+    input_schema:
+      type: object
+      additionalProperties: false
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+    observation_schema:
+      type: object
+      additionalProperties: false
+      required:
+        - collection
+        - created
+        - idempotent_replay
+      properties:
+        collection: *lists_collection_observation
+        created:
+          type: boolean
+        idempotent_replay:
+          type: boolean
+
+  - tool_id: lists.add_items
+    contract_version: 1
+    purpose: "Atomically add one explicit ordered item array to one exact authorized list collection. Supply exactly one selector: before a trusted reference exists, put the human-supplied list name in name and omit collection_ref; after a tool returns collection_ref, copy that opaque collection_v1 value and omit name. If the named list is missing and the request clearly intends it to exist, inspect collections, create it, then retry this tool with the created collection_ref."
+    interactive: true
+    effect: local_write
+    approval_rule: none
+    approval_conditions: []
+    idempotency: required
+    sensitivity: private
+    persistence: redacted
+    effect_cardinality: atomic_batch
+    runtime_dependencies: []
+    transferable_observation_fields: []
+    timeout_seconds: 10
+    max_result_items: 50
+    max_observation_chars: 4000
+    legacy_intents:
+      - lists.add_item
+    input_schema:
+      type: object
+      description: "Exactly two properties: items and one of name or collection_ref. Never supply both selectors."
+      additionalProperties: false
+      required:
+        - items
+      minProperties: 2
+      maxProperties: 2
+      properties:
+        collection_ref:
+          type: string
+          description: "Opaque collection_v1 reference copied only from a trusted tool observation; never put a human list name here."
+          minLength: 1
+          maxLength: 255
+        name:
+          type: string
+          description: "Human-supplied list name from the request, used when no trusted collection_ref has been observed."
+          minLength: 1
+          maxLength: 100
+        items:
+          type: array
+          minItems: 1
+          maxItems: 50
+          items:
+            type: string
+            minLength: 1
+            maxLength: 500
+    observation_schema:
+      type: object
+      additionalProperties: false
+      required:
+        - added_items
+        - existing_item_count
+        - failed_items
+        - candidates
+        - idempotent_replay
+      properties:
+        collection_ref:
+          type: string
+          minLength: 1
+          maxLength: 255
+        added_items:
+          type: array
+          minItems: 0
+          maxItems: 50
+          items: *lists_item_observation
+        existing_item_count:
+          type: integer
+          minimum: 0
+          maximum: 1000000
+        failed_items:
+          type: array
+          minItems: 0
+          maxItems: 50
+          items:
+            type: string
+            minLength: 1
+            maxLength: 100
+        candidates:
+          type: array
+          minItems: 0
+          maxItems: 5
+          items: *lists_collection_observation
+        idempotent_replay:
+          type: boolean
 ---
 
 # Lists Skill
@@ -654,11 +476,12 @@ Common phrases:
 
 ### Compound Create And Add
 - A request that creates one list and immediately adds items is a typed Main plan.
-- Accept numbered or comma-separated items and optional separators such as `add:` or `add-`.
-- Preserve parenthetical owner labels such as `(Jordan)` as part of the item text.
-- Execute one `lists.create_list` step followed by one distinct `lists.add_item` step per item.
-- Allow at most seven items in one request so the plan remains within the bounded eight-step loop.
-- For larger requests, ask the user to split the items into bounded groups.
+- Main interprets the user's wording into the closed `items[]` schema; punctuation and conjunctions are
+  not parsed by the Lists domain.
+- Preserve the intended item text after model interpretation, including meaningful punctuation or labels.
+- Execute one `lists.create_collection` call, observe its stable reference, then execute one atomic
+  `lists.add_items` call for the complete bounded array.
+- The same path handles one through 50 items; item count does not select a different handler or workflow.
 
 ### Get Items
 - `list_name` required unless safely resolved from context
@@ -795,9 +618,9 @@ Main Jarvis should:
 - handle conversational phrasing
 - ask clarifying questions when needed
 - resolve deictic follow-ups safely
-- convert natural planning language into one-step list actions when appropriate
+- convert natural planning language into typed list tools without phrase-specific domain branches
 - preserve continuity across turns
-- execute bounded create-and-add requests as distinct typed list operations
+- execute bounded create-and-add requests as `create_collection` followed by one `add_items(items[])`
 
 ## Failure Behavior
 
@@ -859,7 +682,7 @@ User: "Add milk to groceres."
 - [x] Pronoun/deictic behavior documented
 - [x] No silent fuzzy execution
 
-## 3. Calendar (`skill.productivity.calendar`)
+## 2. Calendar (`skill.productivity.calendar`)
 
 - critical_level: 3
 - intents: calendar.add_event, calendar.view, calendar.update_event, calendar.delete_event
@@ -882,10 +705,25 @@ storage_type: api
 storage_ref: google_calendar_oauth
 critical_level: 3
 active: true
+legacy_skill_ids:
+  - skill.calendar.core
 version: 2
 
-micro_enabled: false
-micro_functions: []
+micro_enabled: true
+micro_functions:
+  - function_id: calendar.view
+    intent: calendar.view
+    regex_contract: "direct bounded calendar view with deterministic date extraction"
+    supported_actions:
+      - read_calendar
+    required_entities:
+      - when_hint
+    unsupported_or_escalate:
+      - calendar.add_event
+      - calendar.update_event
+      - calendar.delete_event
+      - calendar.invite
+      - ambiguous_time_reference
 micro_failure_handoff:
   baseline_context_keys:
     - micro_intent
@@ -1202,350 +1040,7 @@ User: "Delete my meeting."
 - [x] Ambiguity handled safely
 - [x] No hallucinated execution
 
-## 4. Calendar (`skill.calendar.core`)
-
-- critical_level: 2
-- intents: calendar.view, calendar.add_event, calendar.update_event, calendar.delete_event
-- markdown_path: `app/prompts/skills/calendar_skill.md`
-
----
-skill_id: skill.productivity.calendar
-skill_name: Calendar
-skill_user: all
-skill_agents:
-  - all
-created_by: system
-intents:
-  - calendar.add_event
-  - calendar.view
-  - calendar.update_event
-  - calendar.delete_event
-execution_ref: app.skills.domains.calendar.handler:run
-storage_type: api
-storage_ref: google_calendar_oauth
-critical_level: 3
-active: true
-version: 2
-
-micro_enabled: false
-micro_functions: []
-micro_failure_handoff:
-  baseline_context_keys:
-    - micro_intent
-    - micro_confidence
-    - micro_entities
-    - micro_ambiguity_flags
-    - required_missing_fields
-    - token_session_turn_summaries
-  capability_context_keys: []
-
-main_handoff_context:
-  always_pass_from_session:
-    - pending_clarification
-    - main_agent_token_session
-    - token_session_turn_summaries
-  domain_carryover:
-    - last_event_reference
-    - last_time_reference
-    - last_calendar_action
-    - pending_event_confirmation
----
-
-# Calendar Skill
-
-## Purpose
-
-Manage scheduled events with accurate time, date, and context handling.
-
-This skill is responsible for:
-- creating events
-- retrieving events
-- updating events
-- deleting events
-
-This skill prioritizes:
-- correctness over speed
-- clarity over assumption
-- explicit confirmation for destructive or ambiguous actions
-
-This skill is not responsible for:
-- guessing unclear times or dates
-- silently modifying events
-- interpreting vague scheduling without confirmation
-
-## When To Use This Skill
-
-Use this skill when the user wants to interact with their calendar.
-
-Examples:
-- "schedule a meeting tomorrow at 2"
-- "what do I have today?"
-- "move my dentist appointment to Friday"
-- "delete my 3pm meeting"
-
-## Do Not Use This Skill
-
-Do not use this skill when:
-- the user is discussing plans but not scheduling
-- time references are too vague without clarification
-- the request is about reminders that are not tied to calendar events (unless your system maps them)
-
-## Intent Mapping
-
-### `calendar.add_event`
-Create a new calendar event.
-
-Common phrases:
-- "schedule a meeting tomorrow at 2"
-- "add soccer practice Wednesday at 5"
-- "put a reminder on my calendar for Friday morning"
-
-### `calendar.view`
-Retrieve events.
-
-Common phrases:
-- "what do I have today?"
-- "what's on my calendar tomorrow?"
-- "what's my schedule this week?"
-
-### `calendar.update_event`
-Modify an existing event.
-
-Common phrases:
-- "move my dentist appointment to Friday"
-- "change my 3pm meeting to 4"
-- "update soccer practice to 6pm"
-
-### `calendar.delete_event`
-Delete an event.
-
-Common phrases:
-- "delete my meeting at 3"
-- "cancel my dentist appointment"
-- "remove soccer practice"
-
-## Required Inputs
-
-### Create Event
-- `title` required
-- `start_time` required
-- `date` required unless derivable from time expression
-- `duration` or `end_time` recommended
-- `timezone` assumed from system unless overridden
-
-### Get Events
-- `date_range` required
-  - examples:
-    - today
-    - tomorrow
-    - this week
-    - specific date
-
-### Update Event
-- `event_reference` required
-- at least one field to update:
-  - `new_when_hint`
-  - `new_event_title`
-  - `all_day`
-
-### Delete Event
-- `event_reference` required
-
-## Time Interpretation Rules
-
-### Absolute Time
-- "April 10 at 3pm" → exact
-- "3pm today" → resolve using current date
-
-### Relative Time
-- "tomorrow" → next calendar day
-- "next Friday" → next occurrence of Friday not today
-- "this Friday" → nearest upcoming Friday in current week
-
-### Ambiguous Time
-Must clarify when:
-- "later"
-- "in the afternoon"
-- "after lunch"
-- "this evening"
-
-### Time Defaults
-Only apply defaults when safe:
-- if user says "schedule a meeting tomorrow" → ask for time
-- do not default to arbitrary times unless system policy defines one
-
-## Context Resolution Rules
-
-Jarvis may use context when:
-- the user refers to "that meeting", "it", "the appointment"
-- only one clear prior event exists
-
-Jarvis must not assume when:
-- multiple events match
-- the reference is stale
-- the user changed topic
-
-When unsafe, ask clarification.
-
-## Output Schema
-
-Return:
-- `status`: `ok | needs_input | ambiguous_event | not_found | error`
-- `message`: short user-facing summary
-
-Optional payloads:
-- `event_id`
-- `title`
-- `start_time`
-- `end_time`
-- `date`
-- `events`
-- `suggestions`
-- `pending_confirmation`
-
-## Execution Rules
-
-1. Classify intent.
-2. Extract structured fields:
-   - title
-   - time
-   - date
-   - duration
-3. Normalize time:
-   - convert to system timezone
-   - ensure valid datetime
-4. Validate completeness.
-5. Resolve event reference if updating/deleting.
-6. If ambiguity exists:
-   - return clarification with suggestions
-7. Execute only when:
-   - required inputs are present
-   - event reference is unambiguous
-8. Update context:
-   - `last_event_reference`
-   - `last_calendar_action`
-   - `last_time_reference`
-9. Return concise confirmation.
-
-## Clarification Rules
-
-Ask for clarification when:
-- time is missing or ambiguous
-- date is unclear
-- multiple events match reference
-- duration is needed but missing
-
-Preferred style:
-- short
-- single question
-
-Examples:
-- "What time should I schedule that?"
-- "Which meeting do you mean?"
-- "Do you want to move it to 3pm or keep the same duration?"
-
-## Event Matching Rules
-
-When resolving an event:
-- match by:
-  - title
-  - time
-  - date
-- prefer exact matches
-- if multiple matches:
-  - return top candidates
-  - ask user to choose
-
-Never:
-- modify or delete based on weak match
-
-## Safe Defaults
-
-- never create events with missing critical fields
-- never update or delete without confident match
-- never assume duration unless system defines default
-- always confirm destructive actions if ambiguity exists
-
-## MicroJarvis Contract
-
-### Micro functions that are allowed
-
-- None.
-
-### Escalation triggers to Main Jarvis
-
-- All calendar requests route to Main Jarvis.
-
-### Failure handoff payload to Main Jarvis
-
-- Include baseline micro decision context for interpretability.
-- Include `required_missing_fields` when micro classification indicates missing required inputs.
-- Include `last_event_reference`, `last_calendar_action`, and the condensed session summary.
-- Resolve deictic follow-ups such as "make that all day" from the latest unambiguous calendar event.
-- If no safe event reference is available, preserve `deictic_event_reference` and ask which event.
-
-## Main Jarvis Responsibilities
-
-Since micro is disabled, all requests go through Main Jarvis.
-
-Main Jarvis must:
-- interpret natural language time expressions
-- resolve ambiguity safely
-- ask for clarification when needed
-- maintain continuity across turns
-- avoid hallucinating events or confirmations
-
-## Failure Behavior
-
-### `needs_input`
-Missing required fields.
-
-### `ambiguous_event`
-Multiple possible matches.
-
-### `not_found`
-No matching event found.
-
-### `error`
-Execution failure or API issue.
-
-Never claim success without confirmation from execution layer.
-
-## External System Contract
-
-- integrates with Google Calendar via OAuth
-- must:
-  - handle API failures gracefully
-  - confirm event creation/update/delete success
-  - maintain consistent timezone handling
-  - support event lookup and modification
-
-## Follow-Up Examples
-
-### Safe continuation
-User: "Schedule a meeting tomorrow at 3."
-User: "Move it to 4."
--> safe to resolve
-
-### Unsafe continuation
-User: "Schedule 2 meetings tomorrow."
-User: "Move it to 4."
--> ask which meeting
-
-### Suggestion flow
-User: "Delete my meeting."
--> "Which meeting do you want to delete?"
-
-## Learnability Checklist
-
-- [x] Intent boundaries are explicit
-- [x] Required fields are explicit
-- [x] Time rules clearly defined
-- [x] No silent assumptions
-- [x] Ambiguity handled safely
-- [x] No hallucinated execution
-
-## 5. Conversation (`skill.conversation.general`)
+## 3. Conversation (`skill.conversation.general`)
 
 - critical_level: 2
 - intents: conversation.general, unknown
@@ -1705,7 +1200,7 @@ Handle non-tool turns: explanation, planning, brainstorming, and guidance.
 - [x] Deictic/pronoun follow-up behavior documented.
 - [x] Micro failure -> main handoff continuity documented.
 
-## 6. Local Documents (`skill.documents.local`)
+## 4. Local Documents (`skill.documents.local`)
 
 - critical_level: 2
 - intents: documents.ingest, documents.status, documents.find, documents.get, documents.show_source, documents.reprocess, documents.escalate_ocr, documents.list_reviews, documents.propose_metadata, documents.correct_field, documents.confirm_fields
@@ -1901,10 +1396,10 @@ or extracted value may cross the generic handoff.
 - [x] Upload/parser work remains outside the conversational request path.
 - [x] Storage, persistence suppression, conflict, clarification, and failure contracts are explicit.
 
-## 7. Lights (`skill.home.lights`)
+## 5. Lights (`skill.home.lights`)
 
 - critical_level: 2
-- intents: home.set_switch, home.get_switch_state
+- intents: home.set_switch
 - markdown_path: `app/prompts/skills/lights_skill.md`
 
 ---
@@ -1916,12 +1411,18 @@ skill_agents:
 created_by: system
 intents:
   - home.set_switch
-  - home.get_switch_state
 execution_ref: app.skills.domains.lights.handler:run
 storage_type: sql
 storage_ref: app.skills.domains.lights.storage:SQLiteLightsStorage(switches,switch_actions_log)
 critical_level: 2
 active: true
+interactive: true
+operation_dispositions:
+  home.set_switch: migrate
+  home.list_devices: deferred
+  home.get_device_state: deferred
+  home.get_switch_state: deactivate_stale
+  home.list_switches: deactivate_stale
 version: 2
 
 micro_enabled: true
@@ -1943,19 +1444,6 @@ micro_functions:
       - scene_or_group_request
       - policy_restricted_target
       - unsafe_deictic_reference
-  - function_id: lights.get_switch_state
-    intent: home.get_switch_state
-    regex_contract: "direct single-switch state query with explicit or safely resolved target"
-    supported_actions:
-      - read_known_switch_state
-    required_entities:
-      - switch_name
-    unsupported_or_escalate:
-      - ambiguous_switch_reference
-      - missing_switch_name
-      - multi_switch_request
-      - unsafe_deictic_reference
-
 micro_failure_handoff:
   baseline_context_keys:
     - micro_intent
@@ -1985,12 +1473,11 @@ main_handoff_context:
 
 ## Purpose
 
-Control and inspect configured house light switches with safe, deterministic behavior.
+Control configured house light switches with safe, deterministic behavior.
 
 This skill is responsible for:
 - turning a known switch on
 - turning a known switch off
-- reporting the state of a known switch
 - preserving continuity for short follow-up references
 
 This skill is not responsible for:
@@ -2006,7 +1493,6 @@ Use this skill when the user wants to control or check a configured light switch
 Examples:
 - "turn on the kitchen light"
 - "switch off the mudroom light"
-- "is the porch light on?"
 - "turn it off" -> only if prior context safely resolves the switch
 
 ## Do Not Use This Skill
@@ -2028,13 +1514,9 @@ Common phrases:
 - "switch the mudroom light off"
 - "turn it on" -> only if context safely resolves target
 
-### `home.get_switch_state`
-Read the current state of a known switch.
-
-Common phrases:
-- "is the porch light on?"
-- "what's the state of the kitchen light?"
-- "did we leave the garage light on?"
+The future read operations are `home.list_devices` and `home.get_device_state`. They are deferred and
+must not be advertised or dispatched until their typed implementations are added. The historical names
+`home.get_switch_state` and `home.list_switches` are stale compatibility metadata only.
 
 ## Required Inputs
 
@@ -2044,9 +1526,6 @@ Common phrases:
   - allowed values:
     - `on`
     - `off`
-
-### Get Switch State
-- `switch_name` required unless safely resolved from context
 
 ## Context Resolution Rules
 
@@ -2076,14 +1555,13 @@ Optional payloads:
 - `switch_name`
 - `canonical_switch_name`
 - `state_after`
-- `state_current`
 - `available_switches`
 - `suggestions`
 - `pending_confirmation`
 
 ## Execution Rules
 
-1. Classify the request as `home.set_switch` or `home.get_switch_state`.
+1. Classify an executable request as `home.set_switch`.
 2. Extract `switch_name` and `action` if present.
 3. Normalize the switch reference:
    - ignore case
@@ -2151,7 +1629,6 @@ Examples:
 
 ### Allowed Directly by Micro
 - `home.set_switch`
-- `home.get_switch_state`
 
 ### Micro May Proceed Only When
 - the target switch is explicit or safely resolved
@@ -2233,7 +1710,7 @@ User: "Turn on the poarch light."
 - [x] Pronoun/deictic behavior documented
 - [x] No silent fuzzy execution
 
-## 8. Shared Email Agent (`skill.email.agent`)
+## 6. Shared Email Agent (`skill.email.agent`)
 
 - critical_level: 1
 - intents: email.list_recent, email.search, email.get_message, email.get_thread, email.summarize, email.discuss, email.status, email.mark_reviewed, email.snooze, email.dismiss, email.correct_category, email.mark_needs_reply, email.mark_complete, email.mark_spam, email.sync, email.promote_to_list, email.promote_to_calendar, email.promote_to_task, email.promote_to_wave
@@ -2305,6 +1782,526 @@ main_handoff_context:
     - focused_email_thread_id
     - last_email_source_route
     - last_email_category_key
+main_tools_contract_version: 1
+main_tools:
+  - tool_id: email.query_messages
+    contract_version: 1
+    purpose: "Find authorized messages in the bounded local projection by typed interval and filters."
+    interactive: true
+    effect: read
+    approval_rule: none
+    approval_conditions: []
+    idempotency: not_applicable
+    sensitivity: private
+    persistence: no_store
+    effect_cardinality: single
+    runtime_dependencies: []
+    transferable_observation_fields:
+      - pattern: /messages/*/message_ref
+        scope: same_domain
+    timeout_seconds: 10
+    max_result_items: 100
+    max_observation_chars: 8000
+    legacy_intents:
+      - email.list_recent
+      - email.search
+    input_schema: &email_query_input
+      type: object
+      additionalProperties: false
+      required:
+        - start
+        - end
+      properties:
+        start:
+          type: string
+          format: date-time
+          minLength: 1
+          maxLength: 64
+        end:
+          type: string
+          format: date-time
+          minLength: 1
+          maxLength: 64
+        senders:
+          type: array
+          minItems: 1
+          maxItems: 10
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 3
+            maxLength: 320
+        recipients:
+          type: array
+          minItems: 1
+          maxItems: 10
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 3
+            maxLength: 320
+        source:
+          type: string
+          minLength: 1
+          maxLength: 64
+        category:
+          type: string
+          minLength: 1
+          maxLength: 64
+        visibility:
+          type: string
+          enum:
+            - active
+            - unseen
+            - needs_reply
+            - completed
+            - spam
+            - all
+        text:
+          type: string
+          minLength: 1
+          maxLength: 200
+        has_attachment:
+          type: boolean
+        order:
+          type: string
+          enum:
+            - oldest
+            - newest
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+    observation_schema:
+      type: object
+      additionalProperties: false
+      required:
+        - messages
+        - normalized_query
+        - source
+        - freshness_at
+        - truncated
+      properties:
+        messages:
+          type: array
+          minItems: 0
+          maxItems: 100
+          items: &email_message_observation
+            type: object
+            additionalProperties: false
+            required:
+              - message_ref
+              - thread_ref
+              - received_at
+              - sender
+              - recipients
+              - subject
+              - snippet
+              - summary
+              - source
+              - category
+              - has_attachment
+              - attachment_names
+              - reference_set_ref
+            properties:
+              message_ref:
+                type: string
+                minLength: 2
+                maxLength: 3
+              thread_ref:
+                type: string
+                minLength: 1
+                maxLength: 64
+              received_at:
+                type: string
+                minLength: 1
+                maxLength: 64
+              sender:
+                type: string
+                minLength: 1
+                maxLength: 320
+              recipients:
+                type: array
+                minItems: 0
+                maxItems: 10
+                items:
+                  type: string
+                  minLength: 1
+                  maxLength: 320
+              subject:
+                type: string
+                minLength: 1
+                maxLength: 300
+              snippet:
+                type: string
+                minLength: 0
+                maxLength: 500
+              summary:
+                type: string
+                minLength: 0
+                maxLength: 700
+              source:
+                type: string
+                minLength: 1
+                maxLength: 64
+              category:
+                type: string
+                minLength: 1
+                maxLength: 64
+              has_attachment:
+                type: boolean
+              attachment_names:
+                type: array
+                minItems: 0
+                maxItems: 5
+                items:
+                  type: string
+                  minLength: 1
+                  maxLength: 100
+              reference_set_ref:
+                type: string
+                minLength: 1
+                maxLength: 64
+        normalized_query:
+          type: object
+          additionalProperties: false
+          required:
+            - start
+            - end
+            - visibility
+            - order
+            - limit
+            - timezone
+            - returned_count
+          properties:
+            start:
+              type: string
+              format: date-time
+              minLength: 1
+              maxLength: 64
+            end:
+              type: string
+              format: date-time
+              minLength: 1
+              maxLength: 64
+            senders:
+              type: array
+              minItems: 1
+              maxItems: 10
+              uniqueItems: true
+              items:
+                type: string
+                minLength: 3
+                maxLength: 320
+            recipients:
+              type: array
+              minItems: 1
+              maxItems: 10
+              uniqueItems: true
+              items:
+                type: string
+                minLength: 3
+                maxLength: 320
+            source:
+              type: string
+              minLength: 1
+              maxLength: 64
+            category:
+              type: string
+              minLength: 1
+              maxLength: 64
+            visibility:
+              type: string
+              enum:
+                - active
+                - unseen
+                - needs_reply
+                - completed
+                - spam
+                - all
+            text:
+              type: string
+              minLength: 1
+              maxLength: 200
+            has_attachment:
+              type: boolean
+            order:
+              type: string
+              enum:
+                - oldest
+                - newest
+            limit:
+              type: integer
+              minimum: 1
+              maximum: 100
+            timezone:
+              type: string
+              minLength: 1
+              maxLength: 64
+            returned_count:
+              type: integer
+              minimum: 0
+              maximum: 100
+        source: &email_projection_source
+          type: object
+          additionalProperties: false
+          required:
+            - kind
+            - stale
+          properties:
+            kind:
+              type: string
+              enum:
+                - email_sqlite_projection
+            stale:
+              type: boolean
+        freshness_at:
+          type: string
+          minLength: 1
+          maxLength: 64
+        truncated:
+          type: boolean
+  - tool_id: email.get_message
+    contract_version: 1
+    purpose: "Retrieve one currently authorized projected message."
+    interactive: true
+    effect: read
+    approval_rule: none
+    approval_conditions: []
+    idempotency: not_applicable
+    sensitivity: private
+    persistence: no_store
+    effect_cardinality: single
+    runtime_dependencies: []
+    transferable_observation_fields:
+      - pattern: /message/message_ref
+        scope: same_domain
+    timeout_seconds: 10
+    max_result_items: 1
+    max_observation_chars: 8000
+    legacy_intents:
+      - email.get_message
+    input_schema:
+      type: object
+      additionalProperties: false
+      required:
+        - message_ref
+      properties:
+        message_ref:
+          type: string
+          minLength: 2
+          maxLength: 3
+    observation_schema:
+      type: object
+      additionalProperties: false
+      required:
+        - message
+        - source
+        - freshness_at
+      properties:
+        message: *email_message_observation
+        source: *email_projection_source
+        freshness_at:
+          type: string
+          minLength: 1
+          maxLength: 64
+  - tool_id: email.get_thread
+    contract_version: 1
+    purpose: "Retrieve the bounded thread containing a currently authorized message."
+    interactive: true
+    effect: read
+    approval_rule: none
+    approval_conditions: []
+    idempotency: not_applicable
+    sensitivity: private
+    persistence: no_store
+    effect_cardinality: single
+    runtime_dependencies: []
+    transferable_observation_fields:
+      - pattern: /messages/*/message_ref
+        scope: same_domain
+    timeout_seconds: 10
+    max_result_items: 50
+    max_observation_chars: 8000
+    legacy_intents:
+      - email.get_thread
+    input_schema:
+      type: object
+      additionalProperties: false
+      required:
+        - message_ref
+      properties:
+        message_ref:
+          type: string
+          minLength: 2
+          maxLength: 3
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 50
+    observation_schema:
+      type: object
+      additionalProperties: false
+      required:
+        - messages
+        - thread_ref
+        - source
+        - freshness_at
+        - truncated
+      properties:
+        messages:
+          type: array
+          minItems: 0
+          maxItems: 50
+          items: *email_message_observation
+        thread_ref:
+          type: string
+          minLength: 1
+          maxLength: 64
+        source: *email_projection_source
+        freshness_at:
+          type: string
+          minLength: 1
+          maxLength: 64
+        truncated:
+          type: boolean
+  - tool_id: email.summarize
+    contract_version: 1
+    purpose: "Summarize a bounded authorized message selection for the user's stated focus."
+    interactive: true
+    effect: read
+    approval_rule: none
+    approval_conditions: []
+    idempotency: not_applicable
+    sensitivity: private
+    persistence: no_store
+    effect_cardinality: single
+    runtime_dependencies: []
+    transferable_observation_fields:
+      - pattern: /message_refs/*
+        scope: same_domain
+    timeout_seconds: 60
+    max_result_items: 50
+    max_observation_chars: 8000
+    legacy_intents:
+      - email.summarize
+    input_schema:
+      type: object
+      additionalProperties: false
+      required:
+        - message_refs
+      properties:
+        message_refs:
+          type: array
+          minItems: 1
+          maxItems: 50
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 2
+            maxLength: 3
+        focus:
+          type: string
+          minLength: 1
+          maxLength: 200
+    observation_schema:
+      type: object
+      additionalProperties: false
+      required:
+        - summary
+        - message_refs
+        - source
+        - freshness_at
+        - truncated
+      properties:
+        summary:
+          type: string
+          minLength: 1
+          maxLength: 6000
+        message_refs:
+          type: array
+          minItems: 1
+          maxItems: 50
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 2
+            maxLength: 3
+        source: *email_projection_source
+        freshness_at:
+          type: string
+          minLength: 1
+          maxLength: 64
+        truncated:
+          type: boolean
+  - tool_id: email.status
+    contract_version: 1
+    purpose: "Report content-free Email projection and sync status."
+    interactive: true
+    effect: read
+    approval_rule: none
+    approval_conditions: []
+    idempotency: not_applicable
+    sensitivity: private
+    persistence: redacted
+    effect_cardinality: single
+    runtime_dependencies: []
+    transferable_observation_fields: []
+    timeout_seconds: 5
+    max_result_items: 1
+    max_observation_chars: 1000
+    legacy_intents:
+      - email.status
+    input_schema:
+      type: object
+      additionalProperties: false
+      required: []
+      properties: {}
+    observation_schema:
+      type: object
+      additionalProperties: false
+      required:
+        - counts
+        - source
+        - freshness_at
+        - sync_state
+      properties:
+        counts:
+          type: object
+          additionalProperties: false
+          required:
+            - messages
+            - needs_review
+            - failed_runs
+            - dead_letter_messages
+          properties:
+            messages:
+              type: integer
+              minimum: 0
+              maximum: 2147483647
+            needs_review:
+              type: integer
+              minimum: 0
+              maximum: 2147483647
+            failed_runs:
+              type: integer
+              minimum: 0
+              maximum: 2147483647
+            dead_letter_messages:
+              type: integer
+              minimum: 0
+              maximum: 2147483647
+        source: *email_projection_source
+        freshness_at:
+          type: string
+          minLength: 1
+          maxLength: 64
+        sync_state:
+          type: string
+          enum:
+            - not_activated
+            - stale
+            - fresh
 ---
 
 # Shared Email Agent

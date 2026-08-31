@@ -199,6 +199,7 @@ class SQLiteStore:
             cur.execute("DELETE FROM memory_entries")
             cur.execute("DELETE FROM switch_actions_log")
             cur.execute("DELETE FROM switches")
+            cur.execute("DELETE FROM list_operations")
             cur.execute("DELETE FROM list_items")
             cur.execute("DELETE FROM lists")
             cur.execute("DELETE FROM skill_runs")
@@ -518,6 +519,8 @@ class SQLiteStore:
         active: bool = True,
         cron_enabled: bool = False,
         cron_expr: str | None = None,
+        main_tools: list[dict[str, Any]] | None = None,
+        main_tools_contract_version: int | None = None,
         updated_at: str,
     ) -> None:
         agents = [item.strip().lower() for item in skill_agents if str(item).strip()]
@@ -533,9 +536,10 @@ class SQLiteStore:
                     markdown_path, execution_ref, created_by, storage_type, storage_ref,
                     micro_enabled, micro_functions_json, micro_failure_handoff_json,
                     main_handoff_context_json, learnable_ready,
-                    critical_level, active, cron_enabled, cron_expr, updated_at
+                    critical_level, active, cron_enabled, cron_expr,
+                    main_tools_json, main_tools_contract_version, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(skill_id) DO UPDATE SET
                     skill_name=excluded.skill_name,
                     skill_user=excluded.skill_user,
@@ -555,6 +559,8 @@ class SQLiteStore:
                     active=excluded.active,
                     cron_enabled=excluded.cron_enabled,
                     cron_expr=excluded.cron_expr,
+                    main_tools_json=excluded.main_tools_json,
+                    main_tools_contract_version=excluded.main_tools_contract_version,
                     updated_at=excluded.updated_at
                 """,
                 (
@@ -583,6 +589,13 @@ class SQLiteStore:
                     1 if active else 0,
                     1 if cron_enabled else 0,
                     cron_expr.strip() if isinstance(cron_expr, str) and cron_expr.strip() else None,
+                    json.dumps(main_tools, ensure_ascii=True, sort_keys=True)
+                    if isinstance(main_tools, list)
+                    else None,
+                    int(main_tools_contract_version)
+                    if isinstance(main_tools_contract_version, int)
+                    and not isinstance(main_tools_contract_version, bool)
+                    else None,
                     updated_at,
                 ),
             )
@@ -596,7 +609,8 @@ class SQLiteStore:
                    micro_enabled, micro_functions_json, micro_failure_handoff_json,
                    main_handoff_context_json, learnable_ready, usage_count,
                    success_count, run_count, success_rate, critical_level, active,
-                   cron_enabled, cron_expr, last_used_at, updated_at
+                   cron_enabled, cron_expr, last_used_at,
+                   main_tools_json, main_tools_contract_version, updated_at
             FROM skills
             """
         )
@@ -638,6 +652,12 @@ class SQLiteStore:
                     "cron_enabled": bool(int(row["cron_enabled"])),
                     "cron_expr": row["cron_expr"],
                     "last_used_at": row["last_used_at"],
+                    "main_tools": self._json_list(row["main_tools_json"])
+                    if row["main_tools_json"] is not None
+                    else None,
+                    "main_tools_contract_version": int(row["main_tools_contract_version"])
+                    if row["main_tools_contract_version"] is not None
+                    else None,
                     "updated_at": row["updated_at"],
                 }
             )
@@ -676,19 +696,23 @@ class SQLiteStore:
         if not candidates:
             return None
 
-        def score(skill: dict[str, Any]) -> tuple[float, int, int]:
+        def ownership_order(skill: dict[str, Any]) -> tuple[int, int, int, str]:
             critical = int(skill.get("critical_level") or 0)
-            usage = int(skill.get("usage_count") or 0)
-            success_rate = float(skill.get("success_rate") or 0.0)
             skill_user = str(skill.get("skill_user") or "all").strip().lower()
             agents = {item.strip().lower() for item in skill.get("skill_agents") or [] if item}
+            user_specificity = 0 if skill_user == normalized_user else 1
+            agent_specificity = 0 if normalized_agent and normalized_agent in agents else 1
+            return (
+                user_specificity,
+                agent_specificity,
+                -critical,
+                str(skill.get("skill_id") or ""),
+            )
 
-            user_boost = 0.2 if skill_user == normalized_user else (0.1 if skill_user == "all" else 0.05)
-            agent_boost = 0.2 if normalized_agent and normalized_agent in agents else (0.1 if "all" in agents else 0.0)
-            score_value = (critical * 0.2) + min(usage, 1000) / 1000.0 * 0.2 + success_rate * 0.5 + user_boost + agent_boost
-            return (score_value, critical, usage)
-
-        candidates.sort(key=score, reverse=True)
+        # Runtime counters are telemetry, not authority. Duplicate ownership is
+        # reported separately; this stable order keeps resolution deterministic
+        # while an operator repairs the catalog.
+        candidates.sort(key=ownership_order)
         return candidates[0]
 
     def record_skill_run(
@@ -1338,6 +1362,299 @@ class SQLiteStore:
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
+
+    def get_list_by_id(self, owner_user_id: str, list_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT list_id, owner_user_id, list_name, list_name_normalized,
+                       created_by, created_at, updated_at
+                FROM lists
+                WHERE owner_user_id = ? AND list_id = ?
+                """,
+                (owner_user_id.strip().lower(), list_id.strip()),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "list_id": row["list_id"],
+            "owner_user_id": row["owner_user_id"],
+            "list_name": row["list_name"],
+            "list_name_normalized": row["list_name_normalized"],
+            "created_by": row["created_by"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    def create_list_with_operation(
+        self,
+        *,
+        owner_user_id: str,
+        list_name: str,
+        list_name_normalized: str,
+        created_by: str,
+        timestamp: str,
+        operation_id: str,
+        arguments_hash: str,
+    ) -> dict[str, Any]:
+        owner = owner_user_id.strip().lower()
+        display_name = list_name.strip()
+        normalized_name = list_name_normalized.strip().lower()
+        action = "lists.create_collection"
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute("BEGIN IMMEDIATE")
+            try:
+                existing_operation = cur.execute(
+                    """
+                    SELECT owner_user_id, action, target_ref, arguments_hash, status, result_json
+                    FROM list_operations WHERE operation_id = ?
+                    """,
+                    (operation_id,),
+                ).fetchone()
+                if existing_operation is not None:
+                    if (
+                        str(existing_operation["owner_user_id"]) != owner
+                        or str(existing_operation["action"]) != action
+                        or str(existing_operation["arguments_hash"]) != arguments_hash
+                        or str(existing_operation["status"]) != "completed"
+                    ):
+                        raise ValueError("list_operation_id_conflict")
+                    list_row = cur.execute(
+                        """
+                        SELECT list_id, owner_user_id, list_name, list_name_normalized,
+                               created_by, created_at, updated_at
+                        FROM lists WHERE owner_user_id = ? AND list_id = ?
+                        """,
+                        (owner, str(existing_operation["target_ref"])),
+                    ).fetchone()
+                    if list_row is None:
+                        raise ValueError("list_operation_replay_target_missing")
+                    replay_result = json.loads(str(existing_operation["result_json"] or "{}"))
+                    self._conn.commit()
+                    return {
+                        **dict(list_row),
+                        "created": bool(replay_result.get("created")),
+                        "idempotent_replay": True,
+                    }
+
+                list_row = cur.execute(
+                    """
+                    SELECT list_id, owner_user_id, list_name, list_name_normalized,
+                           created_by, created_at, updated_at
+                    FROM lists
+                    WHERE owner_user_id = ? AND list_name_normalized = ?
+                    """,
+                    (owner, normalized_name),
+                ).fetchone()
+                created = list_row is None
+                if list_row is None:
+                    list_id = str(uuid4())
+                    cur.execute(
+                        """
+                        INSERT INTO lists (
+                            list_id, owner_user_id, list_name, list_name_normalized,
+                            created_by, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            list_id,
+                            owner,
+                            display_name,
+                            normalized_name,
+                            created_by.strip(),
+                            timestamp,
+                            timestamp,
+                        ),
+                    )
+                    list_row = cur.execute(
+                        """
+                        SELECT list_id, owner_user_id, list_name, list_name_normalized,
+                               created_by, created_at, updated_at
+                        FROM lists WHERE list_id = ?
+                        """,
+                        (list_id,),
+                    ).fetchone()
+                if list_row is None:
+                    raise ValueError("list_create_failed")
+                result_json = json.dumps(
+                    {"created": created, "list_id": str(list_row["list_id"])},
+                    ensure_ascii=True,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                cur.execute(
+                    """
+                    INSERT INTO list_operations (
+                        operation_id, owner_user_id, action, target_ref, arguments_hash,
+                        status, result_json, created_at, completed_at
+                    ) VALUES (?, ?, ?, ?, ?, 'completed', ?, ?, ?)
+                    """,
+                    (
+                        operation_id,
+                        owner,
+                        action,
+                        str(list_row["list_id"]),
+                        arguments_hash,
+                        result_json,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+                self._conn.commit()
+                return {**dict(list_row), "created": created, "idempotent_replay": False}
+            except Exception:
+                self._conn.rollback()
+                raise
+
+    def add_list_items_with_operation(
+        self,
+        *,
+        owner_user_id: str,
+        list_id: str,
+        item_names: list[str],
+        added_by: str,
+        timestamp: str,
+        operation_id: str,
+        arguments_hash: str,
+    ) -> dict[str, Any]:
+        owner = owner_user_id.strip().lower()
+        target_list_id = list_id.strip()
+        action = "lists.add_items"
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute("BEGIN IMMEDIATE")
+            try:
+                existing_operation = cur.execute(
+                    """
+                    SELECT owner_user_id, action, target_ref, arguments_hash, status, result_json
+                    FROM list_operations WHERE operation_id = ?
+                    """,
+                    (operation_id,),
+                ).fetchone()
+                if existing_operation is not None:
+                    if (
+                        str(existing_operation["owner_user_id"]) != owner
+                        or str(existing_operation["action"]) != action
+                        or str(existing_operation["target_ref"]) != target_list_id
+                        or str(existing_operation["arguments_hash"]) != arguments_hash
+                        or str(existing_operation["status"]) != "completed"
+                    ):
+                        raise ValueError("list_operation_id_conflict")
+                    replay_result = json.loads(str(existing_operation["result_json"] or "{}"))
+                    item_ids = replay_result.get("item_ids")
+                    if not isinstance(item_ids, list) or any(not isinstance(item, str) for item in item_ids):
+                        raise ValueError("list_operation_result_invalid")
+                    rows: list[dict[str, Any]] = []
+                    for item_id in item_ids:
+                        row = cur.execute(
+                            """
+                            SELECT item_id, list_id, item_name, checked, position, added_at, updated_at
+                            FROM list_items WHERE item_id = ? AND list_id = ?
+                            """,
+                            (item_id, target_list_id),
+                        ).fetchone()
+                        if row is None:
+                            raise ValueError("list_operation_replay_target_missing")
+                        rows.append(dict(row))
+                    self._conn.commit()
+                    return {
+                        "list_id": target_list_id,
+                        "items": rows,
+                        "existing_item_count": int(replay_result.get("existing_item_count") or 0),
+                        "idempotent_replay": True,
+                    }
+
+                list_row = cur.execute(
+                    "SELECT list_id FROM lists WHERE owner_user_id = ? AND list_id = ?",
+                    (owner, target_list_id),
+                ).fetchone()
+                if list_row is None:
+                    raise ValueError("list_collection_not_authorized")
+                aggregate = cur.execute(
+                    """
+                    SELECT COUNT(*) AS item_count, COALESCE(MAX(position), 0) AS max_position
+                    FROM list_items WHERE list_id = ?
+                    """,
+                    (target_list_id,),
+                ).fetchone()
+                existing_count = int(aggregate["item_count"] if aggregate is not None else 0)
+                next_position = int(aggregate["max_position"] if aggregate is not None else 0) + 1
+                inserted: list[dict[str, Any]] = []
+                for index, item_name in enumerate(item_names):
+                    item_id = str(uuid4())
+                    position = next_position + index
+                    cur.execute(
+                        """
+                        INSERT INTO list_items (
+                            item_id, list_id, item_name, long_desc, qty, checked, position,
+                            added_by, added_at, updated_at, operation_id
+                        ) VALUES (?, ?, ?, NULL, NULL, 0, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            item_id,
+                            target_list_id,
+                            item_name,
+                            position,
+                            added_by.strip(),
+                            timestamp,
+                            timestamp,
+                            f"{operation_id}:{index + 1}",
+                        ),
+                    )
+                    inserted.append(
+                        {
+                            "item_id": item_id,
+                            "list_id": target_list_id,
+                            "item_name": item_name,
+                            "checked": False,
+                            "position": position,
+                            "added_at": timestamp,
+                            "updated_at": timestamp,
+                        }
+                    )
+                cur.execute(
+                    "UPDATE lists SET updated_at = ? WHERE list_id = ?",
+                    (timestamp, target_list_id),
+                )
+                result_json = json.dumps(
+                    {
+                        "existing_item_count": existing_count,
+                        "item_ids": [str(item["item_id"]) for item in inserted],
+                        "list_id": target_list_id,
+                    },
+                    ensure_ascii=True,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                cur.execute(
+                    """
+                    INSERT INTO list_operations (
+                        operation_id, owner_user_id, action, target_ref, arguments_hash,
+                        status, result_json, created_at, completed_at
+                    ) VALUES (?, ?, ?, ?, ?, 'completed', ?, ?, ?)
+                    """,
+                    (
+                        operation_id,
+                        owner,
+                        action,
+                        target_list_id,
+                        arguments_hash,
+                        result_json,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+                self._conn.commit()
+                return {
+                    "list_id": target_list_id,
+                    "items": inserted,
+                    "existing_item_count": existing_count,
+                    "idempotent_replay": False,
+                }
+            except Exception:
+                self._conn.rollback()
+                raise
 
     def add_list_item(
         self,

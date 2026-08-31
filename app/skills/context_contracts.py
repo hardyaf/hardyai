@@ -6,6 +6,19 @@ from app.context.reference_resolver import ReferenceResolver
 from app.context.types import EntityRegistry
 
 
+class ToolArgumentCanonicalizer(Protocol):
+    """Optional domain-owned bounded read resolver used before operation identity."""
+
+    def canonicalize_tool_arguments(
+        self,
+        *,
+        tool_id: str,
+        validated_arguments: dict[str, Any],
+        request_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        ...
+
+
 class SkillContextContract(Protocol):
     contract_id: str
 

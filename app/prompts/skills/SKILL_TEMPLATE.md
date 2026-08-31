@@ -20,6 +20,55 @@ storage_ref: "app.skills.domains.example.storage:SQLiteExampleStorage(example_ta
 safety_level: normal
 version: 1
 
+# Typed Main tool contract (required for a future interactive tool).
+# P2 owns compilation and validation; leaving main_tools empty publishes no tool.
+main_tools_contract_version: 1
+main_tools:
+  - tool_id: example.read
+    contract_version: 1
+    purpose: "Read one bounded example resource."
+    interactive: true
+    effect: read
+    approval_rule: none
+    approval_conditions: []
+    idempotency: not_applicable
+    sensitivity: normal
+    persistence: standard
+    effect_cardinality: single
+    runtime_dependencies: []
+    transferable_observation_fields: []
+    timeout_seconds: 30
+    max_result_items: 20
+    max_observation_chars: 4000
+    legacy_intents:
+      - example.intent
+    input_schema:
+      type: object
+      additionalProperties: false
+      required:
+        - entity_name
+      properties:
+        entity_name:
+          type: string
+          minLength: 1
+          maxLength: 200
+    observation_schema:
+      type: object
+      additionalProperties: false
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          enum:
+            - ok
+
+# Every current operation also needs an explicit migration disposition.
+# Allowed planning values: migrate, scheduler_only, adapter_only,
+# operator_only, context_only, prohibited, deactivate_stale, or deferred.
+operation_dispositions:
+  example.intent: migrate
+
 # Micro capability contract (required)
 micro_enabled: false
 micro_functions:

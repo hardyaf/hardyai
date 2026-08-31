@@ -1,16 +1,24 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import yaml
 
+from app.core.types import Intent
 from app.db.repositories import SkillCatalogRepository
 from app.db.sqlite_store import SQLiteStore
+from app.skills.tool_contracts import (
+    ToolContractError,
+    ToolDescriptor,
+    compile_tool_descriptors,
+    sanitize_model_text,
+)
 
 
 def _utc_now() -> str:
@@ -72,6 +80,18 @@ SECTION_KEY_ALIASES: dict[str, set[str]] = {
     },
 }
 
+_KNOWN_NON_INTERACTIVE_LEGACY_INTENTS = {
+    "calendar_inbox.reconcile",
+    "private_notes.capture",
+    "private_notes.compile_digest",
+    "private_notes.deliver_digest",
+}
+_KNOWN_LEGACY_INTENTS = {intent.value for intent in Intent} | _KNOWN_NON_INTERACTIVE_LEGACY_INTENTS
+_STALE_OPERATION_IDS = {
+    "home.get_switch_state",
+    "home.list_switches",
+}
+
 
 class SkillRegistryService:
     def __init__(
@@ -82,6 +102,20 @@ class SkillRegistryService:
         self._sqlite_store = sqlite_store
         self._repo_root = Path(repo_root).expanduser().resolve() if repo_root else Path.cwd().resolve()
         self._markdown_cache: dict[str, str] = {}
+
+    @staticmethod
+    def _execution_ref_is_importable(value: Any) -> bool:
+        normalized = str(value or "").strip()
+        if not normalized.startswith("app.skills.domains.") or normalized.count(":") != 1:
+            return False
+        module_name, attr_name = (item.strip() for item in normalized.split(":", 1))
+        if not module_name or not attr_name:
+            return False
+        try:
+            module = importlib.import_module(module_name)
+        except Exception:
+            return False
+        return callable(getattr(module, attr_name, None))
 
     def seed_defaults(self) -> None:
         now = _utc_now()
@@ -165,9 +199,16 @@ class SkillRegistryService:
                 updated_at=now,
             )
 
+        existing_skill_tools = {
+            str(item.get("skill_id") or "").strip(): (
+                item.get("main_tools"),
+                item.get("main_tools_contract_version"),
+            )
+            for item in self._sqlite_store.list_skills(active_only=False)
+        }
         for skill in [
             {
-                "skill_id": "skill.calendar.core",
+                "skill_id": "skill.productivity.calendar",
                 "skill_name": "Calendar",
                 "skill_user": "all",
                 "skill_agents": ["all"],
@@ -180,12 +221,9 @@ class SkillRegistryService:
                 "markdown_path": "app/prompts/skills/calendar_skill.md",
                 "execution_ref": "app.skills.domains.calendar.handler:run",
                 "created_by": "system",
-                "storage_type": "hybrid",
-                "storage_ref": (
-                    "app.skills.domains.calendar.storage:InMemoryCalendarStorage "
-                    "+ app.services.google.calendar_live"
-                ),
-                "critical_level": 2,
+                "storage_type": "api",
+                "storage_ref": "google_calendar_oauth",
+                "critical_level": 3,
                 "micro_enabled": True,
                 "micro_functions": [
                     {
@@ -526,6 +564,10 @@ class SkillRegistryService:
                 "cron_expr": "interval:10m",
             },
         ]:
+            existing_main_tools, existing_main_tools_version = existing_skill_tools.get(
+                str(skill["skill_id"]),
+                (None, None),
+            )
             self._sqlite_store.upsert_skill(
                 skill_id=str(skill["skill_id"]),
                 skill_name=str(skill["skill_name"]),
@@ -551,11 +593,74 @@ class SkillRegistryService:
                 ),
                 learnable_ready=bool(skill.get("learnable_ready")),
                 critical_level=int(skill["critical_level"]),
-                active=True,
+                active=bool(skill.get("active", True)),
                 cron_enabled=bool(skill.get("cron_enabled", False)),
                 cron_expr=(
                     str(skill.get("cron_expr") or "").strip() or None
                     if bool(skill.get("cron_enabled", False))
+                    else None
+                ),
+                main_tools=(
+                    list(existing_main_tools) if isinstance(existing_main_tools, list) else None
+                ),
+                main_tools_contract_version=(
+                    int(existing_main_tools_version)
+                    if isinstance(existing_main_tools_version, int)
+                    else None
+                ),
+                updated_at=now,
+            )
+
+        legacy_calendar = next(
+            (
+                skill
+                for skill in self._sqlite_store.list_skills(active_only=False)
+                if str(skill.get("skill_id") or "").strip() == "skill.calendar.core"
+                and bool(skill.get("active"))
+            ),
+            None,
+        )
+        if legacy_calendar is not None:
+            self._sqlite_store.upsert_skill(
+                skill_id="skill.calendar.core",
+                skill_name=str(legacy_calendar.get("skill_name") or "Calendar"),
+                skill_user=str(legacy_calendar.get("skill_user") or "all"),
+                skill_agents=[str(item) for item in legacy_calendar.get("skill_agents") or ["all"]],
+                intents=[str(item) for item in legacy_calendar.get("intents") or []],
+                markdown_path=str(legacy_calendar.get("markdown_path") or "app/prompts/skills/calendar_skill.md"),
+                execution_ref=(str(legacy_calendar.get("execution_ref") or "").strip() or None),
+                created_by=str(legacy_calendar.get("created_by") or "system"),
+                storage_type=str(legacy_calendar.get("storage_type") or "hybrid"),
+                storage_ref=(str(legacy_calendar.get("storage_ref") or "").strip() or None),
+                micro_enabled=bool(legacy_calendar.get("micro_enabled")),
+                micro_functions=(
+                    list(legacy_calendar.get("micro_functions") or [])
+                    if isinstance(legacy_calendar.get("micro_functions"), list)
+                    else []
+                ),
+                micro_failure_handoff=(
+                    dict(legacy_calendar.get("micro_failure_handoff") or {})
+                    if isinstance(legacy_calendar.get("micro_failure_handoff"), dict)
+                    else {}
+                ),
+                main_handoff_context=(
+                    dict(legacy_calendar.get("main_handoff_context") or {})
+                    if isinstance(legacy_calendar.get("main_handoff_context"), dict)
+                    else {}
+                ),
+                learnable_ready=bool(legacy_calendar.get("learnable_ready")),
+                critical_level=int(legacy_calendar.get("critical_level") or 0),
+                active=False,
+                cron_enabled=bool(legacy_calendar.get("cron_enabled")),
+                cron_expr=(str(legacy_calendar.get("cron_expr") or "").strip() or None),
+                main_tools=(
+                    list(legacy_calendar.get("main_tools") or [])
+                    if isinstance(legacy_calendar.get("main_tools"), list)
+                    else None
+                ),
+                main_tools_contract_version=(
+                    int(legacy_calendar["main_tools_contract_version"])
+                    if isinstance(legacy_calendar.get("main_tools_contract_version"), int)
                     else None
                 ),
                 updated_at=now,
@@ -681,6 +786,118 @@ class SkillRegistryService:
     def list_skills(self, *, active_only: bool = True) -> list[dict[str, Any]]:
         return self._sqlite_store.list_skills(active_only=active_only)
 
+    @staticmethod
+    def _skill_matches_identity(
+        skill: dict[str, Any],
+        *,
+        user_id: str,
+        agent_id: str,
+    ) -> bool:
+        normalized_user = str(user_id or "").strip().casefold()
+        normalized_agent = str(agent_id or "").strip().casefold()
+        skill_user = str(skill.get("skill_user") or "all").strip().casefold()
+        if skill_user not in {"all", normalized_user, normalized_agent}:
+            return False
+        agents = {
+            str(item or "").strip().casefold()
+            for item in skill.get("skill_agents") or []
+            if str(item or "").strip()
+        }
+        return not agents or "all" in agents or normalized_agent in agents
+
+    @staticmethod
+    def tool_descriptors_for_skill(skill: dict[str, Any] | None) -> tuple[ToolDescriptor, ...]:
+        if not isinstance(skill, dict) or skill.get("main_tools_contract_version") != 1:
+            return ()
+        descriptors: list[ToolDescriptor] = []
+        for raw in skill.get("main_tools") or []:
+            try:
+                descriptors.append(
+                    ToolDescriptor.from_mapping(
+                        raw,
+                        skill_id=str(skill.get("skill_id") or ""),
+                    )
+                )
+            except ToolContractError:
+                continue
+        return tuple(descriptors)
+
+    def resolve_tool(
+        self,
+        *,
+        tool_id: str,
+        user_id: str,
+        agent_id: str,
+    ) -> tuple[dict[str, Any], ToolDescriptor] | None:
+        normalized_tool_id = str(tool_id or "").strip().casefold()
+        matches: list[tuple[dict[str, Any], ToolDescriptor]] = []
+        for skill in self.list_skills(active_only=True):
+            if not self._skill_matches_identity(skill, user_id=user_id, agent_id=agent_id):
+                continue
+            for descriptor in self.tool_descriptors_for_skill(skill):
+                if descriptor.tool_id == normalized_tool_id:
+                    matches.append((skill, descriptor))
+        if len(matches) > 1:
+            raise ToolContractError("tool_owner_not_unique")
+        return matches[0] if matches else None
+
+    def discovery_cards(
+        self,
+        *,
+        user_id: str,
+        agent_id: str,
+        request_context: dict[str, Any],
+        availability_resolver: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]],
+        max_skills: int = 32,
+    ) -> list[dict[str, Any]]:
+        """Return only authorized, schema-free skill discovery metadata."""
+
+        cards: list[dict[str, Any]] = []
+        bounded_limit = max(1, min(int(max_skills), 64))
+        for skill in self.list_skills(active_only=True):
+            if not self._skill_matches_identity(skill, user_id=user_id, agent_id=agent_id):
+                continue
+            descriptors = tuple(
+                item for item in self.tool_descriptors_for_skill(skill) if item.interactive
+            )
+            if not descriptors:
+                continue
+            try:
+                availability = availability_resolver(skill, dict(request_context))
+            except Exception:
+                continue
+            if not isinstance(availability, dict) or not (
+                availability.get("configured") is True
+                and availability.get("authorized_here") is True
+            ):
+                continue
+            effects = sorted({item.effect for item in descriptors})
+            domains = sorted({item.tool_id.partition(".")[0] for item in descriptors})
+            purpose_parts: list[str] = []
+            for descriptor in descriptors:
+                part = sanitize_model_text(descriptor.purpose, max_chars=300)
+                if part and part not in purpose_parts:
+                    purpose_parts.append(part)
+            purpose = sanitize_model_text(" ".join(purpose_parts), max_chars=600)
+            cards.append(
+                {
+                    "skill_id": str(skill.get("skill_id") or "").strip(),
+                    "title": sanitize_model_text(
+                        skill.get("skill_name") or skill.get("skill_id"),
+                        max_chars=120,
+                    ),
+                    "purpose": purpose,
+                    "safe_tags": [
+                        *(f"domain:{item}" for item in domains),
+                        *(f"effect:{item}" for item in effects),
+                    ][:12],
+                    "availability": "available",
+                }
+            )
+            if len(cards) >= bounded_limit:
+                break
+        return cards
+
     def runtime_capability_catalog(
         self,
         *,
@@ -711,6 +928,7 @@ class SkillRegistryService:
                     str(item or "").strip().casefold()
                     for item in skill.get("intents") or []
                     if str(item or "").strip()
+                    and str(item or "").strip().casefold() not in _STALE_OPERATION_IDS
                 )
             )
             micro_intents: list[str] = []
@@ -726,7 +944,9 @@ class SkillRegistryService:
                     "skill_id": str(skill.get("skill_id") or "").strip(),
                     "skill_name": str(skill.get("skill_name") or skill.get("skill_id") or "").strip(),
                     "intents": intents,
-                    "main_enabled": bool(str(skill.get("execution_ref") or "").strip()),
+                    "main_enabled": bool(intents) and self._execution_ref_is_importable(
+                        skill.get("execution_ref")
+                    ),
                     "micro_enabled": bool(skill.get("micro_enabled")),
                     "micro_intents": micro_intents,
                     "scheduled": bool(skill.get("cron_enabled")),
@@ -735,6 +955,88 @@ class SkillRegistryService:
             if len(catalog) >= bounded_limit:
                 break
         return catalog
+
+    def registry_integrity_report(self) -> dict[str, Any]:
+        """Return content-free catalog diagnostics without exposing implementation references."""
+
+        active_skills = self.list_skills(active_only=True)
+        all_skills = self.list_skills(active_only=False)
+        issues: list[dict[str, Any]] = []
+        owners: dict[str, set[str]] = {}
+
+        for skill in active_skills:
+            skill_id = str(skill.get("skill_id") or "").strip()
+            legacy_intents = {
+                str(item or "").strip().casefold()
+                for item in skill.get("intents") or []
+                if str(item or "").strip()
+            }
+            raw_tools = skill.get("main_tools") or []
+            descriptors = self.tool_descriptors_for_skill(skill)
+            tool_ids = {item.tool_id for item in descriptors}
+            if len(descriptors) != len(raw_tools):
+                issues.append({"code": "invalid_tool_descriptor", "skill_id": skill_id})
+            if len(tool_ids) != len(descriptors):
+                issues.append({"code": "duplicate_tool_id_in_skill", "skill_id": skill_id})
+            for operation_id in legacy_intents | tool_ids:
+                owners.setdefault(operation_id, set()).add(skill_id)
+
+            importable = self._execution_ref_is_importable(skill.get("execution_ref"))
+            if not importable:
+                issues.append({"code": "active_handler_unimportable", "skill_id": skill_id})
+
+            unknown_intents = sorted(legacy_intents - _KNOWN_LEGACY_INTENTS)
+            for intent in unknown_intents:
+                issues.append(
+                    {
+                        "code": "unknown_legacy_intent",
+                        "skill_id": skill_id,
+                        "operation_id": intent,
+                    }
+                )
+
+            interactive_intents = legacy_intents - _KNOWN_NON_INTERACTIVE_LEGACY_INTENTS
+            handoff = skill.get("main_handoff_context")
+            if interactive_intents and (
+                not bool(skill.get("learnable_ready"))
+                or not isinstance(handoff, dict)
+                or not handoff
+            ):
+                issues.append({"code": "interactive_contract_missing", "skill_id": skill_id})
+
+        for operation_id, skill_ids in sorted(owners.items()):
+            if len(skill_ids) > 1:
+                issues.append(
+                    {
+                        "code": "duplicate_active_operation_owner",
+                        "operation_id": operation_id,
+                        "skill_ids": sorted(skill_ids),
+                    }
+                )
+
+        for skill in all_skills:
+            execution_ref = str(skill.get("execution_ref") or "").strip()
+            if execution_ref and not self._execution_ref_is_importable(execution_ref):
+                issues.append(
+                    {
+                        "code": "stale_execution_reference",
+                        "skill_id": str(skill.get("skill_id") or "").strip(),
+                    }
+                )
+
+        issues.sort(
+            key=lambda item: (
+                str(item.get("code") or ""),
+                str(item.get("operation_id") or ""),
+                str(item.get("skill_id") or ""),
+            )
+        )
+        return {
+            "status": "ok" if not issues else "issues_found",
+            "active_skill_count": len(active_skills),
+            "issue_count": len(issues),
+            "issues": issues,
+        }
 
     def sync_skills_from_markdown(self, *, skills_dir: str = "app/prompts/skills") -> dict[str, Any]:
         directory = Path(skills_dir)
@@ -792,6 +1094,26 @@ class SkillRegistryService:
             main_handoff_context = (
                 main_handoff_context_raw if isinstance(main_handoff_context_raw, dict) else {}
             )
+            main_tools_declared = "main_tools" in frontmatter
+            main_tools_version_raw = frontmatter.get("main_tools_contract_version")
+            compiled_tools, tool_diagnostics = compile_tool_descriptors(
+                skill_id=skill_id,
+                contract_version=main_tools_version_raw,
+                declarations=frontmatter.get("main_tools") if main_tools_declared else None,
+            )
+            main_tools = (
+                [descriptor.to_storage_dict() for descriptor in compiled_tools]
+                if main_tools_declared
+                else None
+            )
+            main_tools_contract_version = (
+                int(main_tools_version_raw)
+                if main_tools_declared
+                and isinstance(main_tools_version_raw, int)
+                and not isinstance(main_tools_version_raw, bool)
+                and main_tools_version_raw == 1
+                else None
+            )
             skill_name = str(frontmatter.get("skill_name") or previous.get("skill_name") or skill_id)
             skill_user = str(frontmatter.get("skill_user") or previous.get("skill_user") or "all")
             skill_agents = (
@@ -833,6 +1155,8 @@ class SkillRegistryService:
                 "active": bool(active),
                 "cron_enabled": bool(cron_enabled),
                 "cron_expr": cron_expr,
+                "main_tools": main_tools,
+                "main_tools_contract_version": main_tools_contract_version,
             }
 
             updated = not self._skill_snapshot_equal(existing=previous, incoming=incoming)
@@ -857,6 +1181,8 @@ class SkillRegistryService:
                     active=active,
                     cron_enabled=cron_enabled,
                     cron_expr=cron_expr,
+                    main_tools=main_tools,
+                    main_tools_contract_version=main_tools_contract_version,
                     updated_at=now,
                 )
             record = {
@@ -867,6 +1193,7 @@ class SkillRegistryService:
                 "micro_enabled": micro_enabled,
                 "updated": updated,
                 "errors": [str(item) for item in validation.get("errors", []) if str(item).strip()],
+                "tool_diagnostics": [dict(item) for item in tool_diagnostics],
             }
             synced.append(record)
             if not learnable_ready:
@@ -876,6 +1203,9 @@ class SkillRegistryService:
             "status": "ok",
             "synced_count": len(synced),
             "failed_count": len(failed),
+            "tool_diagnostic_count": sum(
+                len(item.get("tool_diagnostics") or []) for item in synced
+            ),
             "synced": synced,
             "failed": failed,
         }
@@ -1052,9 +1382,18 @@ class SkillRegistryService:
             if not micro_functions:
                 errors.append("micro_enabled=true requires at least one micro_functions entry")
 
+        tool_diagnostics: tuple[dict[str, str], ...] = ()
+        if isinstance(frontmatter, dict) and "main_tools" in frontmatter:
+            _, tool_diagnostics = compile_tool_descriptors(
+                skill_id=str(frontmatter.get("skill_id") or ""),
+                contract_version=frontmatter.get("main_tools_contract_version"),
+                declarations=frontmatter.get("main_tools"),
+            )
+
         return {
             "ok": not errors,
             "errors": errors,
+            "tool_diagnostics": [dict(item) for item in tool_diagnostics],
             "frontmatter": frontmatter,
             "sections": sorted(headings),
         }
@@ -1541,6 +1880,8 @@ class SkillRegistryService:
             "active",
             "cron_enabled",
             "cron_expr",
+            "main_tools",
+            "main_tools_contract_version",
         }
         for key in compare_keys:
             current_value = existing.get(key)
@@ -1563,6 +1904,12 @@ class SkillRegistryService:
                     new_value = int(new_value or 0)
                 except (TypeError, ValueError):
                     new_value = 0
+            elif key == "main_tools_contract_version":
+                current_value = int(current_value) if isinstance(current_value, int) else None
+                new_value = int(new_value) if isinstance(new_value, int) else None
+            elif key == "main_tools":
+                current_value = current_value if isinstance(current_value, list) else None
+                new_value = new_value if isinstance(new_value, list) else None
             elif key in {"micro_enabled", "learnable_ready", "active", "cron_enabled"}:
                 current_value = bool(current_value)
                 new_value = bool(new_value)

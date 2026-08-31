@@ -1,0 +1,20 @@
+version: 1
+defaults:
+  command_prefix: "!"
+  require_prefix: false
+  allow_direct_messages: false
+  allowed_guild_ids:
+    - 111111111111111111
+  allowed_channel_ids: []
+  allowed_role_ids: []
+  allowed_user_ids: []
+  denied_user_ids: []
+guilds:
+  - guild_id: 111111111111111111
+    guild_name: Example_House
+    require_prefix: false
+    allowed_channel_ids:
+      - 333333333333333333
+    allowed_role_ids: []
+    allowed_user_ids: []
+    denied_user_ids: []

@@ -3,11 +3,19 @@ from __future__ import annotations
 import io
 import json
 import sqlite3
+import subprocess
+import sys
 import tarfile
 from argparse import Namespace
 from pathlib import Path
 
-from scripts.manage_document_backup import _sha256, _sqlite_backup, _tar_directory, verify_backup
+from scripts.manage_document_backup import (
+    _sha256,
+    _sqlite_backup,
+    _tar_directory,
+    reader_check,
+    verify_backup,
+)
 
 
 REQUIRED_FILES = {
@@ -107,3 +115,62 @@ def test_backup_verifier_accepts_legacy_phase1_generation_without_artifacts(tmp_
 
     assert verify_backup(Namespace(generation_path=str(generation))) == 0
     assert json.loads(capsys.readouterr().out)["status"] == "ok"
+
+
+def test_document_reader_check_accepts_version_14_without_mutation(tmp_path, capsys) -> None:
+    source = tmp_path / "documents.db"
+    connection = sqlite3.connect(source)
+    try:
+        connection.execute("CREATE TABLE canary (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO canary VALUES ('unchanged')")
+        connection.execute("PRAGMA user_version = 14")
+        connection.commit()
+    finally:
+        connection.close()
+    before = source.stat().st_mtime_ns
+
+    assert reader_check(Namespace(source=str(source))) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "reason": "schema_not_newer",
+        "result": "compatible",
+        "version": 14,
+    }
+    assert source.stat().st_mtime_ns == before
+    assert not Path(f"{source}-wal").exists()
+    assert not Path(f"{source}-shm").exists()
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "scripts/manage_document_backup.py",
+            "reader-check",
+            "--source",
+            str(source),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == {
+        "reason": "schema_not_newer",
+        "result": "compatible",
+        "version": 14,
+    }
+
+
+def test_document_reader_check_rejects_newer_schema(tmp_path, capsys) -> None:
+    source = tmp_path / "documents-newer.db"
+    connection = sqlite3.connect(source)
+    try:
+        connection.execute("PRAGMA user_version = 15")
+        connection.commit()
+    finally:
+        connection.close()
+
+    assert reader_check(Namespace(source=str(source))) == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "reason": "schema_newer",
+        "result": "incompatible",
+        "version": 15,
+    }

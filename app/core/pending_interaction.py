@@ -4,7 +4,9 @@ from typing import Any
 
 from app.context.pending import PendingInteractionManager
 from app.core.session_store import SessionRecord, SessionStore
+from app.core.tool_loop_types import partial_arguments_hash
 from app.services.event_log import EventLogService
+from app.skills.tool_contracts import ToolDescriptor
 
 
 class PendingInteractionCoordinator:
@@ -53,6 +55,77 @@ class PendingInteractionCoordinator:
             before=before,
             after=self._snapshot_from_object(pending),
             reason=reason,
+        )
+
+    def store_tool_call(
+        self,
+        *,
+        session: SessionRecord,
+        descriptor: ToolDescriptor,
+        partial_arguments: dict[str, Any],
+        missing_fields: list[str],
+        question: str,
+        root_request_id: str,
+        reserved_call_ordinal: int,
+        binding_hash: str,
+        selected_skill_ids: list[str],
+    ) -> None:
+        """Persist one purpose-bound typed clarification through the existing authority."""
+
+        policy = str(descriptor.persistence)
+        retained_arguments = {} if policy == "no_store" else dict(partial_arguments)
+        present_fields = sorted(str(key) for key in partial_arguments)
+        self.store(
+            session=session,
+            intent=descriptor.tool_id,
+            entities=retained_arguments,
+            missing_fields=list(missing_fields),
+            question=question,
+            kind="typed_tool_call",
+            skill_id=descriptor.skill_id,
+            metadata={
+                "pending_type": "typed_tool_call_v1",
+                "tool_id": descriptor.tool_id,
+                "skill_id": descriptor.skill_id,
+                "contract_version": descriptor.contract_version,
+                "root_request_id": str(root_request_id),
+                "reserved_call_ordinal": int(reserved_call_ordinal),
+                "partial_arguments_hash": partial_arguments_hash(partial_arguments),
+                "persistence": policy,
+                "binding_hash": str(binding_hash),
+                "selected_skill_ids": [
+                    str(item).strip().casefold()
+                    for item in selected_skill_ids[:3]
+                    if str(item).strip()
+                ],
+                "present_fields": present_fields,
+                "missing_fields": [str(item) for item in missing_fields[:32]],
+            },
+            reason="main_tool_loop_clarification_stored",
+        )
+
+    def store_generic_action_clarification(
+        self,
+        *,
+        session: SessionRecord,
+        question: str,
+        root_request_id: str,
+        binding_hash: str,
+    ) -> None:
+        self.store(
+            session=session,
+            intent="generic_action_candidate",
+            entities={},
+            missing_fields=["complete_goal"],
+            question=question,
+            kind="main_action_clarification_v2",
+            metadata={
+                "pending_type": "main_action_clarification_v2",
+                "root_request_id": str(root_request_id),
+                "binding_hash": str(binding_hash),
+                "persistence": "no_store",
+            },
+            reason="main_action_clarification_stored",
         )
 
     def clear(self, *, session: SessionRecord, reason: str = "pending_interaction_cleared") -> bool:

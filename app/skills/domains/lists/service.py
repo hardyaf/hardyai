@@ -88,6 +88,12 @@ class ListsService:
             normalized = cls._LIST_ALIASES[normalized]
         return normalized
 
+    @classmethod
+    def normalize_list_name(cls, value: str) -> str:
+        """Return the domain's canonical collection name without resolving a target."""
+
+        return cls._normalize_list_name(value)
+
     @staticmethod
     def _compact_list_key(value: str) -> str:
         return re.sub(r"[\s_-]+", "", value.strip().lower())

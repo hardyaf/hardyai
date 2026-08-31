@@ -1,0 +1,6 @@
+version: 1
+defaults:
+  allowed_guild_ids: [100]
+guilds:
+  - guild_id: 100
+    allowed_channel_ids: [200]

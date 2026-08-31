@@ -1,0 +1,10 @@
+version: 1
+defaults:
+  allowed_guild_ids: [100]
+guilds:
+  - guild_id: 100
+    allowed_channel_ids: [200]
+    private_notes_channels:
+      - channel_id: 201
+        allowed_user_ids: [300]
+        owner_user_id: taylor

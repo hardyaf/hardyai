@@ -133,7 +133,9 @@ class RequestFlowCoordinator:
             context=effective_context,
         )
         source_channel = str(effective_payload.source or "").strip().lower()
-        force_main_channel = bool(effective_payload.context.get("force_main_owner")) or (
+        force_main_channel = router._main_tool_execution_mode == "active" or bool(
+            effective_payload.context.get("force_main_owner")
+        ) or (
             source_channel == "discord"
             and effective_payload.context.get("micro_command_explicit") is not True
         )
@@ -392,6 +394,27 @@ class RequestFlowCoordinator:
 
         pending = router._pending_clarification(session)
         if pending is not None:
+            pending_metadata = pending.get("metadata")
+            pending_type = str(
+                (pending_metadata or {}).get("pending_type")
+                if isinstance(pending_metadata, dict)
+                else ""
+            ).strip().casefold()
+            if router._main_tool_execution_mode == "active" and pending_type == "typed_tool_call_v1":
+                return router._resume_pending_tool_call(
+                    payload=effective_payload,
+                    session=session,
+                    effective_context=effective_context,
+                    request_text=raw_text,
+                    pending=pending,
+                )
+            if (
+                router._main_tool_execution_mode == "active"
+                and pending_type == "main_action_clarification_v2"
+            ):
+                router._clear_pending_clarification(session)
+                pending = None
+        if pending is not None:
             pending_intent = str(pending.get("intent") or "").strip()
             for contract in router._skill_context_contracts:
                 interrupt_hook = getattr(contract, "request_interrupts_pending", None)
@@ -492,19 +515,32 @@ class RequestFlowCoordinator:
                 context=micro_context,
             )
         else:
+            active_mode = router._main_tool_execution_mode == "active"
             decision = MicroDecision(
                 intent=Intent.UNKNOWN,
                 confidence=0.0,
                 entities={},
-                ambiguity_flags=["micro_bypassed_unprefixed_discord"],
+                ambiguity_flags=[
+                    "micro_bypassed_active_mode"
+                    if active_mode
+                    else "micro_bypassed_unprefixed_discord"
+                ],
                 recommended_owner=SessionOwner.MAIN,
-                reasoning="discord_unprefixed_main_handoff",
+                reasoning=(
+                    "active_mode_main_ownership"
+                    if active_mode
+                    else "discord_unprefixed_main_handoff"
+                ),
             )
             router._event_log.record(
                 event_type="pipeline.micro.bypassed",
                 session_id=session.session_id,
                 payload={
-                    "reason": "discord_prefix_not_present",
+                    "reason": (
+                        "active_mode_main_ownership"
+                        if active_mode
+                        else "discord_prefix_not_present"
+                    ),
                     "source": effective_payload.source,
                     "micro_command_explicit": False,
                     "target_owner": SessionOwner.MAIN.value,
@@ -688,16 +724,20 @@ class RequestFlowCoordinator:
             and decision.recommended_owner == SessionOwner.MAIN
             and "micro_bypassed_unprefixed_discord" in decision.ambiguity_flags
         )
-        if unprefixed_discord_main_handoff:
-            # The Discord envelope has already assigned this turn to Main. Let
-            # Main's typed commitment boundary make the one semantic decision;
-            # the legacy repair pass must not preempt it with a second model
-            # interpretation of the same context.
+        active_tool_main_handoff = router._main_tool_execution_mode == "active"
+        if active_tool_main_handoff or unprefixed_discord_main_handoff:
+            # Main's typed commitment boundary owns every active-mode turn.
+            # Legacy repair must not preempt capability discovery for a phrase
+            # that happens to resemble an older fixed intent.
             router._event_log.record(
                 event_type="pipeline.main_repair.bypassed",
                 session_id=session.session_id,
                 payload={
-                    "reason": "unprefixed_discord_main_commitment",
+                    "reason": (
+                        "active_mode_main_tool_commitment"
+                        if active_tool_main_handoff
+                        else "unprefixed_discord_main_commitment"
+                    ),
                     "target_owner": SessionOwner.MAIN.value,
                 },
             )
@@ -780,6 +820,8 @@ class RequestFlowCoordinator:
         resolved_skill = interpreted.resolved_skill
         target_owner = routed.target_owner
         classification_with_pipeline = routed.classification_with_pipeline
+        if router._main_tool_execution_mode == "active":
+            return None
         if target_owner == SessionOwner.MICRO and decision.intent in FAST_COMMAND_INTENTS:
             tool_result = router._execute_fast_command(
                 decision=decision,
@@ -859,6 +901,49 @@ class RequestFlowCoordinator:
             )
         return None
 
+    def _dispatch_new_main_seam(self, turn: PreparedTurn) -> dict[str, Any] | None:
+        router = self._router
+        payload = turn.effective_payload
+        if router._main_tool_execution_mode == "shadow":
+            router._observe_shadow_main_tool_turn(
+                payload=payload,
+                session=turn.session,
+                effective_context=turn.effective_context,
+                request_text=payload.text,
+            )
+            return None
+        if router._main_tool_execution_mode != "active":
+            return None
+        response = router._handle_active_main_tool_turn(
+            payload=payload,
+            session=turn.session,
+            effective_context=turn.effective_context,
+            request_text=payload.text,
+        )
+        if response is not None:
+            return response
+        router._set_owner(turn.session, SessionOwner.MAIN)
+        router._set_state(turn.session, SessionState.IDLE)
+        return router._build_response(
+            session=turn.session,
+            intent=Intent.UNKNOWN,
+            classification={
+                "intent": Intent.UNKNOWN.value,
+                "confidence": 0.0,
+                "entities": {},
+                "ambiguity_flags": ["main_tool_loop_safe_stop"],
+                "recommended_owner": SessionOwner.MAIN.value,
+                "reasoning": "active_mode_no_legacy_fallback",
+            },
+            route="main_tool_loop",
+            result={
+                "status": "safe_stop",
+                "message": "I could not safely evaluate that capability request.",
+            },
+            request_text=turn.raw_text,
+            user_id=payload.user_id,
+        )
+
     def _dispatch_main(
         self,
         turn: PreparedTurn,
@@ -913,6 +998,10 @@ class RequestFlowCoordinator:
         }
         if isinstance(contextual_followup, dict):
             main_context["contextual_followup"] = contextual_followup
+
+        seam_response = self._dispatch_new_main_seam(turn)
+        if seam_response is not None:
+            return seam_response
 
         response = router._main_jarvis.respond(
             text=main_request_text,

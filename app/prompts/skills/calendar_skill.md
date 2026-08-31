@@ -15,10 +15,25 @@ storage_type: api
 storage_ref: google_calendar_oauth
 critical_level: 3
 active: true
+legacy_skill_ids:
+  - skill.calendar.core
 version: 2
 
-micro_enabled: false
-micro_functions: []
+micro_enabled: true
+micro_functions:
+  - function_id: calendar.view
+    intent: calendar.view
+    regex_contract: "direct bounded calendar view with deterministic date extraction"
+    supported_actions:
+      - read_calendar
+    required_entities:
+      - when_hint
+    unsupported_or_escalate:
+      - calendar.add_event
+      - calendar.update_event
+      - calendar.delete_event
+      - calendar.invite
+      - ambiguous_time_reference
 micro_failure_handoff:
   baseline_context_keys:
     - micro_intent

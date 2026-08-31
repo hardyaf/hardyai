@@ -1,11 +1,53 @@
 from __future__ import annotations
 
 import shutil
+import sqlite3
 from pathlib import Path
 from uuid import uuid4
 
+import yaml
+import pytest
+
 from app.db.sqlite_store import SQLiteStore
 from app.skills.registry_service import SkillRegistryService
+from app.skills.tool_contracts import ToolContractError, ToolDescriptor
+
+
+def _upsert_skill(
+    store: SQLiteStore,
+    *,
+    skill_id: str,
+    intents: list[str],
+    execution_ref: str = "app.skills.domains.lists.handler:run",
+    active: bool = True,
+    learnable_ready: bool = True,
+    main_handoff_context: dict | None = None,
+    storage_ref: str = "fixture-storage",
+) -> None:
+    store.upsert_skill(
+        skill_id=skill_id,
+        skill_name=skill_id,
+        skill_user="all",
+        skill_agents=["all"],
+        intents=intents,
+        markdown_path="app/prompts/skills/lists_skill.md",
+        execution_ref=execution_ref,
+        created_by="test",
+        storage_type="sql",
+        storage_ref=storage_ref,
+        micro_enabled=False,
+        micro_functions=[],
+        micro_failure_handoff={},
+        main_handoff_context=(
+            {"always_pass_from_session": ["pending_clarification"]}
+            if main_handoff_context is None
+            else main_handoff_context
+        ),
+        learnable_ready=learnable_ready,
+        critical_level=1,
+        active=active,
+        updated_at="2026-08-30T00:00:00+00:00",
+    )
 
 
 def test_skill_registry_resolves_agent_alias_and_skill():
@@ -85,6 +127,11 @@ def test_runtime_capability_catalog_is_safe_sql_projection():
             "lists.add_item",
             "lists.get_items",
         ]
+        assert all(
+            "home.get_switch_state" not in item["intents"]
+            and "home.list_switches" not in item["intents"]
+            for item in catalog
+        )
         assert "execution_ref" not in by_id["skill.email.agent"]
         assert "storage_ref" not in by_id["skill.email.agent"]
         assert "markdown_path" not in by_id["skill.email.agent"]
@@ -137,7 +184,9 @@ def test_skill_registry_compiles_critical_skills_markdown():
         markdown = output_path.read_text(encoding="utf-8")
         assert "# Critical Skills (Compiled)" in markdown
         assert "skill.lists.core" in markdown
-        assert "skill.calendar.core" in markdown
+        assert "skill.productivity.calendar" in markdown
+        assert "(`skill.calendar.core`)" not in markdown
+        assert "legacy_skill_ids:\n  - skill.calendar.core" in markdown
         meta_path = Path(str(compiled["metadata_path"]))
         assert meta_path.exists()
         first_hash = str(compiled["source_hash"])
@@ -184,6 +233,7 @@ def test_skill_registry_sync_from_markdown_sets_micro_contract_and_learnable_fla
         assert sync["status"] == "ok"
         assert sync["synced_count"] >= 4
         assert sync["failed_count"] == 0
+        assert sync["tool_diagnostic_count"] == 0
         assert any(str(item.get("markdown_path") or "").endswith("lists_skill.md") for item in sync["synced"])
 
         skills = {str(skill["skill_id"]): skill for skill in registry.list_skills(active_only=False)}
@@ -215,6 +265,329 @@ def test_skill_registry_sync_from_markdown_sets_micro_contract_and_learnable_fla
         assert calendar_inbox["cron_enabled"] is True
         assert calendar_inbox["cron_expr"] == "hourly:08-20@America/New_York"
         assert calendar_inbox["intents"] == ["calendar_inbox.reconcile"]
+
+        assert skills["skill.core.memory"]["active"] is False
+        assert skills["skill.home.lights"]["intents"] == ["home.set_switch"]
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+def _typed_tool_declaration(*, tool_id: str, effect: str = "read") -> dict:
+    return {
+        "tool_id": tool_id,
+        "contract_version": 1,
+        "purpose": "Read one bounded fixture resource.",
+        "interactive": True,
+        "effect": effect,
+        "approval_rule": "none",
+        "approval_conditions": [],
+        "idempotency": "not_applicable",
+        "sensitivity": "private",
+        "persistence": "redacted",
+        "effect_cardinality": "single",
+        "runtime_dependencies": [],
+        "transferable_observation_fields": [
+            {"pattern": "/summary", "scope": "same_domain"}
+        ],
+        "timeout_seconds": 10,
+        "max_result_items": 5,
+        "max_observation_chars": 1000,
+        "legacy_intents": ["fixture.read"],
+        "input_schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["query"],
+            "properties": {
+                "query": {"type": "string", "minLength": 1, "maxLength": 120}
+            },
+        },
+        "observation_schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["summary"],
+            "properties": {
+                "summary": {"type": "string", "minLength": 0, "maxLength": 500}
+            },
+        },
+    }
+
+
+def _write_typed_skill_markdown(root: Path, declarations: list[dict]) -> Path:
+    skills_dir = root / "app" / "prompts" / "skills"
+    skills_dir.mkdir(parents=True)
+    frontmatter = {
+        "skill_id": "skill.fixture.core",
+        "skill_name": "Fixture",
+        "skill_user": "all",
+        "skill_agents": ["all"],
+        "created_by": "test",
+        "intents": ["fixture.read"],
+        "execution_ref": "app.skills.domains.lists.handler:run",
+        "storage_type": "sql",
+        "storage_ref": "fixture",
+        "micro_enabled": False,
+        "micro_functions": [],
+        "micro_failure_handoff": {},
+        "main_handoff_context": {"always_pass_from_session": ["pending_clarification"]},
+        "main_tools_contract_version": 1,
+        "main_tools": declarations,
+    }
+    headings = [
+        "Purpose",
+        "Trigger Patterns / Intent Mapping",
+        "Input Schema",
+        "Output Schema",
+        "Execution Steps",
+        "Clarification Rules",
+        "Duplicate / Conflict Handling",
+        "Storage Contract",
+        "Failure Behavior",
+        "MicroJarvis Contract",
+        "Main Handoff Context Contract",
+        "Learnability Checklist",
+    ]
+    body = "\n\n".join(f"## {heading}\n\nFixture." for heading in headings)
+    (skills_dir / "fixture_skill.md").write_text(
+        f"---\n{yaml.safe_dump(frontmatter, sort_keys=False)}---\n\n{body}\n",
+        encoding="utf-8",
+    )
+    return skills_dir
+
+
+def test_markdown_tool_compilation_persists_only_valid_descriptors(tmp_path: Path) -> None:
+    valid = _typed_tool_declaration(tool_id="fixture.read")
+    invalid = _typed_tool_declaration(tool_id="fixture.invalid", effect="provider_admin")
+    skills_dir = _write_typed_skill_markdown(tmp_path, [valid, invalid])
+
+    store = SQLiteStore(database_path=str(tmp_path / "registry.db"))
+    registry = SkillRegistryService(sqlite_store=store, repo_root=str(tmp_path))
+    result = registry.sync_skills_from_markdown(skills_dir=str(skills_dir))
+
+    assert result["synced_count"] == 1
+    assert result["tool_diagnostic_count"] == 1
+    assert result["synced"][0]["tool_diagnostics"] == [
+        {"code": "effect_invalid", "tool_id": "fixture.invalid"}
+    ]
+    skill = registry.list_skills(active_only=True)[0]
+    assert skill["main_tools_contract_version"] == 1
+    assert [item["tool_id"] for item in skill["main_tools"]] == ["fixture.read"]
+    resolved = registry.resolve_tool(
+        tool_id="fixture.read",
+        user_id="operator",
+        agent_id="jarvis",
+    )
+    assert resolved is not None
+    assert resolved[1].tool_id == "fixture.read"
+
+    cards = registry.discovery_cards(
+        user_id="operator",
+        agent_id="jarvis",
+        request_context={"source_interface": "web"},
+        availability_resolver=lambda _skill, _context: {
+            "configured": True,
+            "authorized_here": True,
+        },
+    )
+    assert cards == [
+        {
+            "skill_id": "skill.fixture.core",
+            "title": "Fixture",
+            "purpose": "Read one bounded fixture resource.",
+            "safe_tags": ["domain:fixture", "effect:read"],
+            "availability": "available",
+        }
+    ]
+    assert "input_schema" not in cards[0]
+    assert registry.discovery_cards(
+        user_id="operator",
+        agent_id="jarvis",
+        request_context={"source_interface": "web"},
+        availability_resolver=lambda _skill, _context: {
+            "configured": True,
+            "authorized_here": False,
+        },
+    ) == []
+
+
+def test_discovery_card_purpose_summarizes_every_interactive_tool(tmp_path: Path) -> None:
+    read_tool = _typed_tool_declaration(tool_id="fixture.read")
+    add_tool = _typed_tool_declaration(tool_id="fixture.add_items")
+    add_tool["purpose"] = "Add an explicit item array to one fixture collection."
+    skills_dir = _write_typed_skill_markdown(tmp_path, [read_tool, add_tool])
+    store = SQLiteStore(database_path=str(tmp_path / "registry.db"))
+    registry = SkillRegistryService(sqlite_store=store, repo_root=str(tmp_path))
+
+    registry.sync_skills_from_markdown(skills_dir=str(skills_dir))
+    cards = registry.discovery_cards(
+        user_id="operator",
+        agent_id="jarvis",
+        request_context={"source_interface": "web"},
+        availability_resolver=lambda _skill, _context: {
+            "configured": True,
+            "authorized_here": True,
+        },
+    )
+
+    assert cards[0]["purpose"] == (
+        "Read one bounded fixture resource. "
+        "Add an explicit item array to one fixture collection."
+    )
+
+
+def test_fresh_and_upgraded_version7_databases_compile_identical_descriptors(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source"
+    skills_dir = _write_typed_skill_markdown(
+        source_root,
+        [_typed_tool_declaration(tool_id="fixture.read")],
+    )
+    fresh_store = SQLiteStore(database_path=str(tmp_path / "fresh.db"))
+
+    version7_path = tmp_path / "version7.db"
+    initial_store = SQLiteStore(database_path=str(version7_path))
+    initial_store.close()
+    connection = sqlite3.connect(version7_path)
+    connection.execute("ALTER TABLE skills DROP COLUMN main_tools_json")
+    connection.execute("ALTER TABLE skills DROP COLUMN main_tools_contract_version")
+    connection.execute("DROP TABLE schema_reader_compatibility")
+    connection.execute("PRAGMA user_version = 7")
+    connection.commit()
+    connection.close()
+    upgraded_store = SQLiteStore(database_path=str(version7_path))
+
+    fresh_registry = SkillRegistryService(fresh_store, repo_root=str(source_root))
+    upgraded_registry = SkillRegistryService(upgraded_store, repo_root=str(source_root))
+    fresh_registry.sync_skills_from_markdown(skills_dir=str(skills_dir))
+    upgraded_registry.sync_skills_from_markdown(skills_dir=str(skills_dir))
+
+    fresh_skill = fresh_registry.list_skills(active_only=True)[0]
+    upgraded_skill = upgraded_registry.list_skills(active_only=True)[0]
+    assert fresh_skill["main_tools_contract_version"] == 1
+    assert fresh_skill["main_tools"] == upgraded_skill["main_tools"]
+    fresh_store.close()
+    upgraded_store.close()
+
+
+def test_duplicate_active_tool_owners_fail_resolution_and_integrity() -> None:
+    class Catalog:
+        @staticmethod
+        def list_skills(*, active_only: bool = True) -> list[dict]:
+            rows = []
+            for skill_id in ("skill.fixture.one", "skill.fixture.two"):
+                raw = _typed_tool_declaration(tool_id="fixture.read")
+                descriptor = ToolDescriptor.from_mapping({**raw, "skill_id": skill_id})
+                rows.append(
+                    {
+                        "skill_id": skill_id,
+                        "skill_name": skill_id,
+                        "skill_user": "all",
+                        "skill_agents": ["all"],
+                        "intents": [],
+                        "execution_ref": "app.skills.domains.lists.handler:run",
+                        "main_tools": [descriptor.to_storage_dict()],
+                        "main_tools_contract_version": 1,
+                        "learnable_ready": True,
+                        "active": True,
+                    }
+                )
+            return rows if active_only else rows
+
+    registry = SkillRegistryService(Catalog())
+    with pytest.raises(ToolContractError, match="tool_owner_not_unique"):
+        registry.resolve_tool(
+            tool_id="fixture.read",
+            user_id="operator",
+            agent_id="jarvis",
+        )
+    report = registry.registry_integrity_report()
+    assert any(
+        issue.get("code") == "duplicate_active_operation_owner"
+        and issue.get("operation_id") == "fixture.read"
+        for issue in report["issues"]
+    )
+
+
+def test_calendar_upgrade_preserves_and_deactivates_legacy_row_independent_of_counters():
+    data_root = (Path.cwd() / "data").resolve()
+    data_root.mkdir(parents=True, exist_ok=True)
+    scratch = data_root / f"jarvis-calendar-upgrade-{uuid4().hex[:8]}"
+    scratch.mkdir(parents=True, exist_ok=True)
+
+    try:
+        store = SQLiteStore(database_path=str(scratch / "calendar.db"))
+        _upsert_skill(
+            store,
+            skill_id="skill.calendar.core",
+            intents=["calendar.view"],
+            execution_ref="app.skills.domains.calendar.handler:run",
+            storage_ref="legacy-calendar-storage",
+        )
+        for index in range(5):
+            store.record_skill_run(
+                skill_id="skill.calendar.core",
+                session_id=None,
+                user_id="fixture-user",
+                intent="calendar.view",
+                route="fixture",
+                status="ok",
+                confidence=1.0,
+                latency_ms=index,
+                created_at=f"2026-08-30T00:00:0{index}+00:00",
+            )
+
+        registry = SkillRegistryService(sqlite_store=store, repo_root=str(Path.cwd()))
+        registry.seed_defaults()
+        skills = {str(row["skill_id"]): row for row in registry.list_skills(active_only=False)}
+
+        assert skills["skill.calendar.core"]["active"] is False
+        assert skills["skill.calendar.core"]["storage_ref"] == "legacy-calendar-storage"
+        assert skills["skill.calendar.core"]["usage_count"] == 5
+        assert skills["skill.productivity.calendar"]["active"] is True
+        resolved = registry.resolve_skill(
+            intent="calendar.view",
+            user_id="fixture-user",
+            agent_id="jarvis",
+        )
+        assert resolved is not None
+        assert resolved["skill_id"] == "skill.productivity.calendar"
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+def test_registry_integrity_report_is_content_free_and_detects_each_failure_class():
+    data_root = (Path.cwd() / "data").resolve()
+    data_root.mkdir(parents=True, exist_ok=True)
+    scratch = data_root / f"jarvis-integrity-{uuid4().hex[:8]}"
+    scratch.mkdir(parents=True, exist_ok=True)
+
+    try:
+        store = SQLiteStore(database_path=str(scratch / "integrity.db"))
+        _upsert_skill(store, skill_id="skill.fixture.one", intents=["lists.add_item"])
+        _upsert_skill(store, skill_id="skill.fixture.two", intents=["lists.add_item"])
+        _upsert_skill(
+            store,
+            skill_id="skill.fixture.bad-handler",
+            intents=["fixture.unknown"],
+            execution_ref="app.skills.domains.missing.handler:run",
+            learnable_ready=False,
+            main_handoff_context={},
+        )
+        registry = SkillRegistryService(sqlite_store=store, repo_root=str(Path.cwd()))
+
+        report = registry.registry_integrity_report()
+        codes = {str(issue["code"]) for issue in report["issues"]}
+
+        assert {
+            "duplicate_active_operation_owner",
+            "active_handler_unimportable",
+            "unknown_legacy_intent",
+            "interactive_contract_missing",
+            "stale_execution_reference",
+        } <= codes
+        serialized = str(report)
+        assert "app.skills.domains" not in serialized
+        assert "storage_ref" not in serialized
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
 

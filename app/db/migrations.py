@@ -2,12 +2,95 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from app.db.core_schema import ensure_core_schema
 from app.db.review_schema import ensure_review_schema
 
 
-LATEST_SCHEMA_VERSION = 7
+LATEST_SCHEMA_VERSION = 9
+CORE_SCHEMA_READER_VERSION = 9
+
+
+# Tests may replace this content-free hook to prove that every version-8 step
+# rolls back atomically. Production leaves it unset.
+_MIGRATION_STEP_HOOK: Callable[[int, str], None] | None = None
+
+
+@dataclass(frozen=True)
+class SchemaReaderDecision:
+    version: int
+    result: str
+    reason: str
+
+    @property
+    def compatible(self) -> bool:
+        return self.result == "compatible"
+
+
+def evaluate_schema_reader_compatibility(
+    conn: sqlite3.Connection,
+    *,
+    reader_version: int = CORE_SCHEMA_READER_VERSION,
+) -> SchemaReaderDecision:
+    """Evaluate whether this binary may read the database without mutating it."""
+
+    current = int(conn.execute("PRAGMA user_version").fetchone()[0])
+    if current <= reader_version:
+        return SchemaReaderDecision(current, "compatible", "schema_not_newer")
+
+    table_exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_reader_compatibility'"
+    ).fetchone()
+    if table_exists is None:
+        return SchemaReaderDecision(current, "incompatible", "compatibility_table_missing")
+
+    try:
+        rows = conn.execute(
+            """
+            SELECT schema_version, minimum_reader_version, change_class
+            FROM schema_reader_compatibility
+            WHERE schema_version > ? AND schema_version <= ?
+            ORDER BY schema_version
+            """,
+            (reader_version, current),
+        ).fetchall()
+    except sqlite3.Error:
+        return SchemaReaderDecision(current, "incompatible", "compatibility_table_invalid")
+
+    by_version: dict[int, list[sqlite3.Row | tuple[object, ...]]] = {}
+    try:
+        for row in rows:
+            by_version.setdefault(int(row[0]), []).append(row)
+    except (TypeError, ValueError):
+        return SchemaReaderDecision(current, "incompatible", "compatibility_row_invalid")
+
+    for version in range(reader_version + 1, current + 1):
+        version_rows = by_version.get(version, [])
+        if not version_rows:
+            return SchemaReaderDecision(current, "incompatible", "compatibility_row_missing")
+        if len(version_rows) != 1:
+            return SchemaReaderDecision(current, "incompatible", "compatibility_row_invalid")
+        row = version_rows[0]
+        try:
+            minimum_reader_version = int(row[1])
+            change_class = str(row[2] or "").strip().casefold()
+        except (TypeError, ValueError):
+            return SchemaReaderDecision(current, "incompatible", "compatibility_row_invalid")
+        if minimum_reader_version < 0:
+            return SchemaReaderDecision(current, "incompatible", "compatibility_row_invalid")
+        if change_class != "additive":
+            return SchemaReaderDecision(current, "incompatible", "change_not_additive")
+        if minimum_reader_version > reader_version:
+            return SchemaReaderDecision(current, "incompatible", "minimum_reader_too_new")
+
+    return SchemaReaderDecision(current, "compatible", "additive_reader_bridge")
+
+
+def _raise_newer_schema(current: int) -> None:
+    raise RuntimeError(
+        f"Database schema version {current} is newer than supported version {LATEST_SCHEMA_VERSION}."
+    )
 
 
 def configure_sqlite_connection(conn: sqlite3.Connection) -> None:
@@ -302,6 +385,87 @@ def _migration_007_shared_provenance_links(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_008_typed_main_tools(conn: sqlite3.Connection) -> None:
+    columns = {
+        str(row[1]).strip().casefold()
+        for row in conn.execute("PRAGMA table_info(skills)").fetchall()
+    }
+    if "main_tools_json" not in columns:
+        conn.execute("ALTER TABLE skills ADD COLUMN main_tools_json TEXT")
+        _notify_migration_step(8, "add_main_tools_json")
+    if "main_tools_contract_version" not in columns:
+        conn.execute("ALTER TABLE skills ADD COLUMN main_tools_contract_version INTEGER")
+        _notify_migration_step(8, "add_main_tools_contract_version")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS schema_reader_compatibility (
+            schema_version INTEGER PRIMARY KEY,
+            minimum_reader_version INTEGER NOT NULL,
+            change_class TEXT NOT NULL,
+            description TEXT NOT NULL
+        )
+        """
+    )
+    _notify_migration_step(8, "create_reader_compatibility")
+    conn.execute(
+        """
+        INSERT INTO schema_reader_compatibility (
+            schema_version, minimum_reader_version, change_class, description
+        )
+        VALUES (8, 7, 'additive', 'Adds compiled Main tool metadata to the skill catalog.')
+        ON CONFLICT(schema_version) DO UPDATE SET
+            minimum_reader_version=excluded.minimum_reader_version,
+            change_class=excluded.change_class,
+            description=excluded.description
+        """
+    )
+    _notify_migration_step(8, "record_reader_compatibility")
+
+
+def _migration_009_lists_operation_idempotency(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS list_operations (
+            operation_id TEXT PRIMARY KEY,
+            owner_user_id TEXT NOT NULL,
+            action TEXT NOT NULL,
+            target_ref TEXT NOT NULL,
+            arguments_hash TEXT NOT NULL,
+            status TEXT NOT NULL,
+            result_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            completed_at TEXT
+        )
+        """
+    )
+    _notify_migration_step(9, "create_list_operations")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_list_operations_owner_action_created
+        ON list_operations(owner_user_id, action, created_at DESC)
+        """
+    )
+    _notify_migration_step(9, "create_list_operations_index")
+    conn.execute(
+        """
+        INSERT INTO schema_reader_compatibility (
+            schema_version, minimum_reader_version, change_class, description
+        )
+        VALUES (9, 7, 'additive', 'Adds atomic Lists mutation operation identities and bounded results.')
+        ON CONFLICT(schema_version) DO UPDATE SET
+            minimum_reader_version=excluded.minimum_reader_version,
+            change_class=excluded.change_class,
+            description=excluded.description
+        """
+    )
+    _notify_migration_step(9, "record_reader_compatibility")
+
+
+def _notify_migration_step(version: int, step: str) -> None:
+    if _MIGRATION_STEP_HOOK is not None:
+        _MIGRATION_STEP_HOOK(version, step)
+
+
 _MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migration_001_action_ticket_ledger,
     2: _migration_002_list_operation_ids,
@@ -310,25 +474,46 @@ _MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     5: _migration_005_durable_job_control_plane,
     6: _migration_006_shared_human_reviews,
     7: _migration_007_shared_provenance_links,
+    8: _migration_008_typed_main_tools,
+    9: _migration_009_lists_operation_idempotency,
 }
 
 
 def apply_migrations(conn: sqlite3.Connection) -> int:
     current = int(conn.execute("PRAGMA user_version").fetchone()[0])
     if current > LATEST_SCHEMA_VERSION:
-        raise RuntimeError(
-            f"Database schema version {current} is newer than supported version {LATEST_SCHEMA_VERSION}."
-        )
+        decision = evaluate_schema_reader_compatibility(conn)
+        if not decision.compatible:
+            _raise_newer_schema(current)
+        return current
     for version in range(current + 1, LATEST_SCHEMA_VERSION + 1):
         migration = _MIGRATIONS[version]
-        migration(conn)
-        conn.execute(f"PRAGMA user_version = {version}")
-        conn.commit()
+        if version < 8:
+            migration(conn)
+            conn.execute(f"PRAGMA user_version = {version}")
+            conn.commit()
+            continue
+        if conn.in_transaction:
+            conn.commit()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            migration(conn)
+            conn.execute(f"PRAGMA user_version = {version}")
+            _notify_migration_step(version, "set_user_version")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
     return LATEST_SCHEMA_VERSION
 
 
 def initialize_schema(conn: sqlite3.Connection) -> int:
     """Run the baseline and ordered migrations through one schema authority."""
 
+    decision = evaluate_schema_reader_compatibility(conn)
+    if decision.version > LATEST_SCHEMA_VERSION:
+        if not decision.compatible:
+            _raise_newer_schema(decision.version)
+        return decision.version
     ensure_core_schema(conn)
     return apply_migrations(conn)

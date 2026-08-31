@@ -1,7 +1,16 @@
 from __future__ import annotations
 
 import importlib
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
+
+from app.skills.tool_contracts import (
+    ToolArgumentCanonicalizationError,
+    ToolCallEnvelope,
+    ToolContractError,
+    ToolDescriptor,
+    canonical_json,
+    thaw_json,
+)
 
 
 class SkillExecutionDispatcher:
@@ -13,6 +22,7 @@ class SkillExecutionDispatcher:
         home_service: Any = None,
         email_agent_service: Any | None = None,
         service_bindings: dict[str, Any] | None = None,
+        domain_handlers: dict[str, Any] | None = None,
     ) -> None:
         self._services = {
             "lists_service": lists_service,
@@ -25,7 +35,73 @@ class SkillExecutionDispatcher:
             if not normalized or not normalized.endswith("_service"):
                 raise ValueError("skill service binding names must end with _service")
             self._services[normalized] = service
+        self._domain_handlers: dict[str, Any] = {}
+        for skill_id, handler in (domain_handlers or {}).items():
+            normalized_skill_id = str(skill_id or "").strip().casefold()
+            if not normalized_skill_id.startswith("skill.") or not callable(
+                getattr(handler, "execute_tool", None)
+            ):
+                raise ValueError("typed domain handlers require a skill ID and execute_tool method")
+            self._domain_handlers[normalized_skill_id] = handler
         self._callable_cache: dict[str, Callable[..., Any]] = {}
+
+    def canonicalize_tool_arguments(
+        self,
+        *,
+        skill: dict[str, Any],
+        descriptor: ToolDescriptor,
+        arguments: Mapping[str, Any],
+        context: dict[str, Any],
+    ) -> Mapping[str, Any]:
+        """Run one bounded domain-owned read resolver before identity creation."""
+
+        skill_id = str(skill.get("skill_id") or "").strip().casefold()
+        if skill_id != descriptor.skill_id:
+            raise ToolArgumentCanonicalizationError("canonicalizer_skill_mismatch")
+        handler = self._domain_handlers.get(skill_id)
+        canonicalizer = getattr(handler, "canonicalize_tool_arguments", None)
+        if not callable(canonicalizer):
+            return arguments
+        mutable_arguments = thaw_json(arguments)
+        before = canonical_json(mutable_arguments)
+        try:
+            result = canonicalizer(
+                tool_id=descriptor.tool_id,
+                validated_arguments=mutable_arguments,
+                request_context=dict(context),
+            )
+        except ToolArgumentCanonicalizationError:
+            raise
+        except Exception as exc:
+            raise ToolArgumentCanonicalizationError(
+                "argument_canonicalization_failed"
+            ) from exc
+        if canonical_json(mutable_arguments) != before:
+            raise ToolArgumentCanonicalizationError("canonicalizer_mutated_arguments")
+        if not isinstance(result, Mapping):
+            raise ToolArgumentCanonicalizationError("canonicalizer_result_invalid")
+        try:
+            canonical_json(result)
+        except ToolContractError as exc:
+            raise ToolArgumentCanonicalizationError("canonicalizer_result_invalid") from exc
+        return result
+
+    def execute_tool(self, envelope: ToolCallEnvelope) -> dict[str, Any] | None:
+        """Dispatch a server-built typed envelope through its owning domain contract."""
+
+        if not isinstance(envelope, ToolCallEnvelope):
+            return None
+        handler = self._domain_handlers.get(envelope.skill_id)
+        execute = getattr(handler, "execute_tool", None)
+        if not callable(execute):
+            return None
+        try:
+            result = execute(envelope=envelope, services=dict(self._services))
+        except Exception:
+            return {"status": "error", "message": "Typed skill execution failed."}
+        if not isinstance(result, dict):
+            return {"status": "error", "message": "Typed skill execution returned invalid output."}
+        return result
 
     @staticmethod
     def _is_safe_execution_ref(value: str) -> bool:
@@ -65,6 +141,8 @@ class SkillExecutionDispatcher:
         entities: dict[str, Any],
         context: dict[str, Any],
     ) -> dict[str, Any] | None:
+        """Legacy intent shim retained until the later Main cutover phase."""
+
         if not isinstance(skill, dict):
             return None
         execution_ref = str(skill.get("execution_ref") or "").strip()

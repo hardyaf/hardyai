@@ -64,6 +64,526 @@ main_handoff_context:
     - focused_email_thread_id
     - last_email_source_route
     - last_email_category_key
+main_tools_contract_version: 1
+main_tools:
+  - tool_id: email.query_messages
+    contract_version: 1
+    purpose: "Find authorized messages in the bounded local projection by typed interval and filters."
+    interactive: true
+    effect: read
+    approval_rule: none
+    approval_conditions: []
+    idempotency: not_applicable
+    sensitivity: private
+    persistence: no_store
+    effect_cardinality: single
+    runtime_dependencies: []
+    transferable_observation_fields:
+      - pattern: /messages/*/message_ref
+        scope: same_domain
+    timeout_seconds: 10
+    max_result_items: 100
+    max_observation_chars: 8000
+    legacy_intents:
+      - email.list_recent
+      - email.search
+    input_schema: &email_query_input
+      type: object
+      additionalProperties: false
+      required:
+        - start
+        - end
+      properties:
+        start:
+          type: string
+          format: date-time
+          minLength: 1
+          maxLength: 64
+        end:
+          type: string
+          format: date-time
+          minLength: 1
+          maxLength: 64
+        senders:
+          type: array
+          minItems: 1
+          maxItems: 10
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 3
+            maxLength: 320
+        recipients:
+          type: array
+          minItems: 1
+          maxItems: 10
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 3
+            maxLength: 320
+        source:
+          type: string
+          minLength: 1
+          maxLength: 64
+        category:
+          type: string
+          minLength: 1
+          maxLength: 64
+        visibility:
+          type: string
+          enum:
+            - active
+            - unseen
+            - needs_reply
+            - completed
+            - spam
+            - all
+        text:
+          type: string
+          minLength: 1
+          maxLength: 200
+        has_attachment:
+          type: boolean
+        order:
+          type: string
+          enum:
+            - oldest
+            - newest
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+    observation_schema:
+      type: object
+      additionalProperties: false
+      required:
+        - messages
+        - normalized_query
+        - source
+        - freshness_at
+        - truncated
+      properties:
+        messages:
+          type: array
+          minItems: 0
+          maxItems: 100
+          items: &email_message_observation
+            type: object
+            additionalProperties: false
+            required:
+              - message_ref
+              - thread_ref
+              - received_at
+              - sender
+              - recipients
+              - subject
+              - snippet
+              - summary
+              - source
+              - category
+              - has_attachment
+              - attachment_names
+              - reference_set_ref
+            properties:
+              message_ref:
+                type: string
+                minLength: 2
+                maxLength: 3
+              thread_ref:
+                type: string
+                minLength: 1
+                maxLength: 64
+              received_at:
+                type: string
+                minLength: 1
+                maxLength: 64
+              sender:
+                type: string
+                minLength: 1
+                maxLength: 320
+              recipients:
+                type: array
+                minItems: 0
+                maxItems: 10
+                items:
+                  type: string
+                  minLength: 1
+                  maxLength: 320
+              subject:
+                type: string
+                minLength: 1
+                maxLength: 300
+              snippet:
+                type: string
+                minLength: 0
+                maxLength: 500
+              summary:
+                type: string
+                minLength: 0
+                maxLength: 700
+              source:
+                type: string
+                minLength: 1
+                maxLength: 64
+              category:
+                type: string
+                minLength: 1
+                maxLength: 64
+              has_attachment:
+                type: boolean
+              attachment_names:
+                type: array
+                minItems: 0
+                maxItems: 5
+                items:
+                  type: string
+                  minLength: 1
+                  maxLength: 100
+              reference_set_ref:
+                type: string
+                minLength: 1
+                maxLength: 64
+        normalized_query:
+          type: object
+          additionalProperties: false
+          required:
+            - start
+            - end
+            - visibility
+            - order
+            - limit
+            - timezone
+            - returned_count
+          properties:
+            start:
+              type: string
+              format: date-time
+              minLength: 1
+              maxLength: 64
+            end:
+              type: string
+              format: date-time
+              minLength: 1
+              maxLength: 64
+            senders:
+              type: array
+              minItems: 1
+              maxItems: 10
+              uniqueItems: true
+              items:
+                type: string
+                minLength: 3
+                maxLength: 320
+            recipients:
+              type: array
+              minItems: 1
+              maxItems: 10
+              uniqueItems: true
+              items:
+                type: string
+                minLength: 3
+                maxLength: 320
+            source:
+              type: string
+              minLength: 1
+              maxLength: 64
+            category:
+              type: string
+              minLength: 1
+              maxLength: 64
+            visibility:
+              type: string
+              enum:
+                - active
+                - unseen
+                - needs_reply
+                - completed
+                - spam
+                - all
+            text:
+              type: string
+              minLength: 1
+              maxLength: 200
+            has_attachment:
+              type: boolean
+            order:
+              type: string
+              enum:
+                - oldest
+                - newest
+            limit:
+              type: integer
+              minimum: 1
+              maximum: 100
+            timezone:
+              type: string
+              minLength: 1
+              maxLength: 64
+            returned_count:
+              type: integer
+              minimum: 0
+              maximum: 100
+        source: &email_projection_source
+          type: object
+          additionalProperties: false
+          required:
+            - kind
+            - stale
+          properties:
+            kind:
+              type: string
+              enum:
+                - email_sqlite_projection
+            stale:
+              type: boolean
+        freshness_at:
+          type: string
+          minLength: 1
+          maxLength: 64
+        truncated:
+          type: boolean
+  - tool_id: email.get_message
+    contract_version: 1
+    purpose: "Retrieve one currently authorized projected message."
+    interactive: true
+    effect: read
+    approval_rule: none
+    approval_conditions: []
+    idempotency: not_applicable
+    sensitivity: private
+    persistence: no_store
+    effect_cardinality: single
+    runtime_dependencies: []
+    transferable_observation_fields:
+      - pattern: /message/message_ref
+        scope: same_domain
+    timeout_seconds: 10
+    max_result_items: 1
+    max_observation_chars: 8000
+    legacy_intents:
+      - email.get_message
+    input_schema:
+      type: object
+      additionalProperties: false
+      required:
+        - message_ref
+      properties:
+        message_ref:
+          type: string
+          minLength: 2
+          maxLength: 3
+    observation_schema:
+      type: object
+      additionalProperties: false
+      required:
+        - message
+        - source
+        - freshness_at
+      properties:
+        message: *email_message_observation
+        source: *email_projection_source
+        freshness_at:
+          type: string
+          minLength: 1
+          maxLength: 64
+  - tool_id: email.get_thread
+    contract_version: 1
+    purpose: "Retrieve the bounded thread containing a currently authorized message."
+    interactive: true
+    effect: read
+    approval_rule: none
+    approval_conditions: []
+    idempotency: not_applicable
+    sensitivity: private
+    persistence: no_store
+    effect_cardinality: single
+    runtime_dependencies: []
+    transferable_observation_fields:
+      - pattern: /messages/*/message_ref
+        scope: same_domain
+    timeout_seconds: 10
+    max_result_items: 50
+    max_observation_chars: 8000
+    legacy_intents:
+      - email.get_thread
+    input_schema:
+      type: object
+      additionalProperties: false
+      required:
+        - message_ref
+      properties:
+        message_ref:
+          type: string
+          minLength: 2
+          maxLength: 3
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 50
+    observation_schema:
+      type: object
+      additionalProperties: false
+      required:
+        - messages
+        - thread_ref
+        - source
+        - freshness_at
+        - truncated
+      properties:
+        messages:
+          type: array
+          minItems: 0
+          maxItems: 50
+          items: *email_message_observation
+        thread_ref:
+          type: string
+          minLength: 1
+          maxLength: 64
+        source: *email_projection_source
+        freshness_at:
+          type: string
+          minLength: 1
+          maxLength: 64
+        truncated:
+          type: boolean
+  - tool_id: email.summarize
+    contract_version: 1
+    purpose: "Summarize a bounded authorized message selection for the user's stated focus."
+    interactive: true
+    effect: read
+    approval_rule: none
+    approval_conditions: []
+    idempotency: not_applicable
+    sensitivity: private
+    persistence: no_store
+    effect_cardinality: single
+    runtime_dependencies: []
+    transferable_observation_fields:
+      - pattern: /message_refs/*
+        scope: same_domain
+    timeout_seconds: 60
+    max_result_items: 50
+    max_observation_chars: 8000
+    legacy_intents:
+      - email.summarize
+    input_schema:
+      type: object
+      additionalProperties: false
+      required:
+        - message_refs
+      properties:
+        message_refs:
+          type: array
+          minItems: 1
+          maxItems: 50
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 2
+            maxLength: 3
+        focus:
+          type: string
+          minLength: 1
+          maxLength: 200
+    observation_schema:
+      type: object
+      additionalProperties: false
+      required:
+        - summary
+        - message_refs
+        - source
+        - freshness_at
+        - truncated
+      properties:
+        summary:
+          type: string
+          minLength: 1
+          maxLength: 6000
+        message_refs:
+          type: array
+          minItems: 1
+          maxItems: 50
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 2
+            maxLength: 3
+        source: *email_projection_source
+        freshness_at:
+          type: string
+          minLength: 1
+          maxLength: 64
+        truncated:
+          type: boolean
+  - tool_id: email.status
+    contract_version: 1
+    purpose: "Report content-free Email projection and sync status."
+    interactive: true
+    effect: read
+    approval_rule: none
+    approval_conditions: []
+    idempotency: not_applicable
+    sensitivity: private
+    persistence: redacted
+    effect_cardinality: single
+    runtime_dependencies: []
+    transferable_observation_fields: []
+    timeout_seconds: 5
+    max_result_items: 1
+    max_observation_chars: 1000
+    legacy_intents:
+      - email.status
+    input_schema:
+      type: object
+      additionalProperties: false
+      required: []
+      properties: {}
+    observation_schema:
+      type: object
+      additionalProperties: false
+      required:
+        - counts
+        - source
+        - freshness_at
+        - sync_state
+      properties:
+        counts:
+          type: object
+          additionalProperties: false
+          required:
+            - messages
+            - needs_review
+            - failed_runs
+            - dead_letter_messages
+          properties:
+            messages:
+              type: integer
+              minimum: 0
+              maximum: 2147483647
+            needs_review:
+              type: integer
+              minimum: 0
+              maximum: 2147483647
+            failed_runs:
+              type: integer
+              minimum: 0
+              maximum: 2147483647
+            dead_letter_messages:
+              type: integer
+              minimum: 0
+              maximum: 2147483647
+        source: *email_projection_source
+        freshness_at:
+          type: string
+          minLength: 1
+          maxLength: 64
+        sync_state:
+          type: string
+          enum:
+            - not_activated
+            - stale
+            - fresh
 ---
 
 # Shared Email Agent

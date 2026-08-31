@@ -15,7 +15,9 @@ execution_ref: app.skills.domains.memory.handler:run
 storage_type: sql
 storage_ref: app.skills.domains.memory.storage:SQLiteMemoryStorage(memories,memory_tags,memory_access_log)
 critical_level: 3
-active: true
+active: false
+interactive: false
+operation_disposition: deactivate_stale
 version: 1
 
 micro_enabled: false

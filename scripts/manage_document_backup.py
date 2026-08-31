@@ -7,6 +7,7 @@ import os
 import re
 import sqlite3
 import subprocess
+import sys
 import tarfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,6 +15,11 @@ from typing import Any
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from app.db.document_schema import DOCUMENT_SCHEMA_VERSION  # noqa: E402
+
 _REQUIRED_BACKUP_FILES = {
     "accepted-spool.tar",
     "core.db",
@@ -289,6 +295,40 @@ def verify_backup(args: argparse.Namespace) -> int:
     return 1 if failures else 0
 
 
+def reader_check(args: argparse.Namespace) -> int:
+    source = Path(args.source).expanduser().resolve()
+    if not source.is_file() or source.is_symlink():
+        print('{"reason":"source_unavailable","result":"incompatible","version":null}')
+        return 1
+    try:
+        connection = sqlite3.connect(
+            f"file:{source.as_posix()}?mode=ro&immutable=1",
+            uri=True,
+        )
+        try:
+            connection.execute("PRAGMA query_only = ON")
+            version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        finally:
+            connection.close()
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        print('{"reason":"database_unreadable","result":"incompatible","version":null}')
+        return 1
+
+    compatible = version <= DOCUMENT_SCHEMA_VERSION
+    print(
+        json.dumps(
+            {
+                "version": version,
+                "result": "compatible" if compatible else "incompatible",
+                "reason": "schema_not_newer" if compatible else "schema_newer",
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    )
+    return 0 if compatible else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Create or verify a coordinated document backup.")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -305,6 +345,9 @@ def build_parser() -> argparse.ArgumentParser:
     verify = commands.add_parser("verify")
     verify.add_argument("generation_path")
     verify.set_defaults(handler=verify_backup)
+    reader = commands.add_parser("reader-check")
+    reader.add_argument("--source", required=True)
+    reader.set_defaults(handler=reader_check)
     return parser
 
 

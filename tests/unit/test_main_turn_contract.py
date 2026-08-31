@@ -73,3 +73,58 @@ def test_rejects_unknown_action_intent():
         )
         is None
     )
+
+
+def test_generic_commitment_is_closed_and_has_no_intent_authority():
+    action = normalize_main_turn_decision(
+        {
+            "mode": "execute_action",
+            "confidence": 0.91,
+            "reason_code": "plausible_action",
+        },
+        execution_mode="active",
+    )
+
+    assert action == {
+        "mode": "execute_action",
+        "confidence": 0.91,
+        "reason_code": "plausible_action",
+    }
+    assert normalize_main_turn_decision(
+        {**action, "intent": "lists.add_item"},
+        execution_mode="active",
+    ) is None
+    assert normalize_main_turn_decision(
+        {
+            "mode": "clarify_action",
+            "confidence": 0.8,
+            "reason_code": "missing_referent",
+            "question": "Which one?",
+            "entities": {},
+        },
+        execution_mode="shadow",
+    ) is None
+
+
+def test_generic_commitment_conversation_and_clarification_are_exact():
+    conversation = normalize_main_turn_decision(
+        {
+            "mode": "conversation",
+            "confidence": 0.99,
+            "reason_code": "informational",
+            "message": "A complete answer.",
+        },
+        execution_mode="shadow",
+    )
+    clarification = normalize_main_turn_decision(
+        {
+            "mode": "clarify_action",
+            "confidence": 0.7,
+            "reason_code": "ambiguous_goal",
+            "question": "What complete goal should I use?",
+        },
+        execution_mode="active",
+    )
+
+    assert conversation is not None and conversation["message"] == "A complete answer."
+    assert clarification is not None and clarification["question"].startswith("What complete")

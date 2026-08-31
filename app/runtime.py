@@ -47,6 +47,8 @@ from app.skills.domains.email_agent.config import EmailAgentPermissions
 from app.skills.domains.email_agent.service import EmailAgentRuntimeConfig, EmailAgentService
 from app.skills.domains.email_agent.storage import EmailAgentSQLiteStorage
 from app.skills.domains.email_agent.summarization import OllamaEmailSummaryCompiler
+from app.skills.domains.lists.storage import SQLiteListsStorage
+from app.skills.domains.lists.tools import ListsToolHandler
 from app.skills.registry_service import SkillRegistryService
 from app.tools.calendar_service import CalendarService
 from app.tools.home_service import HomeService
@@ -364,9 +366,9 @@ conversation_history_service = ConversationHistoryService(
     persistence=conversation_storage,
     base_dir=str(conversation_history_base_dir),
 )
-lists_service = ListsService(
-    sqlite_store=sqlite_store,
-)
+lists_storage = SQLiteListsStorage(sqlite_store=sqlite_store)
+lists_service = ListsService(storage=lists_storage)
+lists_tool_handler = ListsToolHandler(storage=lists_storage)
 google_calendar_live = (
     GoogleCalendarLiveService(settings.google_permissions_path)
     if settings.calendar_google_enabled
@@ -580,8 +582,29 @@ router = JarvisRouter(
     action_ticket_service=action_ticket_service,
     identity_service=external_identity_service,
     email_agent_service=email_agent_service,
+    typed_domain_handlers={
+        ListsToolHandler.SKILL_ID: lists_tool_handler,
+        **(
+            {EmailAgentService.SKILL_ID: email_agent_service}
+            if email_agent_service is not None
+            else {}
+        ),
+    },
     documents_service=documents_service,
     durable_write_service=durable_write_service,
+    main_tool_model=main_conversation_backend,
+    main_tool_execution_mode=settings.main_tool_execution_mode,
+    main_tool_enabled_domains=settings.main_tool_enabled_domains,
+    main_tool_enabled_operations=settings.main_tool_enabled_operations,
+    main_tool_max_selected_skills=settings.main_tool_max_selected_skills,
+    main_tool_max_steps=settings.main_tool_max_steps,
+    main_tool_max_failures=settings.main_tool_max_failures,
+    main_tool_max_identical_read_calls=settings.main_tool_max_identical_read_calls,
+    main_tool_max_observation_chars=settings.main_tool_max_observation_chars,
+    main_tool_max_total_observation_chars=settings.main_tool_max_total_observation_chars,
+    main_tool_timeout_seconds=settings.main_tool_timeout_seconds,
+    legacy_micro_routing_enabled=settings.legacy_micro_routing_enabled,
+    email_timezone=settings.email_agent_timezone,
 )
 action_execution_service = router.action_execution_service
 provenance_repository = ProvenanceRepository(settings.database_path)

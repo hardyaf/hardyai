@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.context.reference_resolver import ReferenceResolver
 from app.core.session_store import SessionRecord
@@ -18,13 +19,50 @@ class DomainContextService:
         contracts: Iterable[SkillContextContract],
         reference_resolver: ReferenceResolver,
         event_log: EventLogService,
+        email_timezone: str | None = None,
+        calendar_timezone_resolver: Callable[[dict[str, Any]], str | None] | None = None,
     ) -> None:
         self._contracts = list(contracts)
         self._reference_resolver = reference_resolver
         self._event_log = event_log
+        self._email_timezone = self._validated_timezone(email_timezone)
+        self._calendar_timezone_resolver = calendar_timezone_resolver
 
     def set_contracts(self, contracts: Iterable[SkillContextContract]) -> None:
         self._contracts = list(contracts)
+
+    def resolve_tool_timezone(
+        self,
+        *,
+        tool_id: str,
+        request_context: dict[str, Any],
+    ) -> str | None:
+        """Resolve a server-owned domain timezone without trusting model/transport values."""
+
+        domain = str(tool_id or "").strip().casefold().partition(".")[0]
+        if domain == "email":
+            return self._email_timezone
+        if domain == "calendar":
+            if not callable(self._calendar_timezone_resolver):
+                return None
+            try:
+                return self._validated_timezone(
+                    self._calendar_timezone_resolver(dict(request_context))
+                )
+            except Exception:  # pragma: no cover - defensive domain resolver isolation
+                return None
+        return "UTC"
+
+    @staticmethod
+    def _validated_timezone(value: str | None) -> str | None:
+        cleaned = str(value or "").strip()
+        if not cleaned:
+            return None
+        try:
+            ZoneInfo(cleaned)
+        except (ZoneInfoNotFoundError, ValueError):
+            return None
+        return cleaned
 
     def normalize_entities(self, *, intent: Intent, entities: dict[str, Any]) -> dict[str, Any]:
         normalized = dict(entities)

@@ -4,7 +4,27 @@ from app.context.reference_resolver import ReferenceResolver
 from app.context.types import EntityRegistry, TrackedEntity
 from app.core.micro_jarvis import MicroDecision
 from app.core.types import Intent, SessionOwner
-from app.skills.context_contracts import default_skill_context_contracts
+from app.skills.context_contracts import ToolArgumentCanonicalizer, default_skill_context_contracts
+
+
+def test_tool_argument_canonicalizer_protocol_is_domain_neutral() -> None:
+    class IdentityCanonicalizer:
+        def canonicalize_tool_arguments(
+            self,
+            *,
+            tool_id: str,
+            validated_arguments: dict,
+            request_context: dict,
+        ) -> dict:
+            del tool_id, request_context
+            return dict(validated_arguments)
+
+    canonicalizer: ToolArgumentCanonicalizer = IdentityCanonicalizer()
+    assert canonicalizer.canonicalize_tool_arguments(
+        tool_id="fixture.read",
+        validated_arguments={"value": "one"},
+        request_context={},
+    ) == {"value": "one"}
 
 
 def test_default_skill_context_contracts_cover_core_domains():

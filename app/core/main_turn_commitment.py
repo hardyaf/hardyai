@@ -5,11 +5,13 @@ from uuid import uuid4
 
 from app.core.action_execution import ActionExecutionService
 from app.core.domain_context import DomainContextService
+from app.core.main_turn_contract import normalize_main_turn_decision
 from app.core.micro_jarvis import MicroDecision
 from app.core.pending_interaction import PendingInteractionCoordinator
+from app.core.persistence_policy import persistence_policy
 from app.core.session_store import SessionRecord, SessionStore
 from app.core.session_transitions import SessionTransitionService
-from app.core.turn_finalizer import TurnFinalizer
+from app.core.turn_finalizer import TurnFinalizationOptions, TurnFinalizer
 from app.core.types import MAIN_ACTION_INTENTS, Intent, SessionOwner, SessionState
 from app.schemas.api import AskRequest
 from app.services.event_log import EventLogService
@@ -35,6 +37,9 @@ class MainTurnCommitmentCoordinator:
         action_ticket_service: Any | None,
         low_confidence_floor: float,
         child_action_denial_message: str,
+        main_tool_loop: Any | None = None,
+        main_tool_model: Any | None = None,
+        main_tool_execution_mode: str = "off",
     ) -> None:
         self._domain_context = domain_context
         self._pending_interactions = pending_interactions
@@ -46,6 +51,318 @@ class MainTurnCommitmentCoordinator:
         self._action_ticket_service = action_ticket_service
         self._low_confidence_floor = low_confidence_floor
         self._child_action_denial_message = child_action_denial_message
+        self._main_tool_loop = main_tool_loop
+        self._main_tool_model = main_tool_model
+        self._main_tool_execution_mode = str(main_tool_execution_mode or "off").strip().casefold()
+
+    def evaluate_new_path(
+        self,
+        *,
+        payload: AskRequest,
+        session: SessionRecord,
+        effective_context: dict[str, Any],
+        request_text: str,
+        request_id: str,
+        shadow: bool,
+    ) -> dict[str, Any] | None:
+        """Run the generic commitment/loop seam without a legacy intent gate."""
+
+        mode = "shadow" if shadow else "active"
+        decide_turn = getattr(self._main_tool_model, "decide_turn", None)
+        if self._main_tool_execution_mode != mode or not callable(decide_turn):
+            if shadow:
+                return None
+            return self._finalize_new_path(
+                payload=payload,
+                session=session,
+                request_id=request_id,
+                result={
+                    "status": "safe_stop",
+                    "message": "I could not safely evaluate that action right now.",
+                    "stop_reason": "main_tool_model_unavailable",
+                    "persistence": "standard",
+                },
+                commitment=None,
+            )
+        raw = decide_turn(
+            request_text,
+            {
+                "main_tool_execution_mode": mode,
+                "agent_id": effective_context.get("agent_id"),
+                "requested_by_user_id": payload.user_id,
+                "session_summary": session.context_reference.get("session_summary"),
+                "recent_turns": session.context_reference.get("recent_turns"),
+            },
+        )
+        commitment = normalize_main_turn_decision(
+            raw if isinstance(raw, dict) else None,
+            execution_mode=mode,
+        )
+        if commitment is None:
+            self._record_new_path_commitment(
+                session=session,
+                mode=mode,
+                status="invalid",
+                reason_code=None,
+            )
+            if shadow:
+                return None
+            return self._finalize_new_path(
+                payload=payload,
+                session=session,
+                request_id=request_id,
+                result={
+                    "status": "safe_stop",
+                    "message": "I could not safely determine whether that request should use a capability.",
+                    "stop_reason": "invalid_main_action_commitment",
+                    "persistence": "standard",
+                },
+                commitment=None,
+            )
+        self._record_new_path_commitment(
+            session=session,
+            mode=mode,
+            status=str(commitment.get("mode") or "unknown"),
+            reason_code=str(commitment.get("reason_code") or "") or None,
+        )
+        if commitment["mode"] == "conversation":
+            if shadow:
+                return None
+            return self._finalize_new_path(
+                payload=payload,
+                session=session,
+                request_id=request_id,
+                result={
+                    "status": "conversation",
+                    "message": str(commitment.get("message") or ""),
+                    "stop_reason": "generic_commitment_conversation",
+                    "persistence": "standard",
+                },
+                commitment=commitment,
+                intent=Intent.CONVERSATIONAL,
+            )
+        if commitment["mode"] == "clarify_action":
+            if shadow:
+                return None
+            question = (
+                "Please restate the complete goal, including the object and outcome you want."
+            )
+            if self._main_tool_loop is None:
+                return self._finalize_new_path(
+                    payload=payload,
+                    session=session,
+                    request_id=request_id,
+                    result={
+                        "status": "safe_stop",
+                        "message": "I could not safely preserve that clarification.",
+                        "stop_reason": "main_tool_loop_unavailable",
+                        "persistence": "no_store",
+                    },
+                    commitment=commitment,
+                )
+            binding_hash = self._main_tool_loop.binding_hash(
+                user_id=payload.user_id,
+                agent_id=str(effective_context.get("agent_id") or "jarvis"),
+                source_interface=payload.source,
+                request_context=payload.context,
+            )
+            self._pending_interactions.store_generic_action_clarification(
+                session=session,
+                question=question,
+                root_request_id=request_id,
+                binding_hash=binding_hash,
+            )
+            self._session_transitions.arm_main_followup(
+                session=session,
+                reason="main_action_clarification_v2",
+            )
+            self._session_transitions.set_owner(session=session, owner=SessionOwner.MAIN)
+            self._session_transitions.set_state(
+                session=session,
+                state=SessionState.AWAITING_CONFIRMATION,
+            )
+            return self._finalize_new_path(
+                payload=payload,
+                session=session,
+                request_id=request_id,
+                result={
+                    "status": "needs_clarification",
+                    "message": question,
+                    "question": question,
+                    "missing_fields": ["complete_goal"],
+                    "stop_reason": "generic_commitment_clarification",
+                    "persistence": "no_store",
+                },
+                commitment=commitment,
+            )
+
+        if self._main_tool_loop is None:
+            if shadow:
+                return None
+            return self._finalize_new_path(
+                payload=payload,
+                session=session,
+                request_id=request_id,
+                result={
+                    "status": "safe_stop",
+                    "message": "I could not safely evaluate that capability request.",
+                    "stop_reason": "main_tool_loop_unavailable",
+                    "persistence": "standard",
+                },
+                commitment=commitment,
+            )
+        outcome = self._main_tool_loop.run(
+            text=request_text,
+            request_id=request_id,
+            session=session,
+            user_id=payload.user_id,
+            agent_id=str(effective_context.get("agent_id") or "jarvis"),
+            source_interface=payload.source,
+            request_context={
+                **payload.context,
+                "session_summary": session.context_reference.get("session_summary"),
+                "recent_turns": session.context_reference.get("recent_turns"),
+            },
+        )
+        self._record_new_path_outcome(session=session, mode=mode, outcome=outcome)
+        if shadow:
+            return None
+        return self._finalize_new_path(
+            payload=payload,
+            session=session,
+            request_id=request_id,
+            result=outcome,
+            commitment=commitment,
+        )
+
+    def resume_pending_tool(
+        self,
+        *,
+        payload: AskRequest,
+        session: SessionRecord,
+        pending: dict[str, Any],
+        effective_context: dict[str, Any],
+        request_text: str,
+        request_id: str,
+    ) -> dict[str, Any] | None:
+        if self._main_tool_execution_mode != "active" or self._main_tool_loop is None:
+            return None
+        outcome = self._main_tool_loop.resume(
+            text=request_text,
+            pending=pending,
+            session=session,
+            user_id=payload.user_id,
+            agent_id=str(effective_context.get("agent_id") or "jarvis"),
+            source_interface=payload.source,
+            request_context=payload.context,
+        )
+        return self._finalize_new_path(
+            payload=payload,
+            session=session,
+            request_id=request_id,
+            result=outcome,
+            commitment={
+                "mode": "execute_action",
+                "confidence": 1.0,
+                "reason_code": "plausible_action",
+            },
+        )
+
+    def _finalize_new_path(
+        self,
+        *,
+        payload: AskRequest,
+        session: SessionRecord,
+        request_id: str,
+        result: dict[str, Any],
+        commitment: dict[str, Any] | None,
+        intent: Intent = Intent.UNKNOWN,
+    ) -> dict[str, Any]:
+        status = str(result.get("status") or "safe_stop").strip().casefold()
+        if status in {"needs_clarification", "needs_input"}:
+            self._session_transitions.set_owner(session=session, owner=SessionOwner.MAIN)
+            self._session_transitions.set_state(
+                session=session,
+                state=SessionState.AWAITING_CONFIRMATION,
+            )
+        else:
+            self._session_transitions.set_owner(session=session, owner=SessionOwner.MAIN)
+            self._session_transitions.set_state(session=session, state=SessionState.IDLE)
+        policy = persistence_policy(
+            result.get("persistence"),
+            canonicalize_legacy_aliases=True,
+        )
+        classification = {
+            "intent": intent.value,
+            "confidence": float((commitment or {}).get("confidence") or 0.0),
+            "entities": {},
+            "ambiguity_flags": ["main_tool_loop"],
+            "recommended_owner": SessionOwner.MAIN.value,
+            "reasoning": "main_action_commitment_v2",
+            "commitment_mode": (commitment or {}).get("mode"),
+            "reason_code": (commitment or {}).get("reason_code"),
+        }
+        return self._turn_finalizer.build_response(
+            request_id=request_id,
+            session=session,
+            intent=intent,
+            classification=classification,
+            route="main_tool_loop",
+            result={**dict(result), "_persistence_policy": policy.name.value},
+            request_text=payload.text,
+            user_id=payload.user_id,
+            options=TurnFinalizationOptions(
+                record_context_history=policy.record_entity_context,
+                record_recent_turns=policy.record_recent_turns,
+                record_conversation_history=policy.record_conversation_history,
+                record_memory=policy.record_memory,
+                capture_ticket=False,
+                persistence_policy=policy,
+            ),
+        )
+
+    def _record_new_path_commitment(
+        self,
+        *,
+        session: SessionRecord,
+        mode: str,
+        status: str,
+        reason_code: str | None,
+    ) -> None:
+        self._event_log.record(
+            event_type=f"main.action.commitment.{mode}.evaluated",
+            session_id=session.session_id,
+            payload={
+                "status": status,
+                "reason_code": reason_code,
+            },
+        )
+
+    def _record_new_path_outcome(
+        self,
+        *,
+        session: SessionRecord,
+        mode: str,
+        outcome: dict[str, Any],
+    ) -> None:
+        self._event_log.record(
+            event_type=f"main.action.loop.{mode}.evaluated",
+            session_id=session.session_id,
+            payload={
+                "status": outcome.get("status"),
+                "stop_reason": outcome.get("stop_reason"),
+                "selected_skill_ids": list(outcome.get("selected_skill_ids") or [])[:3],
+                "tool_ids": list(outcome.get("tool_ids") or [])[:16],
+                "operation_ids": list(outcome.get("operation_ids") or [])[:16],
+                "receipt_refs": list(outcome.get("receipt_refs") or [])[:16],
+                "observation_count": int(outcome.get("observation_count") or 0),
+                "committed_effect_count": int(outcome.get("committed_effect_count") or 0),
+                "would_call_count": int(outcome.get("would_call_count") or 0),
+                "steps": int(outcome.get("steps") or 0),
+                "failures": int(outcome.get("failures") or 0),
+                "elapsed_ms": int(outcome.get("elapsed_ms") or 0),
+            },
+        )
 
     def handle(
         self,

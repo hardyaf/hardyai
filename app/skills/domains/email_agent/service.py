@@ -12,6 +12,7 @@ from app.services.google.gmail_gateway import GmailHistoryExpiredError, GmailRea
 from app.services.google.gmail_mime import GmailMimeParser
 from app.skills.domains.email_agent.classification import EmailClassifier
 from app.skills.domains.email_agent.config import EmailAgentPermissions
+from app.skills.domains.email_agent.query import EmailReadToolExecutor
 from app.skills.domains.email_agent.storage import EmailAgentSQLiteStorage
 from app.skills.domains.email_agent.summarization import (
     PROMPT_VERSION,
@@ -214,6 +215,13 @@ class EmailAgentService:
         self.config = config
         self._event_log = event_log
         self._worker_id = str(worker_id or f"email-agent-{uuid4()}")
+        self._typed_reads = EmailReadToolExecutor(
+            storage=storage,
+            permissions=permissions,
+            timezone_name=config.timezone_name,
+            reference_retention_hours=config.reference_retention_hours,
+            stale_seconds=config.on_demand_stale_seconds,
+        )
 
     def run_due(self, *, now: datetime | None = None) -> dict[str, Any] | None:
         if not self.config.sync_enabled:
@@ -824,6 +832,28 @@ class EmailAgentService:
         if intent_value == "email.correct_category":
             return self._correct_category(entities=entities, context=context)
         return {"status": "error", "message": "Email intent is not implemented."}
+
+    def canonicalize_tool_arguments(
+        self,
+        *,
+        tool_id: str,
+        validated_arguments: dict[str, Any],
+        request_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        return self._typed_reads.canonicalize(
+            tool_id=tool_id,
+            validated_arguments=validated_arguments,
+            request_context=request_context,
+        )
+
+    def execute_tool(
+        self,
+        *,
+        envelope: Any,
+        services: dict[str, Any],
+    ) -> dict[str, Any]:
+        del services
+        return self._typed_reads.execute(envelope=envelope)
 
     def capability_access(self, *, context: dict[str, Any]) -> dict[str, Any]:
         """Return safe, content-free capability status for Main's runtime catalog."""

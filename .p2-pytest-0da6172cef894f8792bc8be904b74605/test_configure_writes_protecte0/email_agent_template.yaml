@@ -1,0 +1,34 @@
+access:
+- agent_ids:
+  - jarvis
+  audiences:
+  - shared
+  discord_channel_id: '222222222222222222'
+  enabled: true
+  external_user_id: '333333333333333333'
+  user_id: operator
+categories:
+- audience: shared
+  display_name: Work
+  gmail_label_name: Jarvis/Work
+  key: work
+- audience: shared
+  display_name: Spam
+  gmail_label_name: null
+  key: spam
+- audience: shared
+  display_name: Needs Review
+  gmail_label_name: Jarvis/Needs Review
+  key: needs_review
+classification_rules:
+- category_key: work
+  content_contains:
+  - project
+gmail_profile: jarvis.house@example.com
+google_account_key: replace-me
+source_routes:
+- destination_alias: jarvis.house+work@example.com
+  route_key: work
+  source_mailbox: person@example.edu
+taxonomy_version: shared-v1
+version: 1

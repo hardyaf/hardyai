@@ -1,0 +1,6 @@
+FROM jarvis-poc-app:p3-bounded-loop-candidate-v4-20260830e
+
+COPY requirements-dev.txt /tmp/requirements-dev.txt
+COPY requirements.txt /tmp/requirements.txt
+RUN python -m pip install --no-cache-dir --requirement /tmp/requirements-dev.txt \
+    && python -m pip check

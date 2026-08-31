@@ -24,6 +24,7 @@ from app.core.evaluator import MainAgentEvaluator
 from app.core.main_jarvis import MainJarvis
 from app.core.main_plan_flow import MainPlanFlow
 from app.core.main_repair_flow import MainRepairFlow
+from app.core.main_tool_loop import MainToolLoop, MainToolLoopLimits
 from app.core.main_turn_commitment import MainTurnCommitmentCoordinator
 from app.core.micro_jarvis import MicroDecision, MicroJarvis
 from app.core.pending_interaction import PendingInteractionCoordinator
@@ -120,8 +121,26 @@ class JarvisRouter:
         email_agent_service: Any | None = None,
         documents_service: Any | None = None,
         skill_service_bindings: dict[str, Any] | None = None,
+        typed_domain_handlers: dict[str, Any] | None = None,
         skill_context_contracts: list[Any] | None = None,
         durable_write_service: DurableWriteService | None = None,
+        main_tool_model: Any | None = None,
+        main_tool_execution_mode: str = "off",
+        main_tool_enabled_domains: tuple[str, ...] = (),
+        main_tool_enabled_operations: tuple[str, ...] = (),
+        main_tool_max_selected_skills: int = 3,
+        main_tool_max_steps: int = 8,
+        main_tool_max_failures: int = 2,
+        main_tool_max_identical_read_calls: int = 2,
+        main_tool_max_observation_chars: int = 8_000,
+        main_tool_max_total_observation_chars: int = 24_000,
+        main_tool_timeout_seconds: int = 120,
+        legacy_micro_routing_enabled: bool = True,
+        email_timezone: str | None = None,
+        calendar_timezone_resolver: Any | None = None,
+        utc_clock: Any | None = None,
+        monotonic_clock: Any | None = None,
+        shadow_observation_provider: Any | None = None,
     ) -> None:
         self._micro_jarvis = micro_jarvis
         self._main_jarvis = main_jarvis
@@ -137,6 +156,10 @@ class JarvisRouter:
         self._action_ticket_service = action_ticket_service
         self._identity_service = identity_service
         self._durable_write_service = durable_write_service
+        self._main_tool_execution_mode = str(main_tool_execution_mode or "off").strip().casefold()
+        if self._main_tool_execution_mode not in {"off", "shadow", "active"}:
+            raise ValueError("main_tool_execution_mode_invalid")
+        self._legacy_micro_routing_enabled = bool(legacy_micro_routing_enabled)
         self._request_id_var: ContextVar[str | None] = ContextVar(
             "jarvis_request_id",
             default=None,
@@ -156,10 +179,15 @@ class JarvisRouter:
                 **(skill_service_bindings or {}),
                 **({"documents_service": documents_service} if documents_service is not None else {}),
             },
+            domain_handlers=typed_domain_handlers,
         )
         self._authorized_skill_executor = AuthorizedSkillExecutor(
             skill_registry=skill_registry,
             dispatcher=execution_dispatcher,
+            execution_mode=self._main_tool_execution_mode,
+            enabled_domains=main_tool_enabled_domains,
+            enabled_operations=main_tool_enabled_operations,
+            max_selected_skills=main_tool_max_selected_skills,
         )
         self._capability_projector = RuntimeCapabilityProjector(
             skill_registry=skill_registry,
@@ -223,6 +251,29 @@ class JarvisRouter:
             contracts=self._skill_context_contracts,
             reference_resolver=self._reference_resolver,
             event_log=event_log,
+            email_timezone=email_timezone,
+            calendar_timezone_resolver=calendar_timezone_resolver,
+        )
+        self._main_tool_loop = MainToolLoop(
+            model=main_tool_model,
+            authorized_executor=self._authorized_skill_executor,
+            skill_registry=skill_registry,
+            domain_context=self._domain_context,
+            pending_interactions=self._pending_interaction_coordinator,
+            event_log=event_log,
+            execution_mode=self._main_tool_execution_mode,
+            limits=MainToolLoopLimits(
+                max_selected_skills=main_tool_max_selected_skills,
+                max_steps=main_tool_max_steps,
+                max_failures=main_tool_max_failures,
+                max_identical_read_calls=main_tool_max_identical_read_calls,
+                max_observation_chars=main_tool_max_observation_chars,
+                max_total_observation_chars=main_tool_max_total_observation_chars,
+                timeout_seconds=main_tool_timeout_seconds,
+            ),
+            utc_clock=utc_clock,
+            monotonic_clock=monotonic_clock,
+            shadow_observation_provider=shadow_observation_provider,
         )
         self._session_context_manager = SessionContextManager(
             max_recent_turns=max(2, int(recent_turns_max_entries)),
@@ -266,6 +317,9 @@ class JarvisRouter:
             action_ticket_service=action_ticket_service,
             low_confidence_floor=self._main_low_confidence_floor,
             child_action_denial_message=self._CHILD_ACTION_DENIAL_MESSAGE,
+            main_tool_loop=self._main_tool_loop,
+            main_tool_model=main_tool_model,
+            main_tool_execution_mode=self._main_tool_execution_mode,
         )
         self._clarification_coordinator = ClarificationCoordinator(
             domain_context=self._domain_context,
@@ -402,6 +456,49 @@ class JarvisRouter:
             bind_request_decision=self._bind_request_decision,
         )
 
+    def _handle_active_main_tool_turn(
+        self, *, payload: AskRequest, session: SessionRecord,
+        effective_context: dict[str, Any], request_text: str,
+    ) -> dict[str, Any] | None:
+        if self._main_tool_execution_mode != "active":
+            return None
+        return self._main_turn_commitment.evaluate_new_path(
+            payload=payload,
+            session=session,
+            effective_context=effective_context,
+            request_text=request_text,
+            request_id=str(self._request_id_var.get() or payload.request_id or ""),
+            shadow=False,
+        )
+
+    def _observe_shadow_main_tool_turn(
+        self, *, payload: AskRequest, session: SessionRecord,
+        effective_context: dict[str, Any], request_text: str,
+    ) -> None:
+        if self._main_tool_execution_mode != "shadow":
+            return
+        self._main_turn_commitment.evaluate_new_path(
+            payload=payload,
+            session=session,
+            effective_context=effective_context,
+            request_text=request_text,
+            request_id=str(self._request_id_var.get() or payload.request_id or ""),
+            shadow=True,
+        )
+
+    def _resume_pending_tool_call(
+        self, *, payload: AskRequest, session: SessionRecord,
+        effective_context: dict[str, Any], request_text: str, pending: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        return self._main_turn_commitment.resume_pending_tool(
+            payload=payload,
+            session=session,
+            pending=pending,
+            effective_context=effective_context,
+            request_text=request_text,
+            request_id=str(self._request_id_var.get() or payload.request_id or ""),
+        )
+
     def _maybe_open_conversation_followup(
         self,
         *,
@@ -504,10 +601,13 @@ class JarvisRouter:
             return channel
         return f"{user_id}:{channel}"
 
-    @staticmethod
-    def _micro_command_enabled(payload: AskRequest) -> bool:
+    def _micro_command_enabled(self, payload: AskRequest) -> bool:
         """Discord enters Micro only through an explicit adapter-recorded prefix."""
 
+        if self._main_tool_execution_mode == "active":
+            return False
+        if not self._legacy_micro_routing_enabled:
+            return False
         if str(payload.source or "").strip().lower() != "discord":
             return True
         return payload.context.get("micro_command_explicit") is True
