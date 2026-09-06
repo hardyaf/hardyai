@@ -361,6 +361,90 @@ class DomainSchemaMigrations:
                 FOREIGN KEY (gmail_message_id) REFERENCES email_messages(gmail_message_id)
             );
 
+            CREATE TABLE IF NOT EXISTS email_managed_labels (
+                label_ref TEXT PRIMARY KEY,
+                policy_key TEXT NOT NULL UNIQUE,
+                display_name TEXT NOT NULL,
+                gmail_label_name TEXT NOT NULL UNIQUE,
+                provider_label_id TEXT,
+                enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+                origin TEXT NOT NULL CHECK (origin = 'protected_config'),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS email_message_managed_labels (
+                gmail_message_id TEXT NOT NULL,
+                label_ref TEXT NOT NULL,
+                present INTEGER NOT NULL CHECK (present IN (0, 1)),
+                provider_label_id TEXT,
+                last_verified_at TEXT NOT NULL,
+                PRIMARY KEY (gmail_message_id, label_ref),
+                FOREIGN KEY (gmail_message_id) REFERENCES email_messages(gmail_message_id),
+                FOREIGN KEY (label_ref) REFERENCES email_managed_labels(label_ref)
+            );
+
+            CREATE TABLE IF NOT EXISTS email_tool_operations (
+                operation_id TEXT PRIMARY KEY,
+                tool_id TEXT NOT NULL CHECK (
+                    tool_id IN (
+                        'email.apply_labels',
+                        'email.remove_labels',
+                        'email.set_read_state',
+                        'email.archive_messages',
+                        'email.restore_to_inbox'
+                    )
+                ),
+                contract_version INTEGER NOT NULL CHECK (contract_version = 1),
+                owner_user_id TEXT NOT NULL,
+                discord_channel_id TEXT NOT NULL,
+                arguments_hash TEXT NOT NULL,
+                effect_cardinality TEXT NOT NULL CHECK (effect_cardinality = 'independent_batch'),
+                expected_child_count INTEGER NOT NULL CHECK (
+                    expected_child_count >= 1 AND expected_child_count <= 50
+                ),
+                recovery_manifest_json TEXT NOT NULL,
+                recovery_manifest_hash TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (
+                    status IN ('reserved','queued','completed','partial','failed','cancelled')
+                ),
+                result_json TEXT NOT NULL DEFAULT '{}',
+                error_code TEXT,
+                created_at TEXT NOT NULL,
+                completed_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS email_managed_label_operations (
+                child_operation_id TEXT PRIMARY KEY,
+                parent_operation_id TEXT NOT NULL,
+                child_index INTEGER NOT NULL CHECK (child_index >= 1 AND child_index <= 50),
+                gmail_message_id TEXT NOT NULL,
+                action TEXT NOT NULL CHECK (action IN ('apply','remove')),
+                managed_label_refs_json TEXT NOT NULL,
+                arguments_hash TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL UNIQUE,
+                status TEXT NOT NULL CHECK (
+                    status IN ('queued','claimed','verified','dead_letter','cancelled')
+                ),
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                max_attempts INTEGER NOT NULL DEFAULT 4 CHECK (
+                    max_attempts >= 1 AND max_attempts <= 10
+                ),
+                lease_owner TEXT,
+                lease_expires_at TEXT,
+                lease_fencing_token INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at TEXT NOT NULL,
+                provider_labels_before_json TEXT NOT NULL DEFAULT '[]',
+                provider_labels_after_json TEXT NOT NULL DEFAULT '[]',
+                last_error_code TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                completed_at TEXT,
+                FOREIGN KEY (parent_operation_id) REFERENCES email_tool_operations(operation_id),
+                FOREIGN KEY (gmail_message_id) REFERENCES email_messages(gmail_message_id),
+                UNIQUE (parent_operation_id, child_index)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_email_sync_runs_status
                 ON email_sync_runs(status, updated_at);
             CREATE INDEX IF NOT EXISTS idx_email_messages_internal_date
@@ -379,6 +463,16 @@ class DomainSchemaMigrations:
                 ON email_spam_operations(status, next_attempt_at, lease_expires_at, created_at);
             CREATE INDEX IF NOT EXISTS idx_email_mailbox_operations_claim
                 ON email_mailbox_operations(status, next_attempt_at, lease_expires_at, created_at);
+            CREATE INDEX IF NOT EXISTS idx_email_managed_labels_enabled
+                ON email_managed_labels(enabled, policy_key);
+            CREATE INDEX IF NOT EXISTS idx_email_message_managed_labels_presence
+                ON email_message_managed_labels(label_ref, present, gmail_message_id);
+            CREATE INDEX IF NOT EXISTS idx_email_tool_operations_owner_created
+                ON email_tool_operations(owner_user_id, discord_channel_id, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_email_managed_label_operations_parent_message
+                ON email_managed_label_operations(parent_operation_id, gmail_message_id);
+            CREATE INDEX IF NOT EXISTS idx_email_managed_label_operations_claim
+                ON email_managed_label_operations(status, next_attempt_at, lease_expires_at, created_at);
             """
         )
         user_state_columns = {

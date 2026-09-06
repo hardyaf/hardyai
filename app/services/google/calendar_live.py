@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -33,6 +34,16 @@ class CalendarBinding:
 class GoogleCalendarLiveService:
     def __init__(self, permissions_path: str) -> None:
         self._permissions_path = permissions_path
+
+    def query_timezone(self) -> str | None:
+        config = self._load_permissions()
+        calendar_cfg = config.get("calendar") or {}
+        timezone_name = str(calendar_cfg.get("default_timezone") or "UTC").strip() or "UTC"
+        try:
+            ZoneInfo(timezone_name)
+        except Exception:
+            return None
+        return timezone_name
 
     def add_event(
         self,
@@ -537,6 +548,315 @@ class GoogleCalendarLiveService:
             "time_min": time_min,
             "time_max": time_max,
         }
+
+    def query_events(
+        self,
+        *,
+        start: str,
+        end: str,
+        calendar_scope: str,
+        text: str | None = None,
+        order: str = "oldest",
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        config = self._load_permissions()
+        calendar_cfg = config.get("calendar") or {}
+        oauth_cfg = config.get("oauth") or {}
+        bindings = self._calendar_bindings(calendar_cfg)
+        timezone_name = str(calendar_cfg.get("default_timezone") or "UTC").strip() or "UTC"
+        requested_scope = str(calendar_scope or "").strip()
+        normalized_order = str(order or "oldest").strip().casefold()
+        normalized_text = str(text or "").strip()
+        try:
+            ZoneInfo(timezone_name)
+        except Exception:
+            return self._query_error_result(
+                status="error",
+                message="The configured Calendar timezone is invalid.",
+                start=start,
+                end=end,
+                timezone_name="UTC",
+                requested_scope=requested_scope,
+            )
+        if not bindings:
+            return self._query_error_result(
+                status="error",
+                message="No authorized Calendar scopes are configured.",
+                start=start,
+                end=end,
+                timezone_name=timezone_name,
+                requested_scope=requested_scope,
+            )
+
+        binding, candidates, is_default = self._resolve_query_binding(
+            calendar_scope=requested_scope,
+            bindings=bindings,
+            config=config,
+            calendar_cfg=calendar_cfg,
+        )
+        if binding is None:
+            return {
+                "status": "needs_input",
+                "message": "Choose one exact authorized Calendar scope.",
+                "missing_fields": ["calendar_scope"],
+                "untrusted": True,
+                "payload": self._query_payload(
+                    events=[],
+                    start=start,
+                    end=end,
+                    timezone_name=timezone_name,
+                    requested_scope=requested_scope,
+                    display_name=requested_scope or "Calendar",
+                    resolved=False,
+                    is_default=False,
+                    candidates=candidates,
+                    source_kind="google_calendar_live",
+                    synchronized=False,
+                    coverage_complete=False,
+                    truncated=False,
+                ),
+            }
+
+        scopes = self._oauth_scopes(oauth_cfg=oauth_cfg, include_write=False)
+        token_store_raw = str(oauth_cfg.get("token_store_path") or "data/google_tokens.json")
+        token_store_path = self._resolve_path(token_store_raw, prefer_existing=False)
+        token_store = self._load_token_store(token_store_path)
+        changed = False
+        try:
+            credentials, token_store, changed = self._load_or_authorize_credentials(
+                oauth_cfg=oauth_cfg,
+                account_key=self._resolve_account_key(binding, config),
+                scopes=scopes,
+                token_store=token_store,
+                allow_interactive=False,
+            )
+            service = self._build_calendar_service(credentials)
+            request_arguments: dict[str, Any] = {
+                "calendarId": binding.calendar_id,
+                "timeMin": start,
+                "timeMax": end,
+                "singleEvents": True,
+                "orderBy": "startTime",
+                "maxResults": min(101, limit + 1),
+                "timeZone": timezone_name,
+                "showDeleted": False,
+            }
+            if normalized_text:
+                request_arguments["q"] = normalized_text
+            response = service.events().list(**request_arguments).execute()
+            if changed:
+                self._save_token_store(token_store_path, token_store)
+        except Exception:
+            if changed:
+                try:
+                    self._save_token_store(token_store_path, token_store)
+                except Exception:
+                    pass
+            return self._query_error_result(
+                status="retryable_error",
+                message="The live Calendar provider was unavailable.",
+                start=start,
+                end=end,
+                timezone_name=timezone_name,
+                requested_scope=requested_scope,
+                display_name=binding.person_name,
+                resolved=True,
+                is_default=is_default,
+            )
+
+        raw_items = response.get("items", []) if isinstance(response, dict) else []
+        projected = [
+            self._query_event_projection(event=event, binding=binding)
+            for event in raw_items
+            if isinstance(event, dict)
+            and str(event.get("status") or "confirmed").strip().casefold() != "cancelled"
+        ]
+        # Google already guarantees chronological order for singleEvents +
+        # orderBy=startTime. Preserve that provider order (including its
+        # all-day/timed-event semantics) and reverse it for the bounded
+        # newest-first projection instead of re-sorting ISO strings locally.
+        if normalized_order == "newest":
+            projected.reverse()
+        truncated = len(projected) > limit or bool(
+            isinstance(response, dict) and str(response.get("nextPageToken") or "").strip()
+        )
+        events = projected[:limit]
+        return {
+            "status": "ok",
+            "message": f"Found {len(events)} live Calendar event(s).",
+            "untrusted": True,
+            "payload": self._query_payload(
+                events=events,
+                start=start,
+                end=end,
+                timezone_name=timezone_name,
+                requested_scope=requested_scope,
+                display_name=binding.person_name,
+                resolved=True,
+                is_default=is_default,
+                candidates=[],
+                source_kind="google_calendar_live",
+                synchronized=True,
+                coverage_complete=not truncated,
+                truncated=truncated,
+            ),
+        }
+
+    @classmethod
+    def _resolve_query_binding(
+        cls,
+        *,
+        calendar_scope: str,
+        bindings: list[CalendarBinding],
+        config: dict[str, Any],
+        calendar_cfg: dict[str, Any],
+    ) -> tuple[CalendarBinding | None, list[str], bool]:
+        scope_key = cls._query_scope_key(calendar_scope)
+        if scope_key in {"default", "house", "home", "household", "my", "our"}:
+            return cls._select_host_binding(bindings=bindings, calendar_cfg=calendar_cfg), [], True
+
+        matches: dict[tuple[str, str], CalendarBinding] = {}
+        for binding in bindings:
+            if cls._query_scope_key(binding.person_name) == scope_key:
+                matches[(binding.person_name.casefold(), binding.calendar_id)] = binding
+
+        aliases_cfg = (config.get("contacts") or {}).get("aliases") or []
+        for item in aliases_cfg:
+            if not isinstance(item, dict):
+                continue
+            canonical_name = str(item.get("name") or "").strip()
+            alias_values = [canonical_name]
+            if isinstance(item.get("aliases"), list):
+                alias_values.extend(str(value).strip() for value in item["aliases"])
+            if not any(cls._query_scope_key(value) == scope_key for value in alias_values if value):
+                continue
+            for binding in bindings:
+                if cls._query_scope_key(binding.person_name) == cls._query_scope_key(canonical_name):
+                    matches[(binding.person_name.casefold(), binding.calendar_id)] = binding
+
+        if len(matches) == 1:
+            return next(iter(matches.values())), [], False
+        if matches:
+            candidates = sorted({binding.person_name for binding in matches.values()}, key=str.casefold)
+            return None, candidates[:10], False
+        candidates = sorted({binding.person_name for binding in bindings}, key=str.casefold)
+        return None, candidates[:10], False
+
+    @staticmethod
+    def _query_scope_key(value: str) -> str:
+        normalized = re.sub(
+            r"(?:['\u2019]s)\b",
+            "",
+            str(value or ""),
+            flags=re.IGNORECASE,
+        )
+        normalized = re.sub(r"\bcalendar\b", "", normalized, flags=re.IGNORECASE)
+        return re.sub(r"[^a-z0-9]+", "", normalized.casefold())
+
+    @classmethod
+    def _query_event_projection(
+        cls,
+        *,
+        event: dict[str, Any],
+        binding: CalendarBinding,
+    ) -> dict[str, Any]:
+        start = event.get("start") or {}
+        end = event.get("end") or {}
+        start_value = str(start.get("dateTime") or start.get("date") or "")[:64]
+        end_value = str(end.get("dateTime") or end.get("date") or "")[:64]
+        event_id = str(event.get("id") or "")
+        ref_material = f"{binding.calendar_id}\n{event_id}\n{start_value}\n{end_value}"
+        return {
+            "event_ref": "calendar_event_v1_"
+            + hashlib.sha256(ref_material.encode("utf-8")).hexdigest()[:32],
+            "title": cls._bounded_query_text(event.get("summary"), 200, "(untitled event)"),
+            "start": start_value,
+            "end": end_value,
+            "all_day": bool(start.get("date") and not start.get("dateTime")),
+            "location": cls._bounded_query_text(event.get("location"), 300, ""),
+            "calendar_name": cls._bounded_query_text(binding.person_name, 100, "Calendar"),
+        }
+
+    @classmethod
+    def _query_error_result(
+        cls,
+        *,
+        status: str,
+        message: str,
+        start: str,
+        end: str,
+        timezone_name: str,
+        requested_scope: str,
+        display_name: str | None = None,
+        resolved: bool = False,
+        is_default: bool = False,
+    ) -> dict[str, Any]:
+        return {
+            "status": status,
+            "message": message,
+            "untrusted": True,
+            "payload": cls._query_payload(
+                events=[],
+                start=start,
+                end=end,
+                timezone_name=timezone_name,
+                requested_scope=requested_scope,
+                display_name=display_name or requested_scope or "Calendar",
+                resolved=resolved,
+                is_default=is_default,
+                candidates=[],
+                source_kind="google_calendar_live",
+                synchronized=False,
+                coverage_complete=False,
+                truncated=False,
+            ),
+        }
+
+    @classmethod
+    def _query_payload(
+        cls,
+        *,
+        events: list[dict[str, Any]],
+        start: str,
+        end: str,
+        timezone_name: str,
+        requested_scope: str,
+        display_name: str,
+        resolved: bool,
+        is_default: bool,
+        candidates: list[str],
+        source_kind: str,
+        synchronized: bool,
+        coverage_complete: bool,
+        truncated: bool,
+    ) -> dict[str, Any]:
+        return {
+            "events": events,
+            "normalized_range": {
+                "start": start,
+                "end": end,
+                "timezone": cls._bounded_query_text(timezone_name, 64, "UTC"),
+            },
+            "calendar_scope": {
+                "requested": cls._bounded_query_text(requested_scope, 100, "default"),
+                "display_name": cls._bounded_query_text(display_name, 100, "Calendar"),
+                "resolved": resolved,
+                "is_default": is_default,
+                "candidates": [cls._bounded_query_text(item, 100, "Calendar") for item in candidates[:10]],
+            },
+            "source": {
+                "kind": source_kind,
+                "synchronized": synchronized,
+                "coverage_complete": coverage_complete,
+                "queried_at": datetime.now(timezone.utc).isoformat(),
+            },
+            "truncated": truncated,
+        }
+
+    @staticmethod
+    def _bounded_query_text(value: Any, limit: int, default: str) -> str:
+        normalized = " ".join(str(value or "").split()).strip()
+        return (normalized or default)[:limit]
 
     @staticmethod
     def _normalize_requested_person_name(value: Any) -> str | None:

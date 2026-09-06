@@ -94,3 +94,34 @@ def test_permissions_reject_duplicate_alias_and_private_category():
     private["categories"][0]["audience"] = "jordan"
     with pytest.raises(ValueError, match="audience=shared"):
         EmailAgentPermissions.from_mapping(private)
+
+
+def test_permissions_v2_separates_additive_labels_from_legacy_categories():
+    raw = permissions_mapping()
+    raw["version"] = 2
+    raw["managed_labels"] = [
+        {
+            "key": "done",
+            "display_name": "Done",
+            "gmail_label_name": "Jarvis/Done",
+            "enabled": True,
+        },
+        {
+            "key": "bills",
+            "display_name": "Bills",
+            "gmail_label_name": "Jarvis/Bills",
+            "enabled": False,
+        },
+    ]
+
+    permissions = EmailAgentPermissions.from_mapping(raw)
+
+    assert permissions.version == 2
+    assert permissions.managed_label_keys == frozenset({"done"})
+    assert permissions.additive_label_writes_ready is True
+    assert permissions.managed_gmail_labels["work_mail"] == "Jarvis/Work Mail"
+
+    missing = permissions_mapping()
+    missing["version"] = 2
+    with pytest.raises(ValueError, match="requires managed_labels"):
+        EmailAgentPermissions.from_mapping(missing)

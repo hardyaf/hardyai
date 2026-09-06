@@ -10,6 +10,7 @@ COPY requirements.txt ./requirements.txt
 RUN python -m pip install --no-cache-dir --requirement requirements.txt \
     && python -m pip check
 
+COPY deploy/docker/gai.conf /etc/gai.conf
 COPY app ./app
 COPY scripts ./scripts
 COPY .env.example ./.env.example

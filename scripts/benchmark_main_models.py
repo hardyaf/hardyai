@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -18,20 +21,102 @@ from app.core.main_backend import OllamaMainConversationBackend, OllamaMainRepai
 from app.core.main_repair_contract import normalize_repair_payload  # noqa: E402
 from app.core.main_turn_contract import normalize_main_turn_decision  # noqa: E402
 from app.core.tool_loop_types import ModelStep, SkillSelection, ToolLoopContractError  # noqa: E402
+from app.skills.tool_contracts import compile_tool_descriptors  # noqa: E402
 
 
 ALLOWED_KINDS = frozenset(
     {"conversation", "turn_decision", "repair", "skill_selection", "tool_step"}
 )
-MAIN_REPAIR_NUM_PREDICT = 1024
+# Match the development headroom profile used by the authoritative Main runtime.
+# Adaptive escalation remains available above this starting budget.
+MAIN_REPAIR_NUM_PREDICT = 2048
+MAIN_TOOL_STEP_THINK = "medium"
+_FRONTMATTER = re.compile(r"^---\s*\n(.*?)\n---\s*\n", flags=re.DOTALL)
+
+
+def _benchmark_tool_catalog() -> dict[str, dict[str, Any]]:
+    catalog: dict[str, dict[str, Any]] = {}
+    skill_root = REPO_ROOT / "app" / "prompts" / "skills"
+    for markdown_path in sorted(skill_root.glob("*.md")):
+        match = _FRONTMATTER.match(markdown_path.read_text(encoding="utf-8"))
+        if match is None:
+            continue
+        frontmatter = yaml.safe_load(match.group(1))
+        if not isinstance(frontmatter, dict) or not frontmatter.get("main_tools"):
+            continue
+        descriptors, diagnostics = compile_tool_descriptors(
+            skill_id=str(frontmatter.get("skill_id") or ""),
+            contract_version=frontmatter.get("main_tools_contract_version"),
+            declarations=frontmatter.get("main_tools"),
+        )
+        if diagnostics:
+            raise ValueError("main_acceptance_tool_contract_invalid")
+        for descriptor in descriptors:
+            if descriptor.tool_id in catalog:
+                raise ValueError("main_acceptance_tool_id_duplicate")
+            catalog[descriptor.tool_id] = descriptor.to_model_projection(
+                availability_note="Available in this authorized benchmark context."
+            )
+    return catalog
+
+
+def _hydrate_tool_ids(case: dict[str, Any]) -> dict[str, Any]:
+    context = case.get("context")
+    if not isinstance(context, dict) or "selected_tool_ids" not in context:
+        return case
+    raw_ids = context.get("selected_tool_ids")
+    if not isinstance(raw_ids, list) or not raw_ids:
+        raise ValueError("main_acceptance_selected_tool_ids_invalid")
+    tool_ids = [str(item or "").strip().casefold() for item in raw_ids]
+    if any(not item for item in tool_ids) or len(tool_ids) != len(set(tool_ids)):
+        raise ValueError("main_acceptance_selected_tool_ids_invalid")
+    catalog = _benchmark_tool_catalog()
+    if any(tool_id not in catalog for tool_id in tool_ids):
+        raise ValueError("main_acceptance_selected_tool_id_unknown")
+    hydrated_context = dict(context)
+    hydrated_context.pop("selected_tool_ids", None)
+    hydrated_context["selected_tools"] = [catalog[tool_id] for tool_id in tool_ids]
+    return {**case, "context": hydrated_context}
 
 
 def _contains_expected_arguments(observed: Any, expected: Any) -> bool:
     if isinstance(expected, dict):
-        return isinstance(observed, dict) and all(
-            key in observed and _contains_expected_arguments(observed[key], value)
-            for key, value in expected.items()
+        if not isinstance(observed, dict):
+            return False
+        local_calendar = (
+            expected.get("time_basis") == "local_calendar"
+            and observed.get("time_basis") == "local_calendar"
         )
+        for key, value in expected.items():
+            if key not in observed:
+                return False
+            if key == "calendar_scope" and isinstance(observed[key], str) and isinstance(value, str):
+                if _calendar_scope_key(observed[key]) != _calendar_scope_key(value):
+                    return False
+                continue
+            if local_calendar and key in {"start", "end"}:
+                try:
+                    observed_datetime = datetime.fromisoformat(
+                        str(observed[key]).replace("Z", "+00:00")
+                    )
+                    expected_datetime = datetime.fromisoformat(
+                        str(value).replace("Z", "+00:00")
+                    )
+                except ValueError:
+                    return False
+                if (
+                    observed_datetime.tzinfo is None
+                    or observed_datetime.utcoffset() is None
+                    or expected_datetime.tzinfo is None
+                    or expected_datetime.utcoffset() is None
+                    or observed_datetime.replace(tzinfo=None)
+                    != expected_datetime.replace(tzinfo=None)
+                ):
+                    return False
+                continue
+            if not _contains_expected_arguments(observed[key], value):
+                return False
+        return True
     if isinstance(expected, list):
         return isinstance(observed, (list, tuple)) and len(observed) == len(expected) and all(
             _contains_expected_arguments(item, expected[index])
@@ -51,6 +136,17 @@ def _contains_expected_arguments(observed: Any, expected: Any) -> bool:
         ):
             return observed_datetime.astimezone(UTC) == expected_datetime.astimezone(UTC)
     return observed == expected
+
+
+def _calendar_scope_key(value: str) -> str:
+    normalized = re.sub(
+        r"(?:['\u2019]s)\b",
+        "",
+        str(value or ""),
+        flags=re.IGNORECASE,
+    )
+    normalized = re.sub(r"\bcalendar\b", "", normalized, flags=re.IGNORECASE)
+    return re.sub(r"[^a-z0-9]+", "", normalized.casefold())
 
 
 def load_cases(path: Path, *, include_disabled: bool = False) -> list[dict[str, Any]]:
@@ -81,7 +177,7 @@ def load_cases(path: Path, *, include_disabled: bool = False) -> list[dict[str, 
         seen.add(case_id)
         if raw.get("execution_enabled") is False and not include_disabled:
             continue
-        cases.append(dict(raw))
+        cases.append(_hydrate_tool_ids(dict(raw)))
     if not cases:
         raise ValueError("main_acceptance_cases_required")
     return cases
@@ -264,9 +360,10 @@ def run_model(
         model=model,
         timeout_seconds=timeout_seconds,
         num_ctx=num_ctx,
-        num_predict=1024,
+        num_predict=MAIN_REPAIR_NUM_PREDICT,
         think="low",
         turn_decision_think=False,
+        tool_step_think=MAIN_TOOL_STEP_THINK,
     )
     repair = OllamaMainRepairBackend(
         base_url=base_url,

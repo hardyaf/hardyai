@@ -92,6 +92,7 @@ class MainTurnCommitmentCoordinator:
                 "requested_by_user_id": payload.user_id,
                 "session_summary": session.context_reference.get("session_summary"),
                 "recent_turns": session.context_reference.get("recent_turns"),
+                "main_tool_followup": session.context_reference.get("main_tool_followup"),
             },
         )
         commitment = normalize_main_turn_decision(
@@ -222,6 +223,8 @@ class MainTurnCommitmentCoordinator:
                 **payload.context,
                 "session_summary": session.context_reference.get("session_summary"),
                 "recent_turns": session.context_reference.get("recent_turns"),
+                "main_tool_followup": session.context_reference.get("main_tool_followup"),
+                "main_action_reason_code": commitment.get("reason_code"),
             },
         )
         self._record_new_path_outcome(session=session, mode=mode, outcome=outcome)

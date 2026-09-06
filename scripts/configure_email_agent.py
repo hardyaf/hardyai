@@ -20,7 +20,7 @@ if __package__:
 else:
     from configure_web_research import upsert_env_text
 
-from app.skills.domains.email_agent.config import EmailAgentPermissions
+from app.skills.domains.email_agent.config import EmailAgentPermissions  # noqa: E402
 
 
 def build_permissions(
@@ -74,7 +74,7 @@ def configure(
             "EMAIL_AGENT_SYNC_ENABLED": str(bool(enable_sync)).lower(),
             "EMAIL_AGENT_PERMISSIONS_PATH": str(permissions_target),
             "EMAIL_AGENT_LABEL_SHADOW_ENABLED": "true",
-            "EMAIL_AGENT_LABEL_WRITES_ENABLED": str(bool(enable_label_writes)).lower(),
+            "EMAIL_AGENT_LABEL_WRITES_ENABLED": "false",
             "EMAIL_AGENT_LABEL_TOKEN_PATH": str(spam_token_path or "").strip(),
             "EMAIL_AGENT_SPAM_WRITES_ENABLED": str(bool(enable_spam_writes)).lower(),
             "EMAIL_AGENT_SPAM_TOKEN_PATH": str(spam_token_path or "").strip(),
@@ -86,6 +86,7 @@ def configure(
             "EMAIL_AGENT_SPAM_MAX_WRITES_PER_DAY": "10",
             "EMAIL_AGENT_ALLOW_HISTORICAL_BACKFILL": "false",
             "EMAIL_AGENT_ALLOW_REMOTE_MODEL": "false",
+            "EMAIL_AGENT_OPERATIONS_WORKER_ENABLED": "false",
         },
     )
     _atomic_write(env_file, updated, mode=stat.S_IMODE(env_file.stat().st_mode))
@@ -240,8 +241,8 @@ def main() -> int:
             external_user_id=args.discord_external_user_id,
         )
     print(
-        "Email agent configuration written with shared categories, managed label writes "
-        f"{'enabled' if args.enable_label_writes else 'disabled'}, "
+        "Email agent configuration written with shared categories, legacy automatic label writes "
+        "disabled, "
         f"sync {'enabled' if args.enable_sync else 'disabled'}, and manual mailbox writes "
         f"{'enabled' if args.enable_spam_writes else 'disabled'}."
     )

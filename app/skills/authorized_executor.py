@@ -282,6 +282,7 @@ class AuthorizedSkillExecutor:
             "tool_id": descriptor.tool_id,
             "contract_version": descriptor.contract_version,
             "user_id": str(context.get("requested_by_user_id") or ""),
+            "external_user_id": str(context.get("external_user_id") or ""),
             "agent_id": str(context.get("agent_id") or ""),
             "source_interface": str(context.get("source_interface") or ""),
             "channel_scope": str(
@@ -395,6 +396,9 @@ class AuthorizedSkillExecutor:
                 principal_kind=str(context.get("principal_kind") or "user"),
                 principal_subject=str(
                     context.get("principal_subject") or requested_by_user_id
+                ),
+                external_user_id=str(
+                    context.get("external_user_id") or requested_by_user_id
                 ),
                 user_id=requested_by_user_id,
                 agent_id=agent_id,

@@ -128,6 +128,7 @@ class JarvisRouter:
         main_tool_execution_mode: str = "off",
         main_tool_enabled_domains: tuple[str, ...] = (),
         main_tool_enabled_operations: tuple[str, ...] = (),
+        available_runtime_dependencies: tuple[str, ...] = (),
         main_tool_max_selected_skills: int = 3,
         main_tool_max_steps: int = 8,
         main_tool_max_failures: int = 2,
@@ -159,6 +160,7 @@ class JarvisRouter:
         self._main_tool_execution_mode = str(main_tool_execution_mode or "off").strip().casefold()
         if self._main_tool_execution_mode not in {"off", "shadow", "active"}:
             raise ValueError("main_tool_execution_mode_invalid")
+        self._available_runtime_dependencies = tuple(dict.fromkeys(available_runtime_dependencies))
         self._legacy_micro_routing_enabled = bool(legacy_micro_routing_enabled)
         self._request_id_var: ContextVar[str | None] = ContextVar(
             "jarvis_request_id",

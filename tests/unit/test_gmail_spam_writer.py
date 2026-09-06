@@ -191,3 +191,231 @@ def test_spam_writer_rejects_wrong_profile_and_invalid_message_id():
         writer.verify_profile()
     with pytest.raises(ValueError, match="message ID"):
         writer.move_to_spam(message_id="../escape", operation_id="op-1")
+
+
+def test_additive_managed_labels_preserve_every_unrelated_label():
+    gmail = GmailService(
+        profile_email="jarvis.house@example.com",
+        labels=[
+            {"id": "Label_Done", "name": "Jarvis/Done"},
+            {"id": "Label_Bills", "name": "Jarvis/Bills"},
+        ],
+        label_snapshots=[
+            ["INBOX", "UNREAD", "STARRED", "Label_Bills"],
+            ["INBOX", "UNREAD", "STARRED", "Label_Bills", "Label_Done"],
+        ],
+    )
+    writer = GoogleGmailSpamWriter(
+        expected_profile_email="jarvis.house@example.com",
+        gmail_service=gmail,
+    )
+
+    result = writer.mutate_managed_labels(
+        message_id="abc123",
+        operation_id="op-additive",
+        action="apply",
+        label_names=("Jarvis/Done",),
+        managed_label_names=("Jarvis/Done", "Jarvis/Bills"),
+    )
+
+    assert result.verified is True
+    assert gmail.messages_resource.modify_calls == [
+        {
+            "userId": "me",
+            "id": "abc123",
+            "body": {"addLabelIds": ["Label_Done"], "removeLabelIds": []},
+        }
+    ]
+    assert "STARRED" in result.labels_after
+    assert "Label_Bills" in result.labels_after
+
+
+def test_additive_managed_label_noop_skips_provider_modify():
+    gmail = GmailService(
+        profile_email="jarvis.house@example.com",
+        labels=[{"id": "Label_Done", "name": "Jarvis/Done"}],
+        label_snapshots=[
+            ["INBOX", "STARRED", "Label_Done"],
+            ["INBOX", "STARRED", "Label_Done"],
+        ],
+    )
+    writer = GoogleGmailSpamWriter(
+        expected_profile_email="jarvis.house@example.com",
+        gmail_service=gmail,
+    )
+
+    result = writer.mutate_managed_labels(
+        message_id="abc123",
+        operation_id="op-noop",
+        action="apply",
+        label_names=("Jarvis/Done",),
+        managed_label_names=("Jarvis/Done",),
+    )
+
+    assert result.provider_modified is False
+    assert result.verified is True
+    assert gmail.messages_resource.modify_calls == []
+
+
+def test_remove_managed_label_preserves_system_and_other_managed_labels():
+    gmail = GmailService(
+        profile_email="jarvis.house@example.com",
+        labels=[
+            {"id": "Label_Done", "name": "Jarvis/Done"},
+            {"id": "Label_Bills", "name": "Jarvis/Bills"},
+        ],
+        label_snapshots=[
+            ["INBOX", "STARRED", "Label_Done", "Label_Bills"],
+            ["INBOX", "STARRED", "Label_Bills"],
+        ],
+    )
+    writer = GoogleGmailSpamWriter(
+        expected_profile_email="jarvis.house@example.com",
+        gmail_service=gmail,
+    )
+
+    result = writer.mutate_managed_labels(
+        message_id="abc123",
+        operation_id="op-remove",
+        action="remove",
+        label_names=("Jarvis/Done",),
+        managed_label_names=("Jarvis/Done", "Jarvis/Bills"),
+    )
+
+    assert result.verified is True
+    assert gmail.messages_resource.modify_calls == [
+        {
+            "userId": "me",
+            "id": "abc123",
+            "body": {"addLabelIds": [], "removeLabelIds": ["Label_Done"]},
+        }
+    ]
+    assert "INBOX" in result.labels_after
+    assert "STARRED" in result.labels_after
+    assert "Label_Bills" in result.labels_after
+
+
+@pytest.mark.parametrize(
+    ("action", "system_label", "before", "after", "expected_body"),
+    [
+        (
+            "remove",
+            "UNREAD",
+            ["INBOX", "UNREAD", "STARRED"],
+            ["INBOX", "STARRED"],
+            {"addLabelIds": [], "removeLabelIds": ["UNREAD"]},
+        ),
+        (
+            "apply",
+            "UNREAD",
+            ["INBOX", "STARRED"],
+            ["INBOX", "UNREAD", "STARRED"],
+            {"addLabelIds": ["UNREAD"], "removeLabelIds": []},
+        ),
+        (
+            "remove",
+            "INBOX",
+            ["INBOX", "UNREAD", "STARRED"],
+            ["UNREAD", "STARRED"],
+            {"addLabelIds": [], "removeLabelIds": ["INBOX"]},
+        ),
+        (
+            "apply",
+            "INBOX",
+            ["UNREAD", "STARRED"],
+            ["INBOX", "UNREAD", "STARRED"],
+            {"addLabelIds": ["INBOX"], "removeLabelIds": []},
+        ),
+    ],
+)
+def test_reversible_system_label_transitions_are_exact_and_verified(
+    action,
+    system_label,
+    before,
+    after,
+    expected_body,
+):
+    gmail = GmailService(
+        profile_email="jarvis.house@example.com",
+        label_snapshots=[before, after],
+    )
+    writer = GoogleGmailSpamWriter(
+        expected_profile_email="jarvis.house@example.com",
+        gmail_service=gmail,
+    )
+
+    result = writer.mutate_system_label(
+        message_id="abc123",
+        operation_id="op-system",
+        action=action,
+        system_label=system_label,
+    )
+
+    assert result.verified is True
+    assert result.provider_modified is True
+    assert gmail.messages_resource.modify_calls == [
+        {"userId": "me", "id": "abc123", "body": expected_body}
+    ]
+
+
+def test_reversible_system_label_noop_skips_modify_and_restore_refuses_spam_or_trash():
+    noop_gmail = GmailService(
+        profile_email="jarvis.house@example.com",
+        label_snapshots=[["INBOX", "STARRED"], ["INBOX", "STARRED"]],
+    )
+    noop_writer = GoogleGmailSpamWriter(
+        expected_profile_email="jarvis.house@example.com",
+        gmail_service=noop_gmail,
+    )
+
+    result = noop_writer.mutate_system_label(
+        message_id="abc123",
+        operation_id="op-noop",
+        action="apply",
+        system_label="INBOX",
+    )
+
+    assert result.verified is True
+    assert result.provider_modified is False
+    assert noop_gmail.messages_resource.modify_calls == []
+
+    for protected_label in ("SPAM", "TRASH"):
+        protected_gmail = GmailService(
+            profile_email="jarvis.house@example.com",
+            label_snapshots=[[protected_label, "STARRED"]],
+        )
+        protected_writer = GoogleGmailSpamWriter(
+            expected_profile_email="jarvis.house@example.com",
+            gmail_service=protected_gmail,
+        )
+        with pytest.raises(RuntimeError, match="restore_source_state_forbidden"):
+            protected_writer.mutate_system_label(
+                message_id="abc123",
+                operation_id="op-restore",
+                action="apply",
+                system_label="INBOX",
+            )
+        assert protected_gmail.messages_resource.modify_calls == []
+
+
+def test_reversible_system_label_readback_detects_unrelated_provider_drift():
+    gmail = GmailService(
+        profile_email="jarvis.house@example.com",
+        label_snapshots=[
+            ["INBOX", "UNREAD", "STARRED"],
+            ["INBOX", "IMPORTANT"],
+        ],
+    )
+    writer = GoogleGmailSpamWriter(
+        expected_profile_email="jarvis.house@example.com",
+        gmail_service=gmail,
+    )
+
+    result = writer.mutate_system_label(
+        message_id="abc123",
+        operation_id="op-drift",
+        action="remove",
+        system_label="UNREAD",
+    )
+
+    assert result.verified is False

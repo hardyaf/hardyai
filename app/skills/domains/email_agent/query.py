@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, Iterable, Mapping
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -11,20 +11,24 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from app.skills.tool_contracts import (
     ToolArgumentCanonicalizationError,
     ToolCallEnvelope,
+    canonical_json,
     thaw_json,
 )
+from app.skills.domains.email_agent.catalog import EmailCatalogService
 
 
 EMAIL_QUERY_VISIBILITIES = frozenset(
     {"active", "unseen", "needs_reply", "completed", "spam", "all"}
 )
 EMAIL_QUERY_ORDERS = frozenset({"oldest", "newest"})
+EMAIL_LABEL_MATCHES = frozenset({"any", "all"})
 EMAIL_TYPED_READ_TOOLS = frozenset(
     {
+        "email.list_mailboxes",
+        "email.list_labels",
         "email.query_messages",
         "email.get_message",
         "email.get_thread",
-        "email.summarize",
         "email.status",
     }
 )
@@ -78,7 +82,7 @@ def _compact_text(value: Any, *, maximum: int) -> str | None:
 
 
 def _bounded_emails(value: Any, *, field: str) -> tuple[str, ...]:
-    if value is None:
+    if value is None or value == () or value == []:
         return ()
     if not isinstance(value, (list, tuple)) or len(value) > 10:
         raise EmailQueryError(f"email_query_{field}_invalid")
@@ -98,6 +102,42 @@ def _bounded_emails(value: Any, *, field: str) -> tuple[str, ...]:
             raise EmailQueryError(f"email_query_{field}_duplicate")
         normalized.append(item)
         seen.add(item)
+    return tuple(normalized)
+
+
+def _bounded_values(
+    value: Any,
+    *,
+    field: str,
+    maximum_items: int = 10,
+    maximum_chars: int = 320,
+) -> tuple[str, ...]:
+    if value is None or value == () or value == []:
+        return ()
+    if not isinstance(value, (list, tuple)) or not 1 <= len(value) <= maximum_items:
+        raise EmailQueryError(f"email_query_{field}_invalid")
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in value:
+        item = re.sub(r"\s+", " ", str(raw or "")).strip()
+        if not item or len(item) > maximum_chars:
+            raise EmailQueryError(f"email_query_{field}_invalid")
+        folded = item.casefold()
+        if folded in seen:
+            raise EmailQueryError(f"email_query_{field}_duplicate")
+        normalized.append(item)
+        seen.add(folded)
+    return tuple(normalized)
+
+
+def _bounded_domains(value: Any) -> tuple[str, ...]:
+    domains = _bounded_values(value, field="sender_domains", maximum_chars=253)
+    normalized: list[str] = []
+    for raw in domains:
+        item = raw.casefold().lstrip("@")
+        if not item or "@" in item or "." not in item or item.startswith(".") or item.endswith("."):
+            raise EmailQueryError("email_query_sender_domains_invalid")
+        normalized.append(item)
     return tuple(normalized)
 
 
@@ -199,25 +239,33 @@ def rolling_days_interval(
 
 @dataclass(frozen=True, slots=True)
 class EmailQuery:
-    start: datetime
-    end: datetime
+    start: datetime | None
+    end: datetime | None
     timezone_name: str
-    senders: tuple[str, ...] = ()
-    recipients: tuple[str, ...] = ()
-    source: str | None = None
-    category: str | None = None
-    visibility: str = "active"
+    mailbox_refs: tuple[str, ...] = ()
+    sender_addresses: tuple[str, ...] = ()
+    sender_domains: tuple[str, ...] = ()
+    sender_text: str | None = None
+    recipient_addresses: tuple[str, ...] = ()
+    label_refs: tuple[str, ...] = ()
+    label_match: str = "any"
+    classification: str | None = None
+    visibility: str = "all"
     text: str | None = None
     has_attachment: bool | None = None
     order: str = "newest"
-    limit: int = 10
+    limit: int = 20
+    cursor_internal_date: int | None = None
+    cursor_message_id: str | None = None
 
     def __post_init__(self) -> None:
-        normalized_start = _aware_instant(self.start, field="start")
-        normalized_end = _aware_instant(self.end, field="end")
+        if (self.start is None) != (self.end is None):
+            raise EmailQueryError("email_query_interval_pair_required")
+        normalized_start = _aware_instant(self.start, field="start") if self.start is not None else None
+        normalized_end = _aware_instant(self.end, field="end") if self.end is not None else None
         timezone_name = str(self.timezone_name or "").strip()
         _zone(timezone_name)
-        if normalized_start >= normalized_end:
+        if normalized_start is not None and normalized_end is not None and normalized_start >= normalized_end:
             raise EmailQueryError("email_query_interval_reversed")
         visibility = str(self.visibility or "").strip().casefold()
         if visibility not in EMAIL_QUERY_VISIBILITIES:
@@ -225,20 +273,48 @@ class EmailQuery:
         order = str(self.order or "").strip().casefold()
         if order not in EMAIL_QUERY_ORDERS:
             raise EmailQueryError("email_query_order_invalid")
-        if not isinstance(self.limit, int) or isinstance(self.limit, bool) or not 1 <= self.limit <= 100:
+        label_match = str(self.label_match or "").strip().casefold()
+        if label_match not in EMAIL_LABEL_MATCHES:
+            raise EmailQueryError("email_query_label_match_invalid")
+        if not isinstance(self.limit, int) or isinstance(self.limit, bool) or not 1 <= self.limit <= 50:
             raise EmailQueryError("email_query_limit_invalid")
         if self.has_attachment is not None and not isinstance(self.has_attachment, bool):
             raise EmailQueryError("email_query_attachment_filter_invalid")
         object.__setattr__(self, "start", normalized_start)
         object.__setattr__(self, "end", normalized_end)
         object.__setattr__(self, "timezone_name", timezone_name)
-        object.__setattr__(self, "senders", _bounded_emails(self.senders, field="senders"))
-        object.__setattr__(self, "recipients", _bounded_emails(self.recipients, field="recipients"))
-        object.__setattr__(self, "source", str(self.source or "").strip().casefold() or None)
-        object.__setattr__(self, "category", str(self.category or "").strip().casefold() or None)
+        object.__setattr__(self, "mailbox_refs", _bounded_values(self.mailbox_refs, field="mailbox_refs"))
+        object.__setattr__(
+            self,
+            "sender_addresses",
+            _bounded_emails(self.sender_addresses, field="sender_addresses"),
+        )
+        object.__setattr__(self, "sender_domains", _bounded_domains(self.sender_domains))
+        object.__setattr__(self, "sender_text", _compact_text(self.sender_text, maximum=200))
+        object.__setattr__(
+            self,
+            "recipient_addresses",
+            _bounded_emails(self.recipient_addresses, field="recipient_addresses"),
+        )
+        object.__setattr__(self, "label_refs", _bounded_values(self.label_refs, field="label_refs"))
+        object.__setattr__(self, "label_match", label_match)
+        object.__setattr__(
+            self,
+            "classification",
+            str(self.classification or "").strip().casefold() or None,
+        )
         object.__setattr__(self, "visibility", visibility)
         object.__setattr__(self, "text", _compact_text(self.text, maximum=200))
         object.__setattr__(self, "order", order)
+        if (self.cursor_internal_date is None) != (self.cursor_message_id is None):
+            raise EmailQueryError("email_query_cursor_boundary_invalid")
+        if self.cursor_internal_date is not None and int(self.cursor_internal_date) < 0:
+            raise EmailQueryError("email_query_cursor_boundary_invalid")
+        object.__setattr__(
+            self,
+            "cursor_message_id",
+            str(self.cursor_message_id or "").strip() or None,
+        )
 
     @classmethod
     def from_arguments(
@@ -246,55 +322,77 @@ class EmailQuery:
         arguments: Mapping[str, Any],
         *,
         timezone_name: str,
-        allowed_sources: Iterable[str],
+        allowed_mailbox_selectors: Iterable[str],
         allowed_categories: Iterable[str],
     ) -> EmailQuery:
         if not isinstance(arguments, Mapping):
             raise EmailQueryError("email_query_arguments_invalid")
+        if not tuple(str(item or "").strip() for item in allowed_mailbox_selectors if str(item or "").strip()):
+            raise EmailQueryError("email_query_mailbox_catalog_empty")
         allowed_fields = {
             "start",
             "end",
-            "senders",
-            "recipients",
-            "source",
-            "category",
+            "mailbox_refs",
+            "sender_addresses",
+            "sender_domains",
+            "sender_text",
+            "recipient_addresses",
+            "label_refs",
+            "label_match",
+            "classification",
             "visibility",
             "text",
             "has_attachment",
             "order",
             "limit",
         }
-        if set(arguments) - allowed_fields or not {"start", "end"}.issubset(arguments):
+        if set(arguments) - allowed_fields or (("start" in arguments) != ("end" in arguments)):
             raise EmailQueryError("email_query_arguments_shape_invalid")
         return cls(
-            start=_aware_instant(arguments.get("start"), field="start"),
-            end=_aware_instant(arguments.get("end"), field="end"),
+            start=(
+                _aware_instant(arguments.get("start"), field="start")
+                if "start" in arguments
+                else None
+            ),
+            end=(
+                _aware_instant(arguments.get("end"), field="end")
+                if "end" in arguments
+                else None
+            ),
             timezone_name=timezone_name,
-            senders=_bounded_emails(arguments.get("senders"), field="senders"),
-            recipients=_bounded_emails(arguments.get("recipients"), field="recipients"),
-            source=_allowlisted_value(
-                arguments.get("source"),
-                allowed=allowed_sources,
-                field="source",
+            mailbox_refs=_bounded_values(arguments.get("mailbox_refs"), field="mailbox_refs"),
+            sender_addresses=_bounded_emails(
+                arguments.get("sender_addresses"), field="sender_addresses"
             ),
-            category=_allowlisted_value(
-                arguments.get("category"),
+            sender_domains=_bounded_domains(arguments.get("sender_domains")),
+            sender_text=_compact_text(arguments.get("sender_text"), maximum=200),
+            recipient_addresses=_bounded_emails(
+                arguments.get("recipient_addresses"), field="recipient_addresses"
+            ),
+            label_refs=_bounded_values(arguments.get("label_refs"), field="label_refs"),
+            label_match=str(arguments.get("label_match") or "any"),
+            classification=_allowlisted_value(
+                arguments.get("classification"),
                 allowed=allowed_categories,
-                field="category",
+                field="classification",
             ),
-            visibility=str(arguments.get("visibility") or "active"),
+            visibility=str(arguments.get("visibility") or "all"),
             text=_compact_text(arguments.get("text"), maximum=200),
             has_attachment=arguments.get("has_attachment"),
             order=str(arguments.get("order") or "newest"),
-            limit=arguments.get("limit", 10),
+            limit=arguments.get("limit", 20),
         )
 
     @property
     def start_internal_date(self) -> int:
+        if self.start is None:
+            raise EmailQueryError("email_query_start_unavailable")
         return int(self.start.timestamp() * 1000)
 
     @property
     def end_internal_date(self) -> int:
+        if self.end is None:
+            raise EmailQueryError("email_query_end_unavailable")
         return int(self.end.timestamp() * 1000)
 
     @property
@@ -305,20 +403,28 @@ class EmailQuery:
 
     def to_arguments(self) -> dict[str, Any]:
         result: dict[str, Any] = {
-            "start": _iso_utc(self.start),
-            "end": _iso_utc(self.end),
             "visibility": self.visibility,
             "order": self.order,
             "limit": self.limit,
         }
-        if self.senders:
-            result["senders"] = list(self.senders)
-        if self.recipients:
-            result["recipients"] = list(self.recipients)
-        if self.source is not None:
-            result["source"] = self.source
-        if self.category is not None:
-            result["category"] = self.category
+        if self.start is not None and self.end is not None:
+            result["start"] = _iso_utc(self.start)
+            result["end"] = _iso_utc(self.end)
+        if self.mailbox_refs:
+            result["mailbox_refs"] = list(self.mailbox_refs)
+        if self.sender_addresses:
+            result["sender_addresses"] = list(self.sender_addresses)
+        if self.sender_domains:
+            result["sender_domains"] = list(self.sender_domains)
+        if self.sender_text is not None:
+            result["sender_text"] = self.sender_text
+        if self.recipient_addresses:
+            result["recipient_addresses"] = list(self.recipient_addresses)
+        if self.label_refs:
+            result["label_refs"] = list(self.label_refs)
+            result["label_match"] = self.label_match
+        if self.classification is not None:
+            result["classification"] = self.classification
         if self.text is not None:
             result["text"] = self.text
         if self.has_attachment is not None:
@@ -353,6 +459,7 @@ class EmailReadToolExecutor:
         self._reference_retention_hours = max(1, min(int(reference_retention_hours), 720))
         self._stale_seconds = max(30, min(int(stale_seconds), 1800))
         self._utc_clock = utc_clock or (lambda: datetime.now(UTC))
+        self._catalog = EmailCatalogService(permissions=permissions, storage=storage)
 
     def canonicalize(
         self,
@@ -368,28 +475,36 @@ class EmailReadToolExecutor:
             raise ToolArgumentCanonicalizationError("email_tool_unauthorized")
         arguments = dict(validated_arguments)
         try:
+            if normalized_tool_id == "email.list_mailboxes":
+                if arguments:
+                    raise EmailQueryError("email_query_mailbox_catalog_arguments_invalid")
+                return {}
+            if normalized_tool_id == "email.list_labels":
+                if set(arguments) - {"text"}:
+                    raise EmailQueryError("email_query_label_catalog_arguments_invalid")
+                text = _compact_text(arguments.get("text"), maximum=100)
+                return {"text": text} if text else {}
             if normalized_tool_id == "email.query_messages":
+                if "cursor" in arguments:
+                    if set(arguments) != {"cursor"}:
+                        raise EmailQueryError("email_query_cursor_filters_changed")
+                    return {
+                        "cursor": self._canonical_cursor(
+                            arguments.get("cursor"),
+                            request_context=request_context,
+                        )
+                    }
                 return self._query_from_arguments(arguments).to_arguments()
             if normalized_tool_id in {"email.get_message", "email.get_thread"}:
+                if normalized_tool_id == "email.get_thread" and "cursor" in arguments:
+                    if set(arguments) != {"cursor"}:
+                        raise EmailQueryError("email_query_cursor_filters_changed")
+                    return {"cursor": self._cursor(arguments.get("cursor"))}
                 result: dict[str, Any] = {
                     "message_ref": self._reference(arguments.get("message_ref"))
                 }
                 if normalized_tool_id == "email.get_thread":
                     result["limit"] = self._limit(arguments.get("limit", 50), maximum=50)
-                return result
-            if normalized_tool_id == "email.summarize":
-                references = arguments.get("message_refs")
-                if not isinstance(references, (list, tuple)) or not 1 <= len(references) <= 50:
-                    raise EmailQueryError("email_query_message_refs_invalid")
-                normalized_references = tuple(self._reference(item) for item in references)
-                if len(normalized_references) != len(set(normalized_references)):
-                    raise EmailQueryError("email_query_message_refs_duplicate")
-                result = {"message_refs": list(normalized_references)}
-                focus = re.sub(r"\s+", " ", str(arguments.get("focus") or "")).strip()
-                if focus:
-                    if len(focus) > 200:
-                        raise EmailQueryError("email_query_focus_too_long")
-                    result["focus"] = focus
                 return result
             if arguments:
                 raise EmailQueryError("email_query_status_arguments_invalid")
@@ -406,14 +521,16 @@ class EmailReadToolExecutor:
             return self._denied("email_tool_scope_changed")
         arguments = thaw_json(envelope.arguments)
         try:
+            if envelope.tool_id == "email.list_mailboxes":
+                return self._list_mailboxes()
+            if envelope.tool_id == "email.list_labels":
+                return self._list_labels(arguments=arguments)
             if envelope.tool_id == "email.query_messages":
                 return self._query_messages(arguments=arguments, envelope=envelope)
             if envelope.tool_id == "email.get_message":
                 return self._get_message(arguments=arguments, envelope=envelope)
             if envelope.tool_id == "email.get_thread":
                 return self._get_thread(arguments=arguments, envelope=envelope)
-            if envelope.tool_id == "email.summarize":
-                return self._summarize(arguments=arguments, envelope=envelope)
             return self._status()
         except (EmailQueryError, TypeError, ValueError):
             return {
@@ -425,7 +542,7 @@ class EmailReadToolExecutor:
         return EmailQuery.from_arguments(
             arguments,
             timezone_name=self._timezone_name,
-            allowed_sources=(item.route_key for item in self._permissions.source_routes),
+            allowed_mailbox_selectors=(item.route_key for item in self._permissions.source_routes),
             allowed_categories=self._permissions.category_keys,
         )
 
@@ -435,8 +552,38 @@ class EmailReadToolExecutor:
         arguments: dict[str, Any],
         envelope: ToolCallEnvelope,
     ) -> dict[str, Any]:
-        query = self._query_from_arguments(arguments)
         now = self._now()
+        query = (
+            self._query_from_cursor(
+                cursor=self._cursor(arguments.get("cursor")),
+                envelope=envelope,
+                now=now,
+            )
+            if "cursor" in arguments
+            else self._query_from_arguments(arguments)
+        )
+        mailbox_resolution = self._catalog.resolve_mailboxes(query.mailbox_refs)
+        if mailbox_resolution.status != "ok":
+            return self._selector_needs_input(
+                selector="mailbox_refs",
+                candidates=mailbox_resolution.candidates,
+            )
+        label_resolution = self._catalog.resolve_labels(query.label_refs)
+        if label_resolution.status != "ok":
+            return self._selector_needs_input(
+                selector="label_refs",
+                candidates=label_resolution.candidates,
+            )
+        query = replace(
+            query,
+            mailbox_refs=mailbox_resolution.canonical_refs,
+            label_refs=label_resolution.canonical_refs,
+        )
+        selected_source_keys = (
+            self._catalog.route_keys_for_refs(query.mailbox_refs)
+            if query.mailbox_refs
+            else tuple(item.route_key for item in self._permissions.source_routes)
+        )
         rows = self._storage.query_messages(
             query=query,
             taxonomy_version=self._permissions.taxonomy_version,
@@ -444,39 +591,91 @@ class EmailReadToolExecutor:
             discord_channel_id=envelope.channel_scope,
             allowed_source_keys=tuple(item.route_key for item in self._permissions.source_routes),
             allowed_category_keys=tuple(sorted(self._permissions.category_keys)),
+            selected_source_keys=selected_source_keys,
+            selected_label_refs=query.label_refs,
             now=_iso_utc(now),
         )
         candidates = rows[: query.limit]
         projected = self._bounded_messages(candidates)
-        truncated = len(rows) > query.limit or len(projected) < len(candidates)
+        has_more = len(rows) > query.limit
+        output_bounded = len(projected) < len(candidates)
+        next_cursor: str | None = None
+        if has_more and candidates:
+            next_cursor = self._create_cursor(
+                kind="query",
+                state={
+                    "arguments": query.to_arguments(),
+                    "last_internal_date": int(candidates[-1].get("internal_date") or 0),
+                    "last_message_id": str(candidates[-1].get("gmail_message_id") or ""),
+                },
+                user_id=envelope.user_id,
+                channel_id=envelope.channel_scope,
+                now=now,
+            )
+        result_set_ref: str | None = None
         if projected:
             projected_rows = candidates[: len(projected)]
             reference_set = self._create_reference_set(
                 rows=projected_rows,
                 user_id=envelope.user_id,
                 channel_id=envelope.channel_scope,
-                query_text=(
-                    f"typed:{_iso_utc(query.start)}:{_iso_utc(query.end)}:{query.visibility}"
-                ),
+                query_text="typed:v2:" + canonical_json(query.to_arguments()),
                 now=now,
             )
             projected = self._bounded_messages(projected_rows, reference_set=reference_set)
+            result_set_ref = "result_v1_" + self._opaque(
+                str(reference_set.get("reference_set_id") or "")
+            )
         source, freshness_at = self._projection_metadata(now=now)
+        coverage = self._coverage(query=query, selected_source_keys=selected_source_keys)
+        payload: dict[str, Any] = {
+            "messages": projected,
+            "normalized_query": query.normalized(returned_count=len(projected)),
+            "coverage": coverage,
+            "source": source,
+            "freshness_at": freshness_at,
+            "truncated": has_more or output_bounded,
+        }
+        if result_set_ref:
+            payload["result_set_ref"] = result_set_ref
+        if next_cursor:
+            payload["next_cursor"] = next_cursor
         return {
             "status": "ok",
             "message": (
+                "No projected email matched, and the requested interval is outside indexed coverage."
+                if not projected and coverage.get("requested_interval_covered") is False
+                else
                 f"Found {len(projected)} projected email message(s)."
                 if projected
                 else "No projected email matched the typed query."
             ),
+            "payload": payload,
+            "untrusted": True,
+        }
+
+    def _list_mailboxes(self) -> dict[str, Any]:
+        now = self._now()
+        source, freshness_at = self._projection_metadata(now=now)
+        return {
+            "status": "ok",
+            "message": "Returned the authorized routed mailbox catalog.",
             "payload": {
-                "messages": projected,
-                "normalized_query": query.normalized(returned_count=len(projected)),
+                "mailboxes": self._catalog.mailboxes(),
                 "source": source,
                 "freshness_at": freshness_at,
-                "truncated": truncated,
+                "truncated": False,
             },
-            "untrusted": True,
+        }
+
+    def _list_labels(self, *, arguments: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "status": "ok",
+            "message": "Returned the enabled Jarvis-managed label catalog.",
+            "payload": {
+                "labels": self._catalog.labels(text=_compact_text(arguments.get("text"), maximum=100)),
+                "truncated": False,
+            },
         }
 
     def _get_message(
@@ -491,7 +690,7 @@ class EmailReadToolExecutor:
             channel_id=envelope.channel_scope,
         )
         if resolved is None:
-            return {"status": "error", "message": "That current Email reference is unavailable."}
+            return self._reference_needs_input()
         row = self._storage.get_message(
             gmail_message_id=str(resolved["gmail_message_id"]),
             taxonomy_version=self._permissions.taxonomy_version,
@@ -511,7 +710,10 @@ class EmailReadToolExecutor:
             "status": "ok",
             "message": "Retrieved one projected email message.",
             "payload": {
-                "message": self._message(row, index=1, reference_set=reference_set),
+                "message": self._bounded_messages(
+                    [row],
+                    reference_set=reference_set,
+                )[0],
                 "source": source,
                 "freshness_at": freshness_at,
             },
@@ -524,23 +726,53 @@ class EmailReadToolExecutor:
         arguments: dict[str, Any],
         envelope: ToolCallEnvelope,
     ) -> dict[str, Any]:
-        resolved = self._resolve_reference(
-            reference=self._reference(arguments.get("message_ref")),
-            user_id=envelope.user_id,
-            channel_id=envelope.channel_scope,
-        )
-        if resolved is None:
-            return {"status": "error", "message": "That current Email reference is unavailable."}
-        limit = self._limit(arguments.get("limit", 50), maximum=50)
+        now = self._now()
+        after_internal_date: int | None = None
+        after_message_id: str | None = None
+        if "cursor" in arguments:
+            state = self._cursor_state(
+                cursor=self._cursor(arguments.get("cursor")),
+                kind="thread",
+                envelope=envelope,
+                now=now,
+            )
+            resolved = {"gmail_thread_id": str(state.get("gmail_thread_id") or "")}
+            limit = self._limit(state.get("limit", 50), maximum=50)
+            after_internal_date = int(state.get("last_internal_date") or 0)
+            after_message_id = str(state.get("last_message_id") or "")
+        else:
+            resolved = self._resolve_reference(
+                reference=self._reference(arguments.get("message_ref")),
+                user_id=envelope.user_id,
+                channel_id=envelope.channel_scope,
+            )
+            if resolved is None:
+                return self._reference_needs_input()
+            limit = self._limit(arguments.get("limit", 50), maximum=50)
         rows = self._storage.get_thread(
             gmail_thread_id=str(resolved.get("gmail_thread_id") or ""),
             taxonomy_version=self._permissions.taxonomy_version,
             limit=min(limit + 1, 51),
+            after_internal_date=after_internal_date,
+            after_message_id=after_message_id,
         )
         candidates = rows[:limit]
         projected = self._bounded_messages(candidates)
         truncated = len(rows) > limit or len(projected) < len(candidates)
-        now = self._now()
+        next_cursor: str | None = None
+        if len(rows) > limit and candidates:
+            next_cursor = self._create_cursor(
+                kind="thread",
+                state={
+                    "gmail_thread_id": str(resolved.get("gmail_thread_id") or ""),
+                    "limit": limit,
+                    "last_internal_date": int(candidates[-1].get("internal_date") or 0),
+                    "last_message_id": str(candidates[-1].get("gmail_message_id") or ""),
+                },
+                user_id=envelope.user_id,
+                channel_id=envelope.channel_scope,
+                now=now,
+            )
         if projected:
             candidates = candidates[: len(projected)]
             reference_set = self._create_reference_set(
@@ -552,16 +784,19 @@ class EmailReadToolExecutor:
             )
             projected = self._bounded_messages(candidates, reference_set=reference_set)
         source, freshness_at = self._projection_metadata(now=now)
+        payload: dict[str, Any] = {
+            "messages": projected,
+            "thread_ref": "thread_" + self._opaque(str(resolved.get("gmail_thread_id") or "")),
+            "source": source,
+            "freshness_at": freshness_at,
+            "truncated": truncated,
+        }
+        if next_cursor:
+            payload["next_cursor"] = next_cursor
         return {
             "status": "ok",
             "message": f"Retrieved {len(projected)} projected thread message(s).",
-            "payload": {
-                "messages": projected,
-                "thread_ref": "thread_" + self._opaque(str(resolved.get("gmail_thread_id") or "")),
-                "source": source,
-                "freshness_at": freshness_at,
-                "truncated": truncated,
-            },
+            "payload": payload,
             "untrusted": True,
         }
 
@@ -644,6 +879,13 @@ class EmailReadToolExecutor:
             if not status.get("activation_at")
             else ("stale" if source["stale"] else "fresh")
         )
+        worker: dict[str, Any] = {
+            "status": status.get("operations_worker_status") or "not_started",
+        }
+        if status.get("operations_worker_last_seen_at"):
+            worker["last_seen_at"] = status["operations_worker_last_seen_at"]
+        if status.get("operations_worker_last_error_code"):
+            worker["last_error_code"] = status["operations_worker_last_error_code"]
         return {
             "status": "ok",
             "message": "Returned content-free Email projection status.",
@@ -655,11 +897,80 @@ class EmailReadToolExecutor:
                     "dead_letter_messages": max(
                         0, int(status.get("dead_letter_message_count") or 0)
                     ),
+                    "managed_label_queued": max(
+                        0, int(status.get("managed_label_queued_count") or 0)
+                    ),
+                    "managed_label_dead_letter": max(
+                        0, int(status.get("managed_label_dead_letter_count") or 0)
+                    ),
+                    "managed_label_verified": max(
+                        0, int(status.get("managed_label_verified_count") or 0)
+                    ),
                 },
                 "source": source,
                 "freshness_at": freshness_at,
                 "sync_state": sync_state,
+                "operations_worker": worker,
+                "coverage": self._coverage(
+                    query=EmailQuery(start=None, end=None, timezone_name=self._timezone_name),
+                    selected_source_keys=tuple(
+                        item.route_key for item in self._permissions.source_routes
+                    ),
+                ),
             },
+        }
+
+    def _coverage(
+        self,
+        *,
+        query: EmailQuery,
+        selected_source_keys: tuple[str, ...],
+    ) -> dict[str, Any]:
+        coverage = self._storage.projection_coverage(allowed_source_keys=selected_source_keys)
+        earliest = self._parse_iso(coverage.get("earliest_indexed_at"))
+        latest = self._parse_iso(coverage.get("latest_indexed_at"))
+        interval_covered: bool | None = None
+        if query.start is not None and query.end is not None:
+            interval_covered = (
+                earliest is not None
+                and latest is not None
+                and query.start >= earliest
+                and query.end <= latest + timedelta(milliseconds=1)
+            )
+        result: dict[str, Any] = {
+            "message_count": max(0, int(coverage.get("message_count") or 0)),
+        }
+        if coverage.get("earliest_indexed_at"):
+            result["earliest_indexed_at"] = coverage["earliest_indexed_at"]
+        if coverage.get("latest_indexed_at"):
+            result["latest_indexed_at"] = coverage["latest_indexed_at"]
+        if interval_covered is not None:
+            result["requested_interval_covered"] = interval_covered
+        return result
+
+    @staticmethod
+    def _selector_needs_input(
+        *,
+        selector: str,
+        candidates: tuple[dict[str, str], ...],
+    ) -> dict[str, Any]:
+        return {
+            "status": "needs_input",
+            "message": "That Email selector was missing or ambiguous; use one of the current candidates.",
+            "missing_fields": [selector],
+            "payload": {
+                "selector": selector,
+                "candidates": list(candidates),
+            },
+        }
+
+    @staticmethod
+    def _reference_needs_input() -> dict[str, Any]:
+        return {
+            "status": "needs_input",
+            "message": "That Email reference expired or is unavailable; query the messages again.",
+            "missing_fields": ["message_ref"],
+            "payload": {"reference_state": "stale"},
         }
 
     def _envelope_grant(self, envelope: ToolCallEnvelope) -> Any | None:
@@ -691,6 +1002,111 @@ class EmailReadToolExecutor:
         if not re.fullmatch(r"E(?:[1-9]|[1-4][0-9]|50)", normalized):
             raise EmailQueryError("email_query_message_ref_invalid")
         return normalized
+
+    @staticmethod
+    def _cursor(value: Any) -> str:
+        normalized = str(value or "").strip().casefold()
+        if not re.fullmatch(
+            r"cursor_v1_[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+            normalized,
+        ):
+            raise EmailQueryError("email_query_cursor_invalid")
+        return normalized
+
+    def _canonical_cursor(
+        self,
+        value: Any,
+        *,
+        request_context: Mapping[str, Any],
+    ) -> str:
+        normalized = str(value or "").strip().casefold()
+        if normalized != "next":
+            return self._cursor(normalized)
+        row = self._storage.latest_cursor_reference_set(
+            kind="query",
+            user_id=str(request_context.get("requested_by_user_id") or ""),
+            discord_channel_id=str(request_context.get("discord_channel_id") or ""),
+            now=_iso_utc(self._now()),
+        )
+        reference_set_id = str((row or {}).get("reference_set_id") or "").strip()
+        if not reference_set_id:
+            raise EmailQueryError("email_query_cursor_unavailable")
+        return self._cursor("cursor_v1_" + reference_set_id)
+
+    def _query_from_cursor(
+        self,
+        *,
+        cursor: str,
+        envelope: ToolCallEnvelope,
+        now: datetime,
+    ) -> EmailQuery:
+        state = self._cursor_state(
+            cursor=cursor,
+            kind="query",
+            envelope=envelope,
+            now=now,
+        )
+        arguments = state.get("arguments")
+        if not isinstance(arguments, Mapping):
+            raise EmailQueryError("email_query_cursor_invalid")
+        query = self._query_from_arguments(arguments)
+        return replace(
+            query,
+            cursor_internal_date=int(state.get("last_internal_date") or -1),
+            cursor_message_id=str(state.get("last_message_id") or ""),
+        )
+
+    def _cursor_state(
+        self,
+        *,
+        cursor: str,
+        kind: str,
+        envelope: ToolCallEnvelope,
+        now: datetime,
+    ) -> dict[str, Any]:
+        reference_set_id = cursor.removeprefix("cursor_v1_")
+        row = self._storage.get_reference_set(
+            reference_set_id=reference_set_id,
+            user_id=str(envelope.user_id or "").strip().casefold(),
+            discord_channel_id=str(envelope.channel_scope or "").strip(),
+            now=_iso_utc(now),
+        )
+        prefix = f"cursor:{kind}:v1:"
+        query_text = str((row or {}).get("query_text") or "")
+        if row is None or not query_text.startswith(prefix):
+            raise EmailQueryError("email_query_cursor_unavailable")
+        try:
+            state = json.loads(query_text.removeprefix(prefix))
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise EmailQueryError("email_query_cursor_invalid") from exc
+        if not isinstance(state, dict):
+            raise EmailQueryError("email_query_cursor_invalid")
+        return state
+
+    def _create_cursor(
+        self,
+        *,
+        kind: str,
+        state: dict[str, Any],
+        user_id: str,
+        channel_id: str,
+        now: datetime,
+    ) -> str | None:
+        encoded = canonical_json(state)
+        if len(encoded) > 3_900:
+            return None
+        reference_set = self._storage.create_reference_set(
+            user_id=str(user_id or "").strip().casefold(),
+            discord_channel_id=str(channel_id or "").strip(),
+            query_text=f"cursor:{kind}:v1:{encoded}",
+            message_ids=[],
+            thread_ids=[],
+            focused_message_id=None,
+            focused_thread_id=None,
+            created_at=_iso_utc(now),
+            expires_at=_iso_utc(now + timedelta(hours=self._reference_retention_hours)),
+        )
+        return "cursor_v1_" + str(reference_set.get("reference_set_id") or "")
 
     @staticmethod
     def _limit(value: Any, *, maximum: int) -> int:
@@ -740,8 +1156,16 @@ class EmailReadToolExecutor:
         reference_set: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
+        managed_labels = self._storage.managed_labels_for_messages(
+            gmail_message_ids=[str(row.get("gmail_message_id") or "") for row in rows[:100]]
+        )
         for index, row in enumerate(rows[:100], start=1):
-            projected = self._message(row, index=index, reference_set=reference_set)
+            projected = self._message(
+                row,
+                index=index,
+                reference_set=reference_set,
+                managed_labels=managed_labels.get(str(row.get("gmail_message_id") or ""), []),
+            )
             candidate = [*result, projected]
             if len(json.dumps(candidate, ensure_ascii=True, sort_keys=True)) > 6_200:
                 break
@@ -754,6 +1178,7 @@ class EmailReadToolExecutor:
         *,
         index: int,
         reference_set: dict[str, Any] | None,
+        managed_labels: list[dict[str, str]] | None = None,
     ) -> dict[str, Any]:
         attachments = row.get("attachment_metadata")
         attachment_names = [
@@ -769,6 +1194,11 @@ class EmailReadToolExecutor:
             )
         except (TypeError, ValueError, OSError):
             pass
+        route_key = str(row.get("source_route_key") or "")
+        route = next(
+            (item for item in self._permissions.source_routes if item.route_key == route_key),
+            None,
+        )
         return {
             "message_ref": f"E{index}",
             "thread_ref": "thread_" + self._opaque(str(row.get("gmail_thread_id") or "")),
@@ -778,8 +1208,12 @@ class EmailReadToolExecutor:
             "subject": re.sub(r"\s+", " ", str(row.get("subject") or "(no subject)"))[:300],
             "snippet": re.sub(r"\s+", " ", str(row.get("snippet") or ""))[:500],
             "summary": re.sub(r"\s+", " ", str(row.get("summary_text") or ""))[:700],
-            "source": str(row.get("source_route_key") or "unknown")[:64],
-            "category": str(row.get("logical_category_key") or "needs_review")[:64],
+            "mailbox": {
+                "mailbox_ref": self._catalog.mailbox_ref(route_key),
+                "display_name": str(getattr(route, "display_name", "") or "Unknown")[:100],
+            },
+            "classification": str(row.get("logical_category_key") or "needs_review")[:64],
+            "managed_labels": list(managed_labels or [])[:10],
             "has_attachment": bool(attachment_names),
             "attachment_names": attachment_names,
             "reference_set_ref": (

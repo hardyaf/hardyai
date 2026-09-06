@@ -39,6 +39,7 @@ from app.skills.domains.private_notes.service import (
 from app.skills.domains.private_notes.storage import PrivateNotesSQLiteStorage
 from app.skills.domains.calendar_inbox.service import CalendarInboxConfig, CalendarInboxService
 from app.skills.domains.calendar_inbox.storage import CalendarInboxSQLiteStorage
+from app.skills.domains.calendar.handler import CalendarToolHandler
 from app.skills.domains.email_agent.classification import (
     EmailClassifier,
     OllamaEmailModelClassifier,
@@ -244,6 +245,7 @@ if conversation_model_name:
         num_predict=settings.main_conversation_model_num_predict,
         think=settings.main_conversation_model_think,
         turn_decision_think=settings.main_turn_decision_model_think,
+        tool_step_think=settings.main_tool_step_model_think,
         metrics_callback=_record_ollama_call,
         adaptive_policy=adaptive_token_budget_policy,
     )
@@ -375,6 +377,7 @@ google_calendar_live = (
     else None
 )
 calendar_service = CalendarService(google_live=google_calendar_live)
+calendar_tool_handler = CalendarToolHandler()
 calendar_inbox_storage = None
 calendar_inbox_service = None
 if settings.calendar_inbox_enabled:
@@ -584,6 +587,7 @@ router = JarvisRouter(
     email_agent_service=email_agent_service,
     typed_domain_handlers={
         ListsToolHandler.SKILL_ID: lists_tool_handler,
+        CalendarToolHandler.SKILL_ID: calendar_tool_handler,
         **(
             {EmailAgentService.SKILL_ID: email_agent_service}
             if email_agent_service is not None
@@ -596,6 +600,11 @@ router = JarvisRouter(
     main_tool_execution_mode=settings.main_tool_execution_mode,
     main_tool_enabled_domains=settings.main_tool_enabled_domains,
     main_tool_enabled_operations=settings.main_tool_enabled_operations,
+    available_runtime_dependencies=(
+        ("email_operations",)
+        if email_agent_service is not None and settings.email_agent_label_writes_enabled
+        else ()
+    ),
     main_tool_max_selected_skills=settings.main_tool_max_selected_skills,
     main_tool_max_steps=settings.main_tool_max_steps,
     main_tool_max_failures=settings.main_tool_max_failures,
@@ -605,6 +614,7 @@ router = JarvisRouter(
     main_tool_timeout_seconds=settings.main_tool_timeout_seconds,
     legacy_micro_routing_enabled=settings.legacy_micro_routing_enabled,
     email_timezone=settings.email_agent_timezone,
+    calendar_timezone_resolver=calendar_service.tool_timezone,
 )
 action_execution_service = router.action_execution_service
 provenance_repository = ProvenanceRepository(settings.database_path)

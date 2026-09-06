@@ -148,7 +148,8 @@ services:
       MAIN_CONVERSATION_MODEL_NUM_CTX: "${MAIN_CONVERSATION_MODEL_NUM_CTX:-32768}"
       MAIN_CONVERSATION_MODEL_NUM_PREDICT: "${MAIN_CONVERSATION_MODEL_NUM_PREDICT:-1024}"
       MAIN_CONVERSATION_MODEL_THINK: "${MAIN_CONVERSATION_MODEL_THINK:-low}"
-      MAIN_TURN_DECISION_MODEL_THINK: "${MAIN_TURN_DECISION_MODEL_THINK:-false}"
+      MAIN_TURN_DECISION_MODEL_THINK: "${MAIN_TURN_DECISION_MODEL_THINK:-low}"
+      MAIN_TOOL_STEP_MODEL_THINK: "${MAIN_TOOL_STEP_MODEL_THINK:-medium}"
       MODEL_ADAPTIVE_TOKEN_BUDGET_ENABLED: "${MODEL_ADAPTIVE_TOKEN_BUDGET_ENABLED:-true}"
       MODEL_ADAPTIVE_TOKEN_MAX_ATTEMPTS: "${MODEL_ADAPTIVE_TOKEN_MAX_ATTEMPTS:-4}"
       MODEL_ADAPTIVE_TOKEN_GROWTH_FACTOR: "${MODEL_ADAPTIVE_TOKEN_GROWTH_FACTOR:-2.0}"
@@ -192,7 +193,10 @@ services:
       EMAIL_AGENT_ALLOW_REMOTE_MODEL: "${EMAIL_AGENT_ALLOW_REMOTE_MODEL:-false}"
       EMAIL_AGENT_ATTACHMENT_EXTRACTION_ENABLED: "false"
       EMAIL_AGENT_LABEL_SHADOW_ENABLED: "true"
+      # Legacy exclusive category-label reconciliation is permanently disabled.
       EMAIL_AGENT_LABEL_WRITES_ENABLED: "${EMAIL_AGENT_LABEL_WRITES_ENABLED:-false}"
+      # This API process never owns the provider worker loop.
+      EMAIL_AGENT_OPERATIONS_WORKER_ENABLED: "false"
       # The API sees the configured path but does not mount or load the Modify token.
       EMAIL_AGENT_LABEL_TOKEN_PATH: /opt/jarvis/secrets/email-spam-worker/token.json
       EMAIL_AGENT_SPAM_WRITES_ENABLED: "${EMAIL_AGENT_SPAM_WRITES_ENABLED:-false}"
@@ -339,7 +343,7 @@ services:
       EMAIL_AGENT_ENABLED: "true"
       EMAIL_AGENT_SPAM_WRITES_ENABLED: "true"
       EMAIL_AGENT_WORKER_TOKEN_ISOLATED: "false"
-      EMAIL_AGENT_LABEL_WRITES_ENABLED: "${EMAIL_AGENT_LABEL_WRITES_ENABLED:-false}"
+      EMAIL_AGENT_LABEL_WRITES_ENABLED: "false"
       EMAIL_AGENT_PERMISSIONS_PATH: /opt/jarvis/secrets/live/email_agent_permissions.yaml
       EMAIL_AGENT_SPAM_TOKEN_PATH: /opt/jarvis/secrets/email-spam-worker/token.json
       EMAIL_AGENT_LABEL_TOKEN_PATH: /opt/jarvis/secrets/email-spam-worker/token.json
@@ -347,7 +351,42 @@ services:
     volumes:
       - ../../data:/opt/jarvis/data
       - ../../secrets/live/email_agent_permissions.yaml:/opt/jarvis/secrets/live/email_agent_permissions.yaml:ro
-      - ../../secrets/email-spam-worker/token.json:/opt/jarvis/secrets/email-spam-worker/token.json
+      - ../../secrets/email-spam-worker:/opt/jarvis/secrets/email-spam-worker
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  email-operations-worker:
+    image: jarvis-poc-app:local
+    profiles: ["email-operations"]
+    restart: unless-stopped
+    init: true
+    user: "${JARVIS_UID:-1001}:${JARVIS_GID:-1001}"
+    env_file:
+      - ../../.env
+    environment:
+      APP_ENV: production
+      DATABASE_PATH: /opt/jarvis/data/jarvis_v2.db
+      SKILL_ARTIFACT_AUTO_COMPILE_ENABLED: "false"
+      EMAIL_AGENT_ENABLED: "true"
+      EMAIL_AGENT_SPAM_WRITES_ENABLED: "false"
+      EMAIL_AGENT_LABEL_WRITES_ENABLED: "${EMAIL_AGENT_LABEL_WRITES_ENABLED:-false}"
+      EMAIL_AGENT_OPERATIONS_WORKER_ENABLED: "${EMAIL_AGENT_OPERATIONS_WORKER_ENABLED:-false}"
+      EMAIL_AGENT_WORKER_TOKEN_ISOLATED: "true"
+      EMAIL_AGENT_PERMISSIONS_PATH: /opt/jarvis/secrets/live/email_agent_permissions.yaml
+      EMAIL_AGENT_LABEL_TOKEN_PATH: /opt/jarvis/secrets/email-spam-worker/token.json
+    command: ["python", "-m", "app.workers.email_operations_worker"]
+    volumes:
+      - ../../data:/opt/jarvis/data
+      - ../../secrets/live/email_agent_permissions.yaml:/opt/jarvis/secrets/live/email_agent_permissions.yaml:ro
+      - ../../secrets/email-spam-worker:/opt/jarvis/secrets/email-spam-worker
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.workers.email_operations_worker", "--readiness-only"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]

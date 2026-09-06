@@ -1,4 +1,4 @@
-version: 1
+version: 2
 
 gmail_profile: jarvis.house@example.com
 google_account_key: replace-with-house-google-account-key
@@ -6,15 +6,19 @@ taxonomy_version: shared-v1
 
 source_routes:
   - route_key: work
+    display_name: Work
     source_mailbox: work.sender@example.edu
     destination_alias: jarvis.house+work@example.com
   - route_key: community
+    display_name: Community
     source_mailbox: community.sender@example.org
     destination_alias: jarvis.house+community@example.com
   - route_key: personal
+    display_name: Personal
     source_mailbox: personal.sender@example.com
     destination_alias: jarvis.house+personal@example.com
   - route_key: county
+    display_name: County
     source_mailbox: county.sender@example.gov
     destination_alias: jarvis.house+county@example.com
 
@@ -57,3 +61,23 @@ access:
 # Add deterministic sender/source rules only after representative shadow samples
 # prove they are precise. Unmatched mail falls into needs_review.
 classification_rules: []
+
+# Additive labels are independent of the exclusive classifier categories above.
+# Only this protected catalog can authorize a Discord-managed Gmail label mutation.
+managed_labels:
+  - key: done
+    display_name: Done
+    gmail_label_name: Jarvis/Done
+    enabled: true
+  - key: to_do
+    display_name: To-do
+    gmail_label_name: Jarvis/To-do
+    enabled: true
+  - key: bills
+    display_name: Bills
+    gmail_label_name: Jarvis/Bills
+    enabled: true
+  - key: ayso
+    display_name: AYSO
+    gmail_label_name: Jarvis/AYSO
+    enabled: true

@@ -1,10 +1,10 @@
 # Reasoning-Led Capability Execution Plan
 
-Status: `execution_in_progress`; P0A, P1, P2, and accelerated P5A complete; P3 framework rollout evidence remains open; P4 implementation is retained with activation absorbed by the ready P5F Email plan
+Status: `execution_in_progress`; P0A, P1, P2, and accelerated P5A complete; P3 framework rollout evidence remains open; P5F Email mailbox-state expansion is live with corrected Discord canary, model-certification, and observation gates open
 
 Prepared: 2026-08-30
 
-Current phase: `P5F Email reasoning and central-inbox management is ready for execution; implementation has not started`
+Current phase: `P5F Email reasoning and central-inbox management is live; corrected real-Discord canary pending before expanded observation`
 
 Authority: this plan records the approved architecture. A later instruction to begin work authorizes
 only the named phase or subphase. Completing one phase does not authorize the next phase, production
@@ -568,7 +568,8 @@ an independent batch binds the complete parent/child manifest; stale or unauthor
 individually after the mandatory post-approval recheck.
 
 The initial cardinality assignment is exact: `email.apply_labels`, `email.remove_labels`,
-`email.mark_read_complete`, and `email.move_to_spam` are `independent_batch`;
+`email.set_read_state`, `email.archive_messages`, `email.restore_to_inbox`, and `email.move_to_spam` are
+`independent_batch`;
 `email.set_review_state`, `email.correct_local_category`, `lists.add_items`, `lists.remove_items`, and
 `documents.confirm_fields` are `atomic_batch`; every other initial descriptor is `single`. Email
 `message_refs` are therefore sorted and duplicate-rejected before hashing. Lists item text order remains
@@ -579,8 +580,8 @@ Initial runtime dependencies are exact:
 - `action_approval`: `email.move_to_spam`, `lists.clear_collection`, `lists.delete_collection`,
   `calendar.create_event_with_invites`, and `calendar.delete_event`; a dynamic P9 transfer approval adds
   this dependency to that proposal even when the descriptor normally omits it.
-- `email_operations`: `email.apply_labels`, `email.remove_labels`, `email.mark_read_complete`, and
-  `email.move_to_spam`.
+- `email_operations`: `email.apply_labels`, `email.remove_labels`, `email.set_read_state`,
+  `email.archive_messages`, `email.restore_to_inbox`, and `email.move_to_spam`.
 - `document_processing`: `documents.queue_processing`.
 - `ticket_review`: every ticket-eligible Email, Lists, Calendar, or Home write after P7. The accelerated
   P5A `lists.create_collection` and `lists.add_items` slice is initially protected by its Lists-owned
@@ -734,6 +735,11 @@ decisions use `NUM_PREDICT=512`. External-effect and durable-delivery retry coun
 raised by this profile. This profile changes reasoning patience, not authority: operation
 allowlists, approval policy, effect cardinality, idempotency, identical-read caps, and observation
 ceilings remain unchanged. Re-tighten only after representative skill behavior is correct and measured.
+Main's reasoning effort is also separated by layer: `MAIN_TURN_DECISION_MODEL_THINK=low` owns the closed
+commitment and skill-selection boundary, while `MAIN_TOOL_STEP_MODEL_THINK=medium` owns schema-aware tool
+planning and observation follow-up. This prevents a single provider thinking mode from trading reliable
+commitment output against temporal and multi-selector precision. Hidden reasoning is never parsed,
+persisted, or treated as tool authority.
 
 ## Effect and approval policy
 
@@ -778,7 +784,9 @@ status, safe message, missing fields, committed state, and opaque references sep
 | `email.correct_local_category` | `local_write` | `private / redacted` | none | req | `10 / 50 / 3000` | `message_refs, category, changed_count` | redacted domain receipts + tickets |
 | `email.apply_labels` | `external_write` | `private / redacted` | none | req | `10 / 50 / 3000` | `operation_ref, child_refs, delivery_state` | durable provider receipts; tickets attach in P7 |
 | `email.remove_labels` | `external_write` | `private / redacted` | none | req | `10 / 50 / 3000` | `operation_ref, child_refs, delivery_state` | durable provider receipts; tickets attach in P7 |
-| `email.mark_read_complete` | `external_write` | `private / redacted` | none | req | `10 / 50 / 3000` | `message_refs, delivery_state, job_refs` | durable provider receipts + tickets |
+| `email.set_read_state` | `external_write` | `private / redacted` | none | req | `10 / 50 / 3000` | `operation_ref, child_refs, delivery_state` | durable provider receipts; tickets attach in P7 |
+| `email.archive_messages` | `external_write` | `private / redacted` | none | req | `10 / 50 / 3000` | `operation_ref, child_refs, delivery_state` | durable provider receipts; tickets attach in P7 |
+| `email.restore_to_inbox` | `external_write` | `private / redacted` | none | req | `10 / 50 / 3000` | `operation_ref, child_refs, delivery_state` | durable provider receipts; tickets attach in P7 |
 | `email.move_to_spam` | `destructive_external` | `private / redacted` | always | req | `10 / 5 / 3000` | `message_refs, delivery_state, job_refs` | durable read-back receipts + tickets |
 | `lists.list_collections` | `read` | `private / redacted` | none | n/a | `5 / 100 / 4000` | `collections, owner_scope, truncated` | none |
 | `lists.get_collection` | `read` | `private / redacted` | none | n/a | `5 / 100 / 6000` | `collection, items, owner_scope, truncated` | none |
@@ -830,7 +838,9 @@ Descriptor purposes are fixed as follows:
 | `email.correct_local_category` | Correct only the local projected category for current message references. |
 | `email.apply_labels` | Add one or more enabled Jarvis-managed labels to current central-mailbox messages without removing other labels. |
 | `email.remove_labels` | Remove only the selected enabled Jarvis-managed labels from current central-mailbox messages. |
-| `email.mark_read_complete` | Queue an idempotent Gmail mark-read operation for current message references. |
+| `email.set_read_state` | Queue an idempotent Gmail read or unread state for current message references. |
+| `email.archive_messages` | Queue removal of `INBOX` for current message references. |
+| `email.restore_to_inbox` | Queue addition of `INBOX` for current non-Spam/non-Trash references. |
 | `email.move_to_spam` | After formal approval, queue a bounded Gmail spam move for current references. |
 | `lists.list_collections` | Enumerate authorized list collections without item mutation. |
 | `lists.get_collection` | Read one authorized collection and a bounded item set. |
@@ -887,8 +897,10 @@ Initial closed input shapes are also locked:
   `status=open|done`. Remove takes canonical collection ref plus 1..20 item refs. Clear/delete take
   canonical collection ref and `resource_version`.
 - `calendar.query_events`: required aware ISO `start` and exclusive `end`, exactly one authorized
-  calendar/person selector or the explicit authorized default, optional text at most 200 characters,
-  and `limit=1..100`. Server inserts and validates the selected calendar timezone.
+  calendar/person selector or the explicit authorized default, required `time_basis=local_calendar|absolute`,
+  optional text at most 200 characters, and `limit=1..100`. Main classifies local calendar/wall-time
+  ranges versus rolling or explicitly absolute instants; the server inserts the selected IANA timezone and
+  deterministically normalizes local boundaries, including DST offsets.
 - Calendar create tools take `calendar_ref`, title 1..200 characters, a tagged `when` object of either
   aware timed `start/end/timezone` or all-day `start_date/end_date_exclusive`, and optional bounded
   location/description. The invite tool additionally requires 1..20 validated invitees; the non-invite
@@ -943,7 +955,7 @@ classification, and operation ledgers. All Email content is private and excluded
 | automatic category-to-Gmail label reconciliation | sync/Main compatibility path | deactivate stale; never enqueue from classification | external_write | n/a | P5F-E0 |
 | additive managed-label apply | absent | `email.apply_labels` / add | external_write | none | P5F |
 | additive managed-label remove | absent | `email.remove_labels` / add | external_write | none | P5F |
-| `email.mark_complete` | Main | `email.mark_read_complete` / migrate | external_write | none | P8D |
+| `email.mark_complete` | Main/legacy | `email.set_read_state` plus optional local review-state composition / split | external_write + optional local_write | none | P5F/P8D |
 | `email.mark_spam` | Main | `email.move_to_spam` / migrate | destructive_external | Formal | P8D |
 | `email.sync` | scheduler | scheduler_only | local_write | scheduler policy | preserve |
 | `email.promote_to_list` | staged | deferred cross-domain proposal | n/a | n/a | P9/follow-up |
@@ -1081,7 +1093,7 @@ from generic memory and tickets unless a content-minimized policy explicitly per
 | Lists mutation idempotency | Lists-owned `list_operations` in Core SQLite | Atomic with Lists mutation; redacted bounded result; retained for the life of referenced list data and included in Core backup/restore. |
 | Home mutation idempotency | `switch_actions_log.operation_id` in Core SQLite | Atomic with simulated state change; same retention/backup as the existing action log; no physical-device claim. |
 | Restricted Documents mutation idempotency | Existing durable-job idempotency for queueing plus Documents-owned `document_tool_operations` in encrypted Documents SQLite for proposal/review writes | Documents migration 15; no generic ticket or content in Core; operation/hash/status/opaque result refs only; atomic with the Documents mutation where both share Documents SQLite and reconciled across the existing queued boundary. The compatibility-aware version-14 image is the rollback reader. |
-| Email mutation idempotency | Email-owned tables in Core SQLite | P5F migration 010 introduces `email_tool_operations` plus the additive managed-label child ledger. P7/P8D migration 013 extends the parent/ticket bridge and later mailbox effects without replacing P5F ownership. Legacy exclusive-category rows remain history and are never claimable by the new worker; every verified child owns one receipt. |
+| Email mutation idempotency | Email-owned tables in Core SQLite | P5F migration 010 introduces `email_tool_operations` plus the parent-bound provider-label child ledger; the user-authorized migration 011 expansion adds fixed reversible `INBOX`/`UNREAD` operations without a second queue. P7/P8D migration 014 later extends the parent/ticket bridge without replacing P5F ownership. Legacy exclusive-category/mailbox rows remain history and are never claimable by the new worker; every verified child owns one receipt. |
 | Post-action verification | Action-ticket ledger | Created around a real effect; observations never replace provider/domain truth. |
 | Operational event | Event log through typed safe-event builder | Opaque IDs/states/counts/error codes; no raw private content or hidden reasoning. |
 | Interaction memory | Existing `MemoryService`/store | Remains interaction-history authority; receives only policy-filtered standard content or a redacted surrogate and receives no job for `no_store`. No structured facts are added. |
@@ -1140,8 +1152,8 @@ Global invariants:
 | P3 | Bounded Main loop and non-executing shadow | legacy response/effects | in_progress |
 | P4 | Email read/query proving slice | implementation retained; activation absorbed by P5F | implementation_verified_activation_superseded |
 | P5A | Lists end-to-end reasoning slice | Lists reads plus safe create/add may be active | complete |
-| P5F | Accelerated Email reasoning and central-inbox management | Email routed reads plus additive managed labels may be active | ready_for_execution |
-| P5B-E | Remaining read surfaces | per-domain active reads | not_started |
+| P5F | Accelerated Email reasoning and central-inbox management | Email routed reads plus additive labels and reversible read/Inbox state may be active | mailbox_state_discord_canary_pending |
+| P5B-E | Remaining read surfaces | per-domain active reads | P5B default-calendar observation in progress; P5C-E not started |
 | P6 | Durable approval and protected Discord delivery | approval path available | not_started |
 | P7 | Ticket/receipt/recovery hardening | safer effects | not_started |
 | P8A-E | Existing writes by domain/risk | per-domain active writes | not_started |
@@ -2021,11 +2033,12 @@ rollback.
 
 ### P5F - Accelerated Email reasoning and central-inbox management
 
-Status: `ready_for_execution`
+Status: `mailbox_state_discord_canary_pending`
 Depends on: completed `P5A` and the verified P4 typed-tool framework. P3/P4's broader observation debt is
 retained but does not block this independently gated slice.
-Runtime default after subphase: authorized central Jarvis Gmail reads and reversible additive managed-label
-operations may be independently active; original routed source accounts remain read-only views.
+Runtime default after subphase: authorized central Jarvis Gmail reads, reversible additive managed-label
+operations, read/unread, and archive/restore may be independently active; original routed source accounts
+remain read-only views.
 
 Canonical execution detail: [`email-reasoning-inbox-management-plan.md`](email-reasoning-inbox-management-plan.md).
 That focused plan is authoritative for P5F's file allowlists, schemas, tests, worker lifecycle, canaries,
@@ -2042,20 +2055,71 @@ Locked scope:
 - E2 may then add `email.get_operation`, `email.apply_labels`, and `email.remove_labels`. The two writes
   accept the same one-to-many schemas and touch only enabled protected-catalog labels. Initial policy
   includes `Done`, `To-do`, `Bills`, and `AYSO`; policy additions require configuration, not code.
-- P5F reserves Core migration 010 and a Compose-owned `email-operations-worker`. The worker can claim only
-  the new additive operation table; the legacy exclusive-category backlog is never eligible.
-- Sending, drafting, replying, forwarding, deleting, trashing, archiving, spam, read/unread mutation,
-  source-account mutation, and cross-domain promotion remain unavailable.
+- E4, explicitly authorized on 2026-09-01, adds `email.set_read_state`, `email.archive_messages`, and
+  `email.restore_to_inbox`. Main composes them with managed-label tools; there is no folder-specific move
+  intent. Only the fixed `UNREAD` and `INBOX` labels are reachable through these tools, and restore refuses
+  Spam or Trash.
+- P5F reserves Core migrations 010-011 and the one Compose-owned `email-operations-worker`. The worker can
+  claim only the parent-bound provider-label child table; legacy exclusive-category and mailbox queues are
+  never eligible.
+- Sending, drafting, replying, forwarding, deleting, trashing, spam, source-account mutation, and cross-
+  domain promotion remain unavailable.
 
 Execution tasks:
 
-- [ ] `P5F-E0` Characterize and contain the legacy automatic category-label queue without provider calls.
-- [ ] `P5F-E1` Add authorized mailbox/label discovery, query contract v2, keyset pagination, truthful
+- [x] `P5F-E0` Characterize and contain the legacy automatic category-label queue without provider calls.
+- [x] `P5F-E1` Add authorized mailbox/label discovery, query contract v2, keyset pagination, truthful
   coverage, and bounded operator-run historical backfill; certify reads before writes.
-- [ ] `P5F-E2` Add migration 010, additive label parent/child operations, read-back verification, and the
+- [x] `P5F-E2` Add migration 010, additive label parent/child operations, read-back verification, and the
   tracked worker with leases, fencing, bounded retry, dead letters, recovery, and health.
 - [ ] `P5F-E3` Pass focused/full/model/copied-database gates, promote reads first, run a reversible live
   canary on one disposable central-mailbox message and dedicated canary label, then observe for 24 hours.
+- [x] `P5F-E4` Add migration 011 and the three reversible mailbox-state operations by generalizing the
+  existing parent/child ledger, writer, and worker. No new queue, credential, scheduler, or provider client.
+- [ ] `P5F-E5` Certify composition, run a disposable mark-read/archive/restore/original-state canary, and
+  restart the 24-hour Email observation for the expanded surface.
+
+Gate checkpoint (2026-09-01): release candidate 35 passed 876 automated tests, owned-file Ruff, three
+consecutive 34/34 held-out model runs, copied-database canaries, and the complete 9/9 live read matrix. A
+live Discord request selected the one disposable message, applied the dedicated managed label, and removed
+it again. Provider read-back and the independent receipt audit proved one add, one remove, one verified
+remove no-op, unchanged unrelated labels, no active/dead-letter work, no legacy claims, and final label
+absence. Base Compose now persistently activates the API authorization surface and isolated worker while
+preventing the API and legacy worker from owning the provider loop. The final clean public export and
+public-tree checker passed; only the 24-hour observation that began at `2026-09-01T15:58:02Z` remains open.
+
+Mailbox-state expansion checkpoint (2026-09-01): the exact rc23 image
+`sha256:5f67581ac4b005d3d574f21d02da9b0e87ef0a08787f88425061aeeb01223319` is live on Core schema 11.
+Local verification passed `884` tests with `2` skipped and the exact Ubuntu candidate passed `889` tests
+plus owned-file Ruff, compile, architecture, Compose, clean-export, and public-tree gates. The copied-
+production canary passed the reversible state/recovery matrix. The live disposable Gmail canary then
+completed four first-attempt verified operations (`read -> archive -> restore Inbox -> restore unread`),
+returned the complete provider label set to its exact starting value, preserved unrelated labels, left
+zero open/dead-letter work, and did not change or claim the legacy ledger.
+
+The subsequent real-user Discord audit exposed a protected-scope mismatch: the ordinary live Jarvis
+channel was admitted generally but lacked both the Email skill projection and Email-domain grant, so three
+natural-language Email requests stopped with `no_relevant_skill` before any tool call. The exact channel
+was added to both authorization layers while the existing approval/notification channel remained intact;
+protected configs were backed up and Jarvis restarted healthy. Both authorization checks now pass, but
+the direct provider canary does not substitute for a real Discord turn. The expanded observation has not
+started and must begin after a corrected real-user Discord query succeeds.
+
+The E5 model gate remains explicitly open: one candidate-equivalent run passed `47/47`, while the exact
+rc23 run passed `46/47` with all safety and new Email state cases passing and zero failed token loops; an
+intermittent previously certified Calendar exact-argument case missed. Production activation here is a
+reversible development canary under the user's development-first direction, not a claim that the required
+three consecutive `47/47` certifications passed. Retained rollback tags are
+`p5f-email-state-rollback-20260901` and `p5f-email-worker-rollback-20260901`; the verified private
+predeployment artifact location is recorded only in local operational context.
+
+The rollout also locked four platform corrections: composition, rather than request input, owns runtime
+dependency availability; typed tool envelopes distinguish authenticated adapter subject from external
+user identity; atomic OAuth refresh receives a narrow writable token-directory mount; and a model-server
+container with a stale post-restart GPU handle is recreated and reverified instead of accepting silent CPU
+fallback. Cross-turn requests regenerated at a different tool-call ordinal may still create a verified
+provider no-op receipt; exact-envelope retries do not duplicate effects, and broader semantic receipt
+coalescing is deferred for a separate operation-identity review.
 
 Rollback removes exact Email operation IDs, disables the new worker, quiesces or expires claims, and
 reconciles new rows to truthful terminal state. It never starts the legacy worker, deletes projection
@@ -2063,7 +2127,7 @@ history, down-migrates Core, auto-reverses verified Gmail state, or touches a so
 
 ### P5B - Calendar reads
 
-Status: `not_started`
+Status: `default_calendar_observation_in_progress`
 Depends on: `P4` framework gate; P5A need not be complete
 Runtime default after subphase: Calendar reads may be independently active
 
@@ -2071,22 +2135,71 @@ Allowed files: `app/skills/domains/calendar/context.py`, `app/skills/domains/cal
 `app/skills/domains/calendar/service.py`, `app/skills/domains/calendar/storage.py`,
 `app/services/google/calendar_live.py` - query adapter only, `app/prompts/skills/calendar_skill.md`,
 `tests/unit/test_calendar_service.py`, `tests/unit/test_google_calendar_live_paths.py`,
-`tests/unit/test_main_tool_loop.py`, and `benchmarks/models/main_acceptance_cases.json`.
+`tests/unit/test_main_tool_loop.py`, `benchmarks/models/main_acceptance_cases.json`, and composition-only
+`app/runtime.py` registration of the Calendar typed handler. The composition-root addition is required by
+the existing `SkillExecutionDispatcher`; it may not contain Calendar policy or query behavior.
+
+P5B reuse and ownership decision: reuse `CalendarService` as the domain boundary,
+`GoogleCalendarLiveService` as the existing Google Calendar/OAuth adapter, `CalendarStorage` as the local
+fallback authority, the Markdown/SQLite skill registry for discovery, and the existing authorized typed
+executor/Main loop for policy, bounds, and dispatch. No new store, queue, credential surface, scheduler,
+or provider client is introduced. Google Calendar remains authoritative when configured; the in-memory
+store owns only local fallback rows and must report incomplete, not-synchronized coverage. P5B creates no
+durable datum and performs no external side effect.
+
+`calendar_live.py` is already an oversized mixed read/write provider adapter. The P5B query method belongs
+there because that class alone currently owns binding resolution, readonly OAuth, token refresh, and the
+Google Calendar API client; creating a second client would duplicate authority. Keep the addition bounded
+to query delegation and safe projection. Before P8E adds typed writes, extract shared OAuth/binding logic
+and the read adapter behind a Calendar-owned protocol if the file remains mixed; do not deepen direct
+provider imports in domain code.
+
+P5B also uses [gogcli's Calendar events surface](https://github.com/openclaw/gogcli/blob/main/docs/commands/gog-calendar-events.md)
+as a pattern reference for explicit calendar routing, aware from/to ranges, text filtering, stable structured
+output, pagination truth, read-only/no-input automation, and untrusted provider content. Jarvis does not
+vendor or execute gogcli: its existing Google adapter, protected OAuth configuration, authorization
+boundary, and domain schemas remain authoritative. The locked one-scope input stays narrower than
+gogcli's multi-calendar CLI; Main composes multiple authorized `calendar.query_events` calls when a user
+asks for multiple calendars.
 
 Tasks:
 
-- [ ] `P5B-01` Publish `calendar.query_events` with required inclusive start/exclusive end, timezone,
-  calendar/person scope, optional text, ordering, and bounded limit.
-- [ ] `P5B-02` Replace daily/weekly collapse in the new path with typed range validation and provider
+- [x] `P5B-01` Publish `calendar.query_events` with required inclusive start/exclusive end, typed local
+  calendar versus absolute time basis, server-owned timezone normalization, calendar/person scope,
+  optional text, ordering, and bounded limit.
+- [x] `P5B-02` Replace daily/weekly collapse in the new path with typed range validation and provider
   query delegation. An unknown explicit person/calendar fails closed rather than using the default.
-- [ ] `P5B-03` Return source, synchronization truth, truncation, and bounded event fields. The in-memory
+- [x] `P5B-03` Return source, synchronization truth, truncation, and bounded event fields. The in-memory
   fallback must identify itself and never claim Google synchronization.
-- [ ] `P5B-04` Test exact date, rolling and arbitrary ranges, DST, unknown/ambiguous person, multiple
-  calendars, unauthorized scope, provider failure, and bounds. Do not change create/update/delete.
+- [x] `P5B-04` Test exact date, rolling and arbitrary ranges, deterministic DST correction,
+  unknown/ambiguous person, multiple calendars, unauthorized scope, provider failure, and bounds. Do not
+  change create/update/delete.
 
 Gate and rollback: targeted Calendar read tests, common exit commands, and a 24-hour read canary with
 domain `calendar` and only `calendar.query_events` newly present in the operation allowlist. Remove that
 operation ID to roll back; remove the domain only if no Calendar operation remains active.
+
+Implementation evidence (2026-09-01): the final focused suite passed 73 tests; the full suite passed
+892 tests; and three consecutive `gpt-oss:20b` Calendar acceptance runs each passed 6/6 with safety true
+and zero failed loops. The exact clean export passed the public-tree, compile, architecture, Ruff, and
+full-suite gates. Candidate image `jarvis-poc-app:p5b-rc1` was built only from that export, while the
+pre-P5B image remains tagged `jarvis-poc-app:p5b-rollback-20260901` and the verified Core backup is
+retained.
+
+The first content-free live preflight found three configured Calendar scopes, but the current protected
+Google OAuth account can access only Jarvis's default scope. The other two configured resource IDs return
+Google API HTTP 404 and cannot be uniquely reconciled against the account's Calendar List. On 2026-09-01,
+the user explicitly selected a default-calendar-only proving scope before extending access to personal
+calendars. Preserve the inaccessible bindings without guessing or presenting them as tested; they grant no
+current provider access and remain outside this canary.
+
+The validated candidate image `89a0c54cbd25` is now live. Production adds domain `calendar` and only
+`calendar.query_events`; no Calendar write operation is present in the typed allowlist. A metadata-only
+live matrix passed three Main requests against `calendar_scope=default`: today, exact date, and rolling
+three-day text-filtered range. Each completed one provider-backed observation with zero failures,
+`persistence=no_store`, and zero committed effects. Jarvis remained healthy and the 24-hour read
+observation began at `2026-09-01T17:52:55Z`. Personal-calendar access remains deferred until the user
+chooses to share those calendars and the protected bindings can be reconciled exactly.
 
 ### P5C - Home/Lights reads and naming repair
 
@@ -2190,7 +2303,7 @@ None may appear in the interactive effective-tool catalog.
 ## P6 - Durable pre-action approval and protected Discord delivery
 
 Status: `not_started`
-Depends on: `P5F`; P5F reserves migration 010 and P6 follows with migration 011
+Depends on: `P5F`; P5F reserves migrations 010-011 and P6 follows with migration 012
 Runtime default after phase: approval infrastructure available; no new write tool active
 
 Objective: pause an exact validated call, obtain a durable decision from the configured private Discord
@@ -2244,9 +2357,9 @@ before its sender is known.
 
 Tasks:
 
-- [ ] `P6-01` Add `action_proposals` to `app/db/review_schema.py` and ordered core migration 011 to
-  `app/db/migrations.py`; record version 11 as additive with minimum reader 7 in the compatibility table.
-  Fresh creation, upgrade from version 10, populated-row preservation, idempotent reopen, and P1-reader
+- [ ] `P6-01` Add `action_proposals` to `app/db/review_schema.py` and ordered core migration 012 to
+  `app/db/migrations.py`; record version 12 as additive with minimum reader 7 in the compatibility table.
+  Fresh creation, upgrade from version 11, populated-row preservation, idempotent reopen, and P1-reader
   startup must pass in `tests/unit/test_core_schema_migrations.py`. Store every required
   `ActionApprovalProposal` field, including nullable closed `transfer_manifest_json`,
   `transfer_binding_hash`, closed `batch_manifest_json`, `batch_manifest_hash`, and the purpose-bound
@@ -2556,7 +2669,7 @@ Exact P8 pre-activation worker gate; set only `p8_subphase` to the subphase bein
     P8A) prospective_operations=(lists.update_item lists.remove_items lists.clear_collection lists.delete_collection) ;;
     P8B) prospective_operations=(home.set_device_state) ;;
     P8C) prospective_operations=(documents.queue_processing documents.propose_metadata documents.review_field documents.confirm_fields) ;;
-    P8D) prospective_operations=(email.set_review_state email.correct_local_category email.mark_read_complete email.move_to_spam) ;;
+    P8D) prospective_operations=(email.set_review_state email.correct_local_category email.move_to_spam) ;;
     P8E) prospective_operations=(calendar.create_event calendar.create_event_with_invites calendar.update_event calendar.delete_event) ;;
     *) echo "Unknown P8 subphase" >&2; exit 1 ;;
   esac
@@ -2689,7 +2802,7 @@ Allowed files: `app/skills/domains/lights/context.py`, `app/skills/domains/light
   truthful simulated-state receipt/ticket classification.
 - [ ] `P8B-04` Test unauthorized/missing/ambiguous devices, duplicate calls, restart, partial loop, and
   absence of hidden group execution.
-- [ ] `P8B-05` Update the baseline core schema and ordered migration 012 to add nullable `operation_id`
+- [ ] `P8B-05` Update the baseline core schema and ordered migration 013 to add nullable `operation_id`
   and `arguments_hash` to
   `switch_actions_log`, a unique partial operation-ID index, and an additive compatibility row with
   minimum reader 7. State update and action-log insert commit atomically; same ID/hash replays the stored
@@ -2768,8 +2881,8 @@ policy.
 
 Status: `not_started`
 Depends on: `P8C`, `P7`, and `P5F`
-Runtime default after subphase: local review/category and approved later mailbox-state writes may be
-independently active while P5F additive label tools remain intact
+Runtime default after subphase: local review/category and approved spam writes may be independently active
+while P5F additive-label, read/unread, and archive/restore tools remain intact
 
 Allowed files: `app/skills/domains/email_agent/context.py`,
 `app/skills/domains/email_agent/handler.py`, `app/skills/domains/email_agent/service.py`,
@@ -2784,12 +2897,12 @@ ADD `tests/unit/test_email_agent_schema.py`, `tests/unit/test_core_schema_migrat
 `tests/unit/test_action_ticket_service.py`; ADD
 `tests/integration/test_email_batch_recovery.py`.
 
-- [ ] `P8D-01` Publish `email.set_review_state`, `email.correct_local_category`,
-  `email.mark_read_complete`, and `email.move_to_spam` with the locked separate effect classes. Retain
-  P5F's `email.apply_labels` and `email.remove_labels` unchanged; do not publish the superseded exclusive
-  `email.apply_managed_category_label`. Sending/replying/forwarding/deletion and generic Gmail query
-  execution remain absent.
-- [ ] `P8D-02` Implement Email's P2 argument canonicalizer for all four new writes. Under the immutable
+- [ ] `P8D-01` Publish `email.set_review_state`, `email.correct_local_category`, and
+  `email.move_to_spam` with the locked separate effect classes. Retain P5F's managed-label,
+  `email.set_read_state`, `email.archive_messages`, and `email.restore_to_inbox` tools unchanged; do not
+  publish the superseded exclusive `email.apply_managed_category_label` or `email.mark_read_complete`.
+  Sending/replying/forwarding/deletion and generic Gmail query execution remain absent.
+- [ ] `P8D-02` Implement Email's P2 argument canonicalizer for all three new writes. Under the immutable
   user/channel/reference-set binding, resolve current `E1`-style display aliases to authorized Gmail
   message IDs or an equivalent Email-owned opaque stable ref after schema/authorization checks but before
   parent/child hashing or approval. Reject stale, missing, ambiguous, cross-channel, and duplicate targets;
@@ -2861,15 +2974,15 @@ ADD `tests/unit/test_email_agent_schema.py`, `tests/unit/test_core_schema_migrat
   authorization denial transitions its existing row, or materializes the full missing set from the private
   parent manifest, as `cancelled/policy_denied` before reporting P7 `denied`; it can never leave an absent
   child that effect recovery could recreate as queued.
-- [ ] `P8D-07` Make Core migration 013 the only P8D schema-change authority. P5F migration 010 already
+- [ ] `P8D-07` Make Core migration 014 the only P8D schema-change authority. P5F migrations 010-011 already
   owns `email_tool_operations`, `email_managed_labels`, `email_message_managed_labels`, and
   `email_managed_label_operations`; P8D must extend those authorities rather than recreate or replace
   them. Refactor any remaining Email schema SQL into a transaction-safe helper that never commits
-  internally and never calls `executescript`. Migration 013 runs inside P2's explicit Core migration
-  transaction, upgrades populated version 12, and creates the complete current Email schema on fresh
-  version 13. Runtime `apply_email_agent()` only validates/uses the versioned schema.
+  internally and never calls `executescript`. Migration 014 runs inside P2's explicit Core migration
+  transaction, upgrades populated version 13, and creates the complete current Email schema on fresh
+  version 14. Runtime `apply_email_agent()` only validates/uses the versioned schema.
 
-  Migration 013 additively gives `email_tool_operations` the P7 linkage fields not already present:
+  Migration 014 additively gives `email_tool_operations` the P7 linkage fields not already present:
   unique nullable `idempotency_key`, `operation_identity_hash`, and `parent_manifest_hash`. It retains
   P5F's `expected_child_count` name and private `recovery_manifest_json/hash`; it does not introduce a
   duplicate expected-count or operation table. Add nullable `parent_manifest_hash` to
@@ -2878,22 +2991,23 @@ ADD `tests/unit/test_email_agent_schema.py`, `tests/unit/test_core_schema_migrat
   `email_mailbox_operations`, with unique partial parent/index and parent/message indexes plus all-null or
   all-non-null grouping guards. The legacy exclusive-category `email_label_operations` table remains
   unchanged, read-only history, and ineligible for both workers. `email_spam_operations` also remains
-  read-only history; every new spam/mark-read child uses `email_mailbox_operations`.
+  read-only history; every new formally approved spam child uses `email_mailbox_operations`. P5F's
+  reversible read/Inbox state children remain in its existing parent-bound provider-label ledger.
 
   Parent manifest hashes bind P7's redacted manifest separately from Email's private recovery hash.
   Local atomic rows keep provider-manifest fields null. Closed parent states remain
   `reserved|queued|committed|completed|partial|failed|cancelled`. Retain private recovery JSON only while
   a child is nonterminal or lacks its matching P7 receipt/no-receipt outcome, then clear it atomically.
   Retention must block deletion of a referenced message while any linked operation is nonterminal.
-  Record Core version 13 as additive with minimum reader 7; never rewrite legacy rows or put private
+  Record Core version 14 as additive with minimum reader 7; never rewrite legacy rows or put private
   manifests into generic history, tickets, events, or model observations.
 - [ ] `P8D-08` Extend P5F's Compose-owned `email-operations-worker` and its existing `--readiness-only`
-  path for the new mailbox row kinds. Readiness validates protected config, token mounts, Core
+  path for the formally approved spam row kind. Readiness validates protected config, token mounts, Core
   schema/version, supported row kinds, and single-worker ownership without claiming a row, mutating
   SQLite, calling Gmail, or emitting content. Before shadow and active canaries, run the common P8D gate,
   prove the tracked worker service/profile and fresh heartbeat, and write a separate Email dead-letter
   baseline. No external timer or manually maintained daemon is introduced.
-- [ ] `P8D-09` Test populated version-12 to version-13 upgrade and fresh version-13 creation with Email
+- [ ] `P8D-09` Test populated version-13 to version-14 upgrade and fresh version-14 creation with Email
   disabled; interrupted migration retry; retained P5F/P1-reader acceptance and pre-P1-reader refusal;
   preservation/replay of existing P5F additive-label parents/children; legacy mailbox inserts with null
   grouping columns; all-null/all-non-null guards; complete parent/
@@ -2936,9 +3050,9 @@ After the active canary, rerun the readiness-only command, require the worker he
 `--email-dead-letter-baseline /opt/jarvis/data/reasoning-led-P8D-email-dead-letters.json`. Any worker,
 readiness, schema, or dead-letter failure blocks activation.
 
-Rollback: remove exactly `email.set_review_state`, `email.correct_local_category`,
-`email.mark_read_complete`, and `email.move_to_spam` from `MAIN_TOOL_ENABLED_OPERATIONS` while retaining the
-certified P5F read and additive-label IDs, then return the Compose-owned worker to its P5F row-kind policy
+Rollback: remove exactly `email.set_review_state`, `email.correct_local_category`, and
+`email.move_to_spam` from `MAIN_TOOL_ENABLED_OPERATIONS` while retaining the certified P5F read,
+additive-label, read-state, and archive/restore IDs, then return the Compose-owned worker to its P5F row-kind policy
 and wait for any P8D mailbox claim to quiesce or expire. Stop new approval claims and expire still-pending proposals
 through Human Review; after proving no claim/effect, cancel approved proposals and their unclaimed
 execution jobs, and reconcile every `executing` proposal before a terminal transition. Through an
@@ -3259,7 +3373,7 @@ Pre-promotion tasks:
   image reader checks against those two same-generation standalone artifacts, then run the existing
   isolated Documents restore drill against that exact generation. Retain the prior image/configuration and
   do not run a restore over production. Record Core `user_version=13`, required tables and additive
-  compatibility rows 8 through 13. When Documents migration 15 exists, record Documents version 15 and
+  compatibility rows 8 through 14. When Documents migration 15 exists, record Documents version 15 and
   prove the retained compatibility-aware version-14 image can open it; a pre-bridge Documents image is not
   a valid rollback image.
 - [ ] `P11-04` Record the prior local image ID under a unique rollback tag, retag the image built from the
@@ -3787,8 +3901,8 @@ live path; never infer it from a failed database and never replace a live WAL da
   runbook. A Core-only overwrite while Documents remains mounted is prohibited.
 
 Select the Core profile from phase evidence: `7` for P1; `8` for P2-P4 and P5B-E before P5A promotion;
-`9` for P5A; `10` for P5F; `11` for P6-P8A; `12` for P8B-P8C; and `13` for P8D onward. P11's final release
-profile is `13`. The selected artifact must
+`9` for P5A; `10` for P5F before E4; `11` for P5F E4-E5; `12` for P6-P8A; `13` for P8B-P8C; and `14` for
+P8D onward. P11's final release profile is `14`. The selected artifact must
 have exactly that `user_version`. Once Documents reaches version 15, the retained reader image must be the
 exact P8C Documents-bridge image or a later image already proven against both stores.
 
@@ -4124,8 +4238,8 @@ reviewed plan revision.
 | P3 | bounded loop, typed contracts, persistence policy, shadow seam, 1024-token repair scope increase; live image `e4ce3313d2ce`; retained tag `retained-p3-bounded-loop-20260831T004643Z` | three consecutive P3 model passes at 10/10; implementation and regression suites passed | live mode shadow, empty allowlists, legacy Micro preserved; interim audit found zero qualifying shadow turns/effects | exact retained P3 tag; mode `off` remains code rollback | representative Discord samples plus their 24-hour audit are still required; wall time alone is insufficient | implementation_complete_shadow_gate_in_progress |
 | P4 | typed Email query/executor, five compatibility read descriptors, generic handler injection, and held-out argument scoring; exact sanitized clean stage | local 783/2; exact Ubuntu focused 97 and full 785; public export pass; preliminary Main 20/20 with P4 10/10 and zero failed loops | no P4 activation; its read gate is absorbed and expanded by P5F E1 | discard stage; retained P3 live image unchanged | implementation retained; obsolete five-ID activation superseded by the exact P5F read set | implementation_verified_activation_superseded |
 | P5A | four typed Lists operations, migration 009 operation ledger, accelerator typed-step route, active Main routing, closed selector/provenance contracts, and development-headroom configuration; live image `a57688bd42e0` | focused 46; local full 809 passed/2 skipped; Ubuntu full 811 passed; Ruff, Compose parse, and clean public export passed | three accepted model runs; copied-production operation/operator/full-route canaries passed; live disposable create/add/respond committed exactly two effects and state matched | exact operation/domain kill switches plus global mode `off`; retained pre-headroom image `b05741dc`; verified DB/config/source backups; committed data retained | P7 ticket attachment and destructive/update/remove tools remain deferred; Email remains inactive; dormant Micro rollback retained | complete |
-| P5F | focused central-mailbox Email plan approved; implementation pending | current narrow Email characterization suite 42 passed; P5F gates pending | live read/write activation and canary pending | exact Email operation/domain kill switches, worker disable, retained rows/state, and no legacy worker start are planned | P3/P4 observation debt retained; original source accounts and later mailbox actions explicitly deferred | ready_for_execution |
-| P5B | pending | pending | pending | pending | pending | not_started |
+| P5F | typed Email catalogs/query v2, additive-label and reversible mailbox-state tools on one durable parent/child ledger/worker; exact live image `5f67581ac4b0` | E3: 876 tests and three 34/34 model runs; E4: local 884/2 and exact Ubuntu 889, Ruff/compile/architecture/Compose/export/public-tree; copied-database state canary passed; E5 model gate remains open at one 47/47 and exact rc23 46/47 | 9/9 scripted live reads; add/remove canary passed; four-operation provider canary restored exact labels; real Discord exposed a channel-scope miss, now corrected and awaiting user retest | per-operation/domain/worker kill switches; retained pre-E4 API/worker tags; verified schema-11 predeploy database/config/source backup; protected-config backup; legacy worker disabled | corrected real-Discord canary, three consecutive E5 model certifications, and expanded 24-hour observation; P3/P4 observation debt; original source accounts read-only | mailbox_state_discord_canary_pending |
+| P5B | typed Calendar query path, provider projection, runtime registration, model cases, and live image `89a0c54cbd25` | focused 73; full 892; three consecutive 6/6 model runs; clean-export public-tree/compile/architecture/Ruff/full-suite gates passed | default-calendar-only live matrix passed today, exact-date, and rolling text-filtered reads; one observation, zero failures/effects, and no-store per case; 24-hour observation began `2026-09-01T17:52:55Z` | remove exact operation/domain allowlist additions and restore retained image `p5b-rollback-20260901`; protected pre-activation env and verified Core backup retained | two inaccessible non-default bindings remain untested and unreconciled; personal-calendar access explicitly deferred | default_calendar_observation_in_progress |
 | P5C | pending | pending | pending | pending | pending | not_started |
 | P5D | pending | pending | pending | pending | pending | not_started |
 | P5E | pending | pending | pending | pending | pending | not_started |

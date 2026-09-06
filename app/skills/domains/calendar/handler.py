@@ -1,6 +1,106 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Mapping
+
+from app.skills.tool_contracts import (
+    ToolArgumentCanonicalizationError,
+    ToolCallEnvelope,
+    thaw_json,
+)
+
+
+CALENDAR_TYPED_TOOLS = frozenset({"calendar.query_events"})
+
+
+def describe_capability(
+    *,
+    services: dict[str, Any],
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    del context
+    calendar_service = services.get("calendar_service")
+    if calendar_service is None:
+        return {
+            "configured": False,
+            "authorized_here": False,
+            "availability": "unavailable",
+            "access_note": "Calendar is not configured in this runtime.",
+        }
+    return {
+        "configured": True,
+        "authorized_here": True,
+        "availability": "available",
+        "access_note": "Authorized Calendar reads are available in this request context.",
+    }
+
+
+class CalendarToolHandler:
+    """Typed Calendar reads over the existing domain/provider boundary."""
+
+    SKILL_ID = "skill.productivity.calendar"
+
+    def canonicalize_tool_arguments(
+        self,
+        *,
+        tool_id: str,
+        validated_arguments: Mapping[str, Any],
+        request_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        del request_context
+        normalized_tool_id = str(tool_id or "").strip().casefold()
+        if normalized_tool_id not in CALENDAR_TYPED_TOOLS:
+            raise ToolArgumentCanonicalizationError("calendar_tool_unsupported")
+        arguments = dict(validated_arguments)
+        scope = str(arguments.get("calendar_scope") or "").strip()
+        if not scope:
+            raise ToolArgumentCanonicalizationError("calendar_scope_missing")
+        time_basis = str(arguments.get("time_basis") or "").strip().casefold()
+        if time_basis not in {"local_calendar", "absolute"}:
+            raise ToolArgumentCanonicalizationError("calendar_time_basis_invalid")
+        normalized: dict[str, Any] = {
+            "start": str(arguments.get("start") or "").strip(),
+            "end": str(arguments.get("end") or "").strip(),
+            "calendar_scope": scope,
+            "time_basis": time_basis,
+            "order": str(arguments.get("order") or "oldest").strip().casefold(),
+            "limit": int(arguments.get("limit", 20)),
+        }
+        text = str(arguments.get("text") or "").strip()
+        if text:
+            normalized["text"] = text
+        return normalized
+
+    def execute_tool(
+        self,
+        *,
+        envelope: ToolCallEnvelope,
+        services: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not isinstance(envelope, ToolCallEnvelope) or envelope.skill_id != self.SKILL_ID:
+            return self._denied("calendar_tool_envelope_invalid")
+        if envelope.tool_id not in CALENDAR_TYPED_TOOLS:
+            return self._denied("calendar_tool_unsupported")
+        service = services.get("calendar_service")
+        if service is None:
+            return self._denied("calendar_service_unavailable")
+        arguments = thaw_json(envelope.arguments)
+        return service.query_events(
+            start=str(arguments.get("start") or ""),
+            end=str(arguments.get("end") or ""),
+            calendar_scope=str(arguments.get("calendar_scope") or ""),
+            time_basis=str(arguments.get("time_basis") or ""),
+            text=str(arguments.get("text") or "").strip() or None,
+            order=str(arguments.get("order") or "oldest"),
+            limit=int(arguments.get("limit", 20)),
+        )
+
+    @staticmethod
+    def _denied(reason: str) -> dict[str, Any]:
+        return {
+            "status": "policy_denied",
+            "message": "This Calendar operation is not available in the current request context.",
+            "denial_reason": reason,
+        }
 
 
 def run(

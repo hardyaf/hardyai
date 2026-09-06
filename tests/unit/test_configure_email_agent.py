@@ -93,6 +93,7 @@ def test_configure_writes_protected_permissions_and_fail_closed_flags(tmp_path):
     assert "EMAIL_AGENT_ALLOW_HISTORICAL_BACKFILL=false" in env_text
     assert "EMAIL_AGENT_ALLOW_REMOTE_MODEL=false" in env_text
     assert "EMAIL_AGENT_SPAM_WRITES_ENABLED=false" in env_text
+    assert "EMAIL_AGENT_OPERATIONS_WORKER_ENABLED=false" in env_text
     assert "EMAIL_AGENT_SPAM_TOKEN_PATH=secrets/email-spam-worker/token.json" in env_text
     assert loaded["gmail_profile"] == "jarvis.house@example.com"
     if os.name != "nt":

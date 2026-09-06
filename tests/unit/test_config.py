@@ -23,6 +23,8 @@ SETTING_NAMES = {
     "MICRO_MODEL_NUM_PREDICT",
     "MAIN_REPAIR_MODEL_NUM_PREDICT",
     "MAIN_CONVERSATION_MODEL_NUM_PREDICT",
+    "MAIN_TURN_DECISION_MODEL_THINK",
+    "MAIN_TOOL_STEP_MODEL_THINK",
     "MODEL_ADAPTIVE_TOKEN_MAX_ATTEMPTS",
     "MODEL_ADAPTIVE_TOKEN_MAX_MULTIPLIER",
     "MAIN_AGENT_LOOP_MAX_STEPS",
@@ -60,6 +62,8 @@ def _load_config(overrides: dict[str, str] | None = None) -> subprocess.Complete
                 "'micro_num_predict': settings.micro_model_num_predict, "
                 "'repair_num_predict': settings.main_repair_model_num_predict, "
                 "'conversation_num_predict': settings.main_conversation_model_num_predict, "
+                "'turn_decision_think': settings.main_turn_decision_model_think, "
+                "'tool_step_think': settings.main_tool_step_model_think, "
                 "'adaptive_attempts': settings.model_adaptive_token_max_attempts, "
                 "'adaptive_multiplier': settings.model_adaptive_token_max_multiplier, "
                 "'agent_steps': settings.main_agent_loop_max_steps, "
@@ -97,6 +101,8 @@ def test_main_tool_settings_have_inert_locked_defaults() -> None:
         "micro_num_predict": 256,
         "repair_num_predict": 1024,
         "conversation_num_predict": 1024,
+        "turn_decision_think": "low",
+        "tool_step_think": "medium",
         "adaptive_attempts": 4,
         "adaptive_multiplier": 8,
         "agent_steps": 8,
@@ -118,6 +124,8 @@ def test_main_reasoning_settings_accept_development_headroom_profile() -> None:
             "MICRO_MODEL_NUM_PREDICT": "512",
             "MAIN_REPAIR_MODEL_NUM_PREDICT": "2048",
             "MAIN_CONVERSATION_MODEL_NUM_PREDICT": "2048",
+            "MAIN_TURN_DECISION_MODEL_THINK": "high",
+            "MAIN_TOOL_STEP_MODEL_THINK": "max",
             "MODEL_ADAPTIVE_TOKEN_MAX_ATTEMPTS": "5",
             "MODEL_ADAPTIVE_TOKEN_MAX_MULTIPLIER": "16",
             "MAIN_AGENT_LOOP_MAX_STEPS": "12",
@@ -138,6 +146,8 @@ def test_main_reasoning_settings_accept_development_headroom_profile() -> None:
     assert settings["micro_num_predict"] == 512
     assert settings["repair_num_predict"] == 2048
     assert settings["conversation_num_predict"] == 2048
+    assert settings["turn_decision_think"] == "high"
+    assert settings["tool_step_think"] == "max"
     assert settings["adaptive_attempts"] == 5
     assert settings["adaptive_multiplier"] == 16
     assert settings["agent_steps"] == 12

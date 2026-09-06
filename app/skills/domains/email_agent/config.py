@@ -10,6 +10,7 @@ class EmailSourceRoute:
     route_key: str
     source_mailbox: str
     destination_alias: str
+    display_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -18,6 +19,14 @@ class EmailCategory:
     display_name: str
     audience: str = "shared"
     gmail_label_name: str | None = None
+
+
+@dataclass(frozen=True)
+class EmailManagedLabel:
+    key: str
+    display_name: str
+    gmail_label_name: str
+    enabled: bool = True
 
 
 @dataclass(frozen=True)
@@ -43,6 +52,7 @@ class EmailClassificationRule:
 
 @dataclass(frozen=True)
 class EmailAgentPermissions:
+    version: int
     gmail_profile: str
     google_account_key: str
     taxonomy_version: str
@@ -50,6 +60,7 @@ class EmailAgentPermissions:
     categories: tuple[EmailCategory, ...]
     access_grants: tuple[EmailAccessGrant, ...]
     classification_rules: tuple[EmailClassificationRule, ...]
+    managed_labels: tuple[EmailManagedLabel, ...] = ()
 
     @classmethod
     def load(cls, path_value: str) -> "EmailAgentPermissions":
@@ -72,8 +83,9 @@ class EmailAgentPermissions:
 
     @classmethod
     def from_mapping(cls, raw: dict[str, Any]) -> "EmailAgentPermissions":
-        if int(raw.get("version") or 0) != 1:
-            raise ValueError("Email-agent permissions version must be 1.")
+        version = int(raw.get("version") or 0)
+        if version not in {1, 2}:
+            raise ValueError("Email-agent permissions version must be 1 or 2.")
         gmail_profile = _email(raw.get("gmail_profile"), field="gmail_profile")
         google_account_key = str(raw.get("google_account_key") or "").strip()
         taxonomy_version = str(raw.get("taxonomy_version") or "").strip()
@@ -95,6 +107,9 @@ class EmailAgentPermissions:
             route_key = _key(row.get("route_key"), field="route_key")
             source_mailbox = _email(row.get("source_mailbox"), field="source_mailbox")
             destination_alias = _email(row.get("destination_alias"), field="destination_alias")
+            display_name = str(row.get("display_name") or route_key.replace("_", " ").title()).strip()
+            if not display_name or len(display_name) > 100 or any(ord(char) < 32 for char in display_name):
+                raise ValueError("Every source route requires a bounded display_name.")
             if route_key in route_keys or destination_alias in aliases or source_mailbox in source_mailboxes:
                 raise ValueError("Duplicate email route key, source mailbox, or destination alias.")
             if destination_alias.split("@", 1)[1] != gmail_profile.split("@", 1)[1]:
@@ -102,7 +117,7 @@ class EmailAgentPermissions:
             route_keys.add(route_key)
             aliases.add(destination_alias)
             source_mailboxes.add(source_mailbox)
-            routes.append(EmailSourceRoute(route_key, source_mailbox, destination_alias))
+            routes.append(EmailSourceRoute(route_key, source_mailbox, destination_alias, display_name))
 
         category_rows = raw.get("categories")
         if not isinstance(category_rows, list) or not category_rows:
@@ -241,7 +256,44 @@ class EmailAgentPermissions:
                     ),
                 )
             )
+        managed_labels: list[EmailManagedLabel] = []
+        managed_label_rows = raw.get("managed_labels") or []
+        if not isinstance(managed_label_rows, list):
+            raise ValueError("managed_labels must be a list.")
+        if version >= 2 and not managed_label_rows:
+            raise ValueError("Email-agent permissions version 2 requires managed_labels.")
+        managed_keys: set[str] = set()
+        managed_names: set[str] = set()
+        for row in managed_label_rows:
+            if not isinstance(row, dict):
+                raise ValueError("Every managed label must be a mapping.")
+            key = _key(row.get("key"), field="managed label key")
+            display_name = str(row.get("display_name") or "").strip()
+            gmail_label_name = str(row.get("gmail_label_name") or f"Jarvis/{display_name}").strip()
+            enabled = _bool(row.get("enabled"), True)
+            if not display_name or len(display_name) > 100 or any(ord(char) < 32 for char in display_name):
+                raise ValueError("Every managed label requires a bounded display_name.")
+            if (
+                not gmail_label_name.casefold().startswith("jarvis/")
+                or len(gmail_label_name) > 225
+                or any(ord(char) < 32 for char in gmail_label_name)
+            ):
+                raise ValueError("Managed Gmail labels must use the Jarvis/ namespace and contain no controls.")
+            folded_name = gmail_label_name.casefold()
+            if key in managed_keys or folded_name in managed_names:
+                raise ValueError("Duplicate managed label key or Gmail label name.")
+            managed_keys.add(key)
+            managed_names.add(folded_name)
+            managed_labels.append(
+                EmailManagedLabel(
+                    key=key,
+                    display_name=display_name,
+                    gmail_label_name=gmail_label_name,
+                    enabled=enabled,
+                )
+            )
         return cls(
+            version=version,
             gmail_profile=gmail_profile,
             google_account_key=google_account_key,
             taxonomy_version=taxonomy_version,
@@ -249,6 +301,7 @@ class EmailAgentPermissions:
             categories=tuple(categories),
             access_grants=tuple(grants),
             classification_rules=tuple(rules),
+            managed_labels=tuple(managed_labels),
         )
 
     @property
@@ -262,6 +315,14 @@ class EmailAgentPermissions:
             for item in self.categories
             if item.gmail_label_name
         }
+
+    @property
+    def managed_label_keys(self) -> frozenset[str]:
+        return frozenset(item.key for item in self.managed_labels if item.enabled)
+
+    @property
+    def additive_label_writes_ready(self) -> bool:
+        return self.version >= 2 and bool(self.managed_label_keys)
 
     @property
     def destination_aliases(self) -> tuple[str, ...]:

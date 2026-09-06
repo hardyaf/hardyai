@@ -99,6 +99,11 @@ class RequestFlowCoordinator:
         effective_context = dict(payload.context)
         effective_context["agent_id"] = active_agent_id
         effective_context["agent_display_name"] = str(agent_context.get("display_name") or "Jarvis")
+        # Runtime dependencies are composition-owned facts. Never accept them from
+        # Discord text or an API payload; overwrite with the current server graph.
+        effective_context["available_runtime_dependencies"] = list(
+            router._available_runtime_dependencies
+        )
         if identity_binding:
             effective_context.update(
                 {

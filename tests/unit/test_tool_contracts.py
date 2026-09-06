@@ -226,6 +226,37 @@ def test_operation_identity_is_stable_across_order_delivery_and_reopen() -> None
         )
 
 
+@pytest.mark.parametrize(
+    "tool_id",
+    [
+        "email.set_read_state",
+        "email.archive_messages",
+        "email.restore_to_inbox",
+    ],
+)
+def test_reversible_email_operation_identity_ignores_message_reference_order(tool_id: str) -> None:
+    first = tool_operation_id(
+        root_request_id="discord-delivery-reversible",
+        tool_id=tool_id,
+        contract_version=1,
+        call_ordinal=1,
+        arguments={"message_refs": ["E2", "E1"], "state": "read"}
+        if tool_id == "email.set_read_state"
+        else {"message_refs": ["E2", "E1"]},
+    )
+    reordered = tool_operation_id(
+        root_request_id="discord-delivery-reversible",
+        tool_id=tool_id,
+        contract_version=1,
+        call_ordinal=1,
+        arguments={"message_refs": ["E1", "E2"], "state": "read"}
+        if tool_id == "email.set_read_state"
+        else {"message_refs": ["E1", "E2"]},
+    )
+
+    assert first == reordered
+
+
 def test_operation_and_child_identity_conflict_on_every_locked_component() -> None:
     base = tool_operation_id(
         root_request_id="root-1",
@@ -318,6 +349,7 @@ def test_envelope_binds_server_fields_descriptor_and_arguments() -> None:
         session_id="session-1",
         principal_kind="discord_user",
         principal_subject="subject-1",
+        external_user_id="external-user-1",
         user_id="operator",
         agent_id="jarvis",
         source_interface="discord",
@@ -330,6 +362,8 @@ def test_envelope_binds_server_fields_descriptor_and_arguments() -> None:
     serialized = envelope.to_dict()
     assert serialized["operation_id"].startswith("toolop_v1_")
     assert serialized["arguments"] == {"target": "fixture"}
+    assert serialized["principal_subject"] == "subject-1"
+    assert serialized["external_user_id"] == "external-user-1"
     with pytest.raises(TypeError):
         envelope.arguments["target"] = "changed"
 

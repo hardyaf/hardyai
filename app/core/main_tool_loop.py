@@ -207,6 +207,25 @@ class MainToolLoop:
                 failures=failures,
                 elapsed_ms=self._elapsed_ms(started),
             )
+        recovered_followup = False
+        if selection.mode == "no_match" and selection.reason_code == "needs_more_context":
+            followup = context.get("main_tool_followup")
+            followup_ids = followup.get("skill_ids") if isinstance(followup, dict) else None
+            eligible_followups = {
+                str(item or "").strip().casefold()
+                for item in followup_ids or []
+                if str(item or "").strip().casefold() in allowed_skill_ids
+            }
+            if len(eligible_followups) == 1:
+                selection = SkillSelection.from_mapping(
+                    {
+                        "mode": "select",
+                        "selected_skill_ids": sorted(eligible_followups),
+                    },
+                    allowed_skill_ids=allowed_skill_ids,
+                    max_selected_skills=self._limits.max_selected_skills,
+                )
+                recovered_followup = True
         if selection.mode == "no_match":
             return self._outcome(
                 status="unavailable",
@@ -252,6 +271,18 @@ class MainToolLoop:
                 elapsed_ms=self._elapsed_ms(started),
             )
 
+        initial_step = (
+            self._content_free_continuation_step(
+                marker=context.get("main_tool_followup"),
+                selected_skill_ids=set(selection.selected_skill_ids),
+                descriptors=descriptors,
+            )
+            if recovered_followup
+            or str(context.get("main_action_reason_code") or "").strip().casefold()
+            == "continuation_action"
+            else None
+        )
+
         outcome = self._run_steps(
             text=text,
             request_id=request_id,
@@ -267,6 +298,7 @@ class MainToolLoop:
             started=started,
             initial_steps=steps,
             initial_failures=failures,
+            initial_step=initial_step,
         )
         return outcome
 
@@ -480,6 +512,7 @@ class MainToolLoop:
         started: float,
         initial_steps: int,
         initial_failures: int,
+        initial_step: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         steps = initial_steps
         failures = initial_failures
@@ -501,19 +534,36 @@ class MainToolLoop:
                     steps=steps,
                     failures=failures,
                     started=started,
+                    selected_skill_ids=list(selection.selected_skill_ids),
+                    tool_ids=list(descriptors),
+                    observation_count=len(observations),
                     operation_ids=operation_ids,
                     receipt_refs=receipt_refs,
                     policies=policies,
                     committed_effect_count=committed_effect_count,
                 )
             steps += 1
-            raw_step = self._model.next_tool_step(
-                text,
-                projections,
-                [item.to_model_dict() for item in observations],
-                {tool_id: value.to_dict() for tool_id, value in temporal_contexts.items()},
-                self._model_context(context, correction=failures > 0),
-            )
+            if initial_step is not None:
+                raw_step = initial_step
+                initial_step = None
+            else:
+                raw_step = self._model.next_tool_step(
+                    text,
+                    projections,
+                    [
+                        {
+                            **item.to_model_dict(),
+                            **(
+                                {"tool_id": observation_descriptors[item.observation_ref].tool_id}
+                                if item.observation_ref in observation_descriptors
+                                else {}
+                            ),
+                        }
+                        for item in observations
+                    ],
+                    {tool_id: value.to_dict() for tool_id, value in temporal_contexts.items()},
+                    self._model_context(context, correction=failures > 0),
+                )
             try:
                 step = ModelStep.from_mapping(
                     raw_step if isinstance(raw_step, Mapping) else {},
@@ -524,7 +574,7 @@ class MainToolLoop:
                 continue
 
             if step.mode == "respond":
-                return self._outcome(
+                outcome = self._outcome(
                     status="responded",
                     message=step.message or "Completed.",
                     stop_reason="model_responded",
@@ -539,6 +589,14 @@ class MainToolLoop:
                     failures=failures,
                     elapsed_ms=self._elapsed_ms(started),
                 )
+                marker = self._content_free_followup_marker(
+                    selected_skill_ids=list(selection.selected_skill_ids),
+                    observations=observations,
+                    observation_descriptors=observation_descriptors,
+                )
+                if marker is not None:
+                    outcome["_main_tool_followup"] = marker
+                return outcome
 
             descriptor = descriptors[str(step.tool_id)]
             if not self._descriptor_unchanged(
@@ -551,6 +609,9 @@ class MainToolLoop:
                     steps=steps,
                     failures=failures,
                     started=started,
+                    selected_skill_ids=list(selection.selected_skill_ids),
+                    tool_ids=list(descriptors),
+                    observation_count=len(observations),
                     operation_ids=operation_ids,
                     receipt_refs=receipt_refs,
                     policies=policies,
@@ -602,6 +663,9 @@ class MainToolLoop:
                         steps=steps,
                         failures=failures,
                         started=started,
+                        selected_skill_ids=list(selection.selected_skill_ids),
+                        tool_ids=list(descriptors),
+                        observation_count=len(observations),
                         operation_ids=operation_ids,
                         receipt_refs=receipt_refs,
                         policies=policies,
@@ -637,6 +701,9 @@ class MainToolLoop:
                     steps=steps,
                     failures=failures,
                     started=started,
+                    selected_skill_ids=list(selection.selected_skill_ids),
+                    tool_ids=list(descriptors),
+                    observation_count=len(observations),
                     operation_ids=operation_ids,
                     receipt_refs=receipt_refs,
                     policies=policies,
@@ -676,6 +743,9 @@ class MainToolLoop:
             steps=steps,
             failures=failures,
             started=started,
+            selected_skill_ids=list(selection.selected_skill_ids),
+            tool_ids=list(descriptors),
+            observation_count=len(observations),
             operation_ids=operation_ids,
             receipt_refs=receipt_refs,
             policies=policies,
@@ -1012,6 +1082,21 @@ class MainToolLoop:
             source_ref = str(claim.get("source_observation_ref") or "")
             source_observation = observation_by_ref.get(source_ref)
             source_descriptor = descriptor_by_ref.get(source_ref)
+            source_pointer = str(claim.get("source_pointer") or "")
+            destination_found, destination_value = MainToolLoop._pointer_value(
+                thaw_json(step.arguments or {}),
+                str(claim.get("destination_pointer") or ""),
+            )
+            if (source_observation is None or source_descriptor is None) and destination_found:
+                recovered = MainToolLoop._unique_transfer_source(
+                    observations=observations,
+                    observation_descriptors=descriptor_by_ref,
+                    destination_descriptor=destination_descriptor,
+                    source_pointer=source_pointer,
+                    destination_value=destination_value,
+                )
+                if recovered is not None:
+                    source_observation, source_descriptor = recovered
             if (
                 source_observation is None
                 or source_descriptor is None
@@ -1019,25 +1104,24 @@ class MainToolLoop:
                 or source_descriptor.skill_id != destination_descriptor.skill_id
             ):
                 raise ToolLoopContractError("observation_transfer_not_available_until_p9")
-            source_pointer = str(claim.get("source_pointer") or "")
             if not any(
                 field.scope == "same_domain"
                 and MainToolLoop._pointer_pattern_matches(field.pattern, source_pointer)
                 for field in source_descriptor.transferable_observation_fields
             ):
                 raise ToolLoopContractError("observation_transfer_field_denied")
-            source_found, source_value = MainToolLoop._pointer_value(
+            source_found, source_value = MainToolLoop._transfer_pointer_value(
                 thaw_json(source_observation.payload),
                 source_pointer,
-            )
-            destination_found, destination_value = MainToolLoop._pointer_value(
-                thaw_json(step.arguments or {}),
-                str(claim.get("destination_pointer") or ""),
             )
             if (
                 not source_found
                 or not destination_found
-                or canonical_json(source_value) != canonical_json(destination_value)
+                or not MainToolLoop._transfer_values_match(
+                    source_value=source_value,
+                    destination_value=destination_value,
+                    source_pointer=source_pointer,
+                )
             ):
                 raise ToolLoopContractError("observation_transfer_value_mismatch")
         request_claim_destinations = {
@@ -1060,11 +1144,49 @@ class MainToolLoop:
         normalized_text = " ".join(str(text or "").casefold().split())
         for key, value in arguments.items():
             pointer = "/" + str(key).replace("~", "~0").replace("/", "~1")
-            if pointer in claimed_destinations:
+            if pointer in claimed_destinations or any(
+                destination.startswith(pointer + "/")
+                for destination in claimed_destinations
+            ):
                 continue
             if MainToolLoop._request_value_appears(value, normalized_text):
                 continue
             raise ToolLoopContractError("argument_provenance_unproven")
+
+    @staticmethod
+    def _unique_transfer_source(
+        *,
+        observations: list[ToolObservation],
+        observation_descriptors: Mapping[str, ToolDescriptor],
+        destination_descriptor: ToolDescriptor,
+        source_pointer: str,
+        destination_value: Any,
+    ) -> tuple[ToolObservation, ToolDescriptor] | None:
+        candidates: list[tuple[ToolObservation, ToolDescriptor]] = []
+        for observation in observations:
+            descriptor = observation_descriptors.get(observation.observation_ref)
+            if (
+                descriptor is None
+                or observation.untrusted
+                or descriptor.skill_id != destination_descriptor.skill_id
+                or not any(
+                    field.scope == "same_domain"
+                    and MainToolLoop._pointer_pattern_matches(field.pattern, source_pointer)
+                    for field in descriptor.transferable_observation_fields
+                )
+            ):
+                continue
+            source_found, source_value = MainToolLoop._transfer_pointer_value(
+                thaw_json(observation.payload),
+                source_pointer,
+            )
+            if source_found and MainToolLoop._transfer_values_match(
+                source_value=source_value,
+                destination_value=destination_value,
+                source_pointer=source_pointer,
+            ):
+                candidates.append((observation, descriptor))
+        return candidates[0] if len(candidates) == 1 else None
 
     @staticmethod
     def _request_value_appears(value: Any, normalized_text: str) -> bool:
@@ -1075,7 +1197,36 @@ class MainToolLoop:
             return bool(token and token in normalized_text)
         if isinstance(value, bool) or value is None:
             return False
-        if isinstance(value, (int, float)):
+        if isinstance(value, int):
+            token = str(value).casefold()
+            if token and token in normalized_text:
+                return True
+            number_words = {
+                0: "zero",
+                1: "one",
+                2: "two",
+                3: "three",
+                4: "four",
+                5: "five",
+                6: "six",
+                7: "seven",
+                8: "eight",
+                9: "nine",
+                10: "ten",
+                11: "eleven",
+                12: "twelve",
+                13: "thirteen",
+                14: "fourteen",
+                15: "fifteen",
+                16: "sixteen",
+                17: "seventeen",
+                18: "eighteen",
+                19: "nineteen",
+                20: "twenty",
+            }
+            word = number_words.get(value)
+            return bool(word and word in normalized_text.split())
+        if isinstance(value, float):
             token = str(value).casefold()
             return bool(token and token in normalized_text)
         if isinstance(value, (list, tuple)):
@@ -1106,6 +1257,70 @@ class MainToolLoop:
                 continue
             return False, None
         return True, current
+
+    @staticmethod
+    def _transfer_pointer_value(value: Any, pointer: str) -> tuple[bool, Any]:
+        """Resolve one allowed transfer pointer, aggregating wildcard array values."""
+
+        encoded_segments = str(pointer or "")[1:].split("/")
+        segments = [
+            segment.replace("~1", "/").replace("~0", "~")
+            for segment in encoded_segments
+        ]
+        if "*" not in segments:
+            return MainToolLoop._pointer_value(value, pointer)
+        current = [value]
+        for segment in segments:
+            following: list[Any] = []
+            for item in current:
+                if segment == "*" and isinstance(item, list):
+                    following.extend(item)
+                elif isinstance(item, Mapping) and segment in item:
+                    following.append(item[segment])
+                elif (
+                    isinstance(item, list)
+                    and segment.isdigit()
+                    and int(segment) < len(item)
+                ):
+                    following.append(item[int(segment)])
+            if not following:
+                return False, None
+            current = following
+        return True, current
+
+    @staticmethod
+    def _transfer_values_match(
+        *,
+        source_value: Any,
+        destination_value: Any,
+        source_pointer: str,
+    ) -> bool:
+        if canonical_json(source_value) == canonical_json(destination_value):
+            return True
+        if not isinstance(source_value, list) and isinstance(destination_value, list):
+            return len(destination_value) == 1 and canonical_json(
+                source_value
+            ) == canonical_json(destination_value[0])
+        if "*" not in str(source_pointer or ""):
+            return False
+        source_values = source_value if isinstance(source_value, list) else [source_value]
+        destination_values = (
+            destination_value if isinstance(destination_value, list) else [destination_value]
+        )
+        scalar_types = (str, int, bool)
+        if (
+            not source_values
+            or not destination_values
+            or len(destination_values) > len(source_values)
+            or any(not isinstance(item, scalar_types) for item in source_values)
+            or any(not isinstance(item, scalar_types) for item in destination_values)
+        ):
+            return False
+        source_canonical = {canonical_json(item) for item in source_values}
+        destination_canonical = [canonical_json(item) for item in destination_values]
+        return len(destination_canonical) == len(set(destination_canonical)) and all(
+            item in source_canonical for item in destination_canonical
+        )
 
     @staticmethod
     def _pointer_pattern_matches(pattern: str, pointer: str) -> bool:
@@ -1165,6 +1380,8 @@ class MainToolLoop:
         agent_id: str,
         source_interface: str,
     ) -> dict[str, Any]:
+        session_context = getattr(session, "context_reference", {})
+        session_context = session_context if isinstance(session_context, dict) else {}
         return {
             **dict(request_context),
             "requested_by_user_id": user_id,
@@ -1173,7 +1390,104 @@ class MainToolLoop:
             "source_interface": source_interface,
             "source": source_interface,
             "session_id": str(getattr(session, "session_id", "") or ""),
+            "main_tool_followup": session_context.get("main_tool_followup"),
         }
+
+    @staticmethod
+    def _content_free_followup_marker(
+        *,
+        selected_skill_ids: list[str],
+        observations: list[ToolObservation],
+        observation_descriptors: Mapping[str, ToolDescriptor],
+    ) -> dict[str, Any] | None:
+        continuations: list[dict[str, str]] = []
+        for observation in observations:
+            if observation.status != "ok":
+                continue
+            descriptor = observation_descriptors.get(observation.observation_ref)
+            if descriptor is None or descriptor.effect != "read":
+                continue
+            input_schema = thaw_json(descriptor.input_schema)
+            properties = input_schema.get("properties") if isinstance(input_schema, dict) else None
+            payload = thaw_json(observation.payload)
+            if not isinstance(properties, dict) or not isinstance(payload, dict):
+                continue
+            for output_field, value in payload.items():
+                output_name = str(output_field or "").strip()
+                if not output_name.startswith("next_") or not value:
+                    continue
+                argument_field = output_name.removeprefix("next_")
+                if argument_field not in properties:
+                    continue
+                continuations.append(
+                    {
+                        "skill_id": descriptor.skill_id,
+                        "tool_id": descriptor.tool_id,
+                        "argument_field": argument_field,
+                        "argument_literal": "next",
+                    }
+                )
+        unique = {
+            (item["skill_id"], item["tool_id"], item["argument_field"]): item
+            for item in continuations
+        }
+        if not unique:
+            return None
+        skill_ids = [
+            str(item).strip().casefold()
+            for item in selected_skill_ids[:3]
+            if str(item).strip()
+        ]
+        return {
+            "skill_ids": skill_ids,
+            "continuations": list(unique.values())[:3],
+        }
+
+    @staticmethod
+    def _content_free_continuation_step(
+        *,
+        marker: Any,
+        selected_skill_ids: set[str],
+        descriptors: Mapping[str, ToolDescriptor],
+    ) -> dict[str, Any] | None:
+        continuations = marker.get("continuations") if isinstance(marker, dict) else None
+        candidates: list[dict[str, Any]] = []
+        for item in continuations or []:
+            if not isinstance(item, dict):
+                continue
+            skill_id = str(item.get("skill_id") or "").strip().casefold()
+            tool_id = str(item.get("tool_id") or "").strip().casefold()
+            argument_field = str(item.get("argument_field") or "").strip()
+            argument_literal = str(item.get("argument_literal") or "").strip().casefold()
+            descriptor = descriptors.get(tool_id)
+            if (
+                descriptor is None
+                or descriptor.effect != "read"
+                or skill_id not in selected_skill_ids
+                or descriptor.skill_id != skill_id
+                or argument_literal != "next"
+            ):
+                continue
+            schema = thaw_json(descriptor.input_schema)
+            properties = schema.get("properties") if isinstance(schema, dict) else None
+            if not isinstance(properties, dict) or argument_field not in properties:
+                continue
+            candidates.append(
+                {
+                    "mode": "call_tool",
+                    "tool_id": tool_id,
+                    "call_id": f"session-continuation-{tool_id.replace('.', '-')}",
+                    "arguments": {argument_field: argument_literal},
+                    "provenance_claims": [
+                        {
+                            "kind": "request_derived",
+                            "destination_pointer": f"/{argument_field}",
+                            "derivation": "interpret",
+                        }
+                    ],
+                }
+            )
+        return candidates[0] if len(candidates) == 1 else None
 
     def _model_context(
         self,
@@ -1189,6 +1503,7 @@ class MainToolLoop:
             "requested_by_user_id": context.get("requested_by_user_id"),
             "session_summary": context.get("session_summary"),
             "recent_turns": context.get("recent_turns"),
+            "main_tool_followup": context.get("main_tool_followup"),
         }
         if isinstance(pending, dict):
             value["pending_tool_call"] = {
@@ -1244,6 +1559,9 @@ class MainToolLoop:
         steps: int,
         failures: int,
         started: float,
+        selected_skill_ids: list[str],
+        tool_ids: list[str],
+        observation_count: int,
         operation_ids: list[str],
         receipt_refs: list[str],
         policies: list[str],
@@ -1263,8 +1581,11 @@ class MainToolLoop:
             status=status,
             message=message,
             stop_reason=reason,
+            selected_skill_ids=selected_skill_ids,
+            tool_ids=tool_ids,
             operation_ids=operation_ids,
             receipt_refs=receipt_refs,
+            observation_count=observation_count,
             committed_effect_count=committed,
             persistence=self._most_restrictive_policy(policies),
             steps=steps,

@@ -111,7 +111,10 @@ class MainActionCommitment:
                 "missing_referent",
                 "ambiguous_goal",
             }),
-            "execute_action": ({"mode", "confidence", "reason_code"}, {"plausible_action"}),
+            "execute_action": (
+                {"mode", "confidence", "reason_code"},
+                {"plausible_action", "continuation_action"},
+            ),
         }
         if mode not in shapes:
             raise ToolLoopContractError("commitment_mode_invalid")

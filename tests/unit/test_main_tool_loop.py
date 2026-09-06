@@ -12,9 +12,10 @@ from app.core.tool_loop_types import (
     ModelStep,
     RequestTemporalContext,
     SkillSelection,
+    ToolObservation,
     ToolLoopContractError,
 )
-from app.skills.tool_contracts import ToolDescriptor
+from app.skills.tool_contracts import FrozenDict, ToolDescriptor
 
 
 def _descriptor(
@@ -143,6 +144,52 @@ def _list_chain_descriptor(*, tool_id: str) -> ToolDescriptor:
             "timeout_seconds": 10,
             "max_result_items": 50,
             "max_observation_chars": 2_000,
+            "legacy_intents": [],
+            "interactive": True,
+        }
+    )
+
+
+def _pagination_descriptor() -> ToolDescriptor:
+    return ToolDescriptor.from_mapping(
+        {
+            "tool_id": "fixture.page",
+            "skill_id": "skill.fixture.core",
+            "contract_version": 1,
+            "purpose": "Read one bounded page and continue with a cursor.",
+            "input_schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [],
+                "properties": {
+                    "cursor": {"type": "string", "minLength": 1, "maxLength": 64},
+                },
+            },
+            "observation_schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["items", "next_cursor"],
+                "properties": {
+                    "items": {
+                        "type": "array",
+                        "maxItems": 4,
+                        "items": {"type": "string", "minLength": 1, "maxLength": 64},
+                    },
+                    "next_cursor": {"type": "string", "minLength": 1, "maxLength": 64},
+                },
+            },
+            "effect": "read",
+            "approval_rule": "none",
+            "approval_conditions": [],
+            "sensitivity": "private",
+            "persistence": "no_store",
+            "idempotency": "not_applicable",
+            "effect_cardinality": "single",
+            "transferable_observation_fields": [],
+            "runtime_dependencies": [],
+            "timeout_seconds": 10,
+            "max_result_items": 4,
+            "max_observation_chars": 1_000,
             "legacy_intents": [],
             "interactive": True,
         }
@@ -353,16 +400,148 @@ def _loop(
     return loop, registry, executor, events
 
 
-def _run(loop: MainToolLoop, *, text: str = "look up alpha") -> dict[str, Any]:
+def _run(
+    loop: MainToolLoop,
+    *,
+    text: str = "look up alpha",
+    session: FakeSession | None = None,
+    request_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     return loop.run(
         text=text,
         request_id="request-1",
-        session=FakeSession(),
+        session=session or FakeSession(),
         user_id="operator",
         agent_id="jarvis",
         source_interface="discord",
-        request_context={"discord_channel_id": "111111111111111111"},
+        request_context={
+            "discord_channel_id": "111111111111111111",
+            **dict(request_context or {}),
+        },
     )
+
+
+def test_needs_more_context_reuses_one_content_free_live_session_skill_marker():
+    descriptor = _descriptor(tool_id="fixture.lookup")
+    model = ScriptedModel(
+        selections=[
+            {
+                "mode": "no_match",
+                "selected_skill_ids": [],
+                "reason_code": "needs_more_context",
+            }
+        ],
+        steps=[_respond("Continued safely.")],
+    )
+    loop, _, executor, _ = _loop(model=model, descriptors=[descriptor])
+    session = FakeSession(
+        context_reference={
+            "main_tool_followup": {"skill_ids": ["skill.fixture.core"]}
+        }
+    )
+
+    outcome = _run(loop, text="continue", session=session)
+
+    assert outcome["status"] == "responded"
+    assert outcome["selected_skill_ids"] == ["skill.fixture.core"]
+    assert executor.calls == []
+
+
+def test_content_free_continuation_marker_resumes_one_cursor_read():
+    descriptor = _pagination_descriptor()
+    model = ScriptedModel(
+        selections=[
+            {
+                "mode": "no_match",
+                "selected_skill_ids": [],
+                "reason_code": "needs_more_context",
+            }
+        ],
+        steps=[_respond("Next page loaded.")],
+    )
+    loop, _, executor, _ = _loop(
+        model=model,
+        descriptors=[descriptor],
+        results=[
+            {
+                "status": "ok",
+                "message": "Loaded the next page.",
+                "payload": {"items": ["three", "four"], "next_cursor": "cursor_v1_two"},
+            }
+        ],
+    )
+    session = FakeSession(
+        context_reference={
+            "main_tool_followup": {
+                "skill_ids": ["skill.fixture.core"],
+                "continuations": [
+                    {
+                        "skill_id": "skill.fixture.core",
+                        "tool_id": "fixture.page",
+                        "argument_field": "cursor",
+                        "argument_literal": "next",
+                    }
+                ],
+            }
+        }
+    )
+
+    outcome = _run(loop, text="show the next page", session=session)
+
+    assert outcome["status"] == "responded"
+    assert len(executor.calls) == 1
+    assert executor.calls[0]["arguments"] == {"cursor": "next"}
+    assert outcome["_main_tool_followup"]["continuations"][0] == {
+        "skill_id": "skill.fixture.core",
+        "tool_id": "fixture.page",
+        "argument_field": "cursor",
+        "argument_literal": "next",
+    }
+
+
+def test_typed_continuation_commitment_resumes_cursor_after_direct_skill_selection():
+    descriptor = _pagination_descriptor()
+    model = ScriptedModel(
+        selections=[_selection()],
+        steps=[_respond("Next page loaded.")],
+    )
+    loop, _, executor, _ = _loop(
+        model=model,
+        descriptors=[descriptor],
+        results=[
+            {
+                "status": "ok",
+                "message": "Loaded the next page.",
+                "payload": {"items": ["three", "four"], "next_cursor": "cursor_v1_two"},
+            }
+        ],
+    )
+    session = FakeSession(
+        context_reference={
+            "main_tool_followup": {
+                "skill_ids": ["skill.fixture.core"],
+                "continuations": [
+                    {
+                        "skill_id": "skill.fixture.core",
+                        "tool_id": "fixture.page",
+                        "argument_field": "cursor",
+                        "argument_literal": "next",
+                    }
+                ],
+            }
+        }
+    )
+
+    outcome = _run(
+        loop,
+        text="show the next page",
+        session=session,
+        request_context={"main_action_reason_code": "continuation_action"},
+    )
+
+    assert outcome["status"] == "responded"
+    assert len(executor.calls) == 1
+    assert executor.calls[0]["arguments"] == {"cursor": "next"}
 
 
 def test_strict_selection_step_and_temporal_contracts_reject_authority_and_unknowns():
@@ -429,6 +608,243 @@ def test_request_provenance_destination_must_exist_in_arguments_without_observat
             step=step,
             text="Look up alpha.",
             observations=[],
+        )
+
+
+def test_observation_provenance_for_array_element_proves_parent_argument():
+    source = _list_chain_descriptor(tool_id="lists.create_collection")
+    destination = _list_chain_descriptor(tool_id="lists.add_items")
+    observation = ToolObservation(
+        status="ok",
+        observation_ref="obs_v1_source",
+        payload=FrozenDict.from_mapping(
+            {"collection": {"collection_ref": "milk"}}
+        ),
+        safe_message="Created.",
+        missing_fields=(),
+        retryable=False,
+        committed_effect=True,
+        receipt_refs=(),
+        review_refs=(),
+        job_refs=(),
+        untrusted=False,
+    )
+    step = ModelStep.from_mapping(
+        {
+            "mode": "call_tool",
+            "tool_id": "lists.add_items",
+            "call_id": "copy-one-array-value",
+            "arguments": {"items": ["milk"]},
+            "provenance_claims": [
+                {
+                    "kind": "observation_derived",
+                    "destination_pointer": "/items/0",
+                    "source_observation_ref": "obs_v1_source",
+                    "source_pointer": "/collection/collection_ref",
+                    "derivation": "copy",
+                }
+            ],
+        },
+        allowed_tool_ids={"lists.add_items"},
+    )
+
+    MainToolLoop._validate_p3_provenance(
+        step=step,
+        text="add it",
+        observations=[observation],
+        destination_descriptor=destination,
+        observation_descriptors={"obs_v1_source": source},
+    )
+
+
+def test_observation_provenance_wildcard_safely_copies_catalog_array():
+    source = ToolDescriptor.from_mapping(
+        {
+            **_descriptor(tool_id="fixture.list_mailboxes").to_storage_dict(),
+            "input_schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [],
+                "properties": {},
+            },
+            "observation_schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["mailboxes"],
+                "properties": {
+                    "mailboxes": {
+                        "type": "array",
+                        "minItems": 0,
+                        "maxItems": 8,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["mailbox_ref"],
+                            "properties": {
+                                "mailbox_ref": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 255,
+                                }
+                            },
+                        },
+                    }
+                },
+            },
+            "transferable_observation_fields": [
+                {"pattern": "/mailboxes/*/mailbox_ref", "scope": "same_domain"}
+            ],
+        }
+    )
+    destination = ToolDescriptor.from_mapping(
+        {
+            **_descriptor(tool_id="fixture.query_mailboxes").to_storage_dict(),
+            "input_schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [],
+                "properties": {
+                    "mailbox_refs": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 8,
+                        "uniqueItems": True,
+                        "items": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 255,
+                        },
+                    }
+                },
+            },
+        }
+    )
+    observation = ToolObservation(
+        status="ok",
+        observation_ref="obs_v1_mailboxes",
+        payload=FrozenDict.from_mapping(
+            {
+                "mailboxes": [
+                    {"mailbox_ref": "mailbox_v1_one"},
+                    {"mailbox_ref": "mailbox_v1_two"},
+                ]
+            }
+        ),
+        safe_message="Catalog loaded.",
+        missing_fields=(),
+        retryable=False,
+        committed_effect=False,
+        receipt_refs=(),
+        review_refs=(),
+        job_refs=(),
+        untrusted=False,
+    )
+    step = ModelStep.from_mapping(
+        {
+            "mode": "call_tool",
+            "tool_id": "fixture.query_mailboxes",
+            "call_id": "copy-mailbox-catalog",
+            "arguments": {
+                "mailbox_refs": ["mailbox_v1_one", "mailbox_v1_two"]
+            },
+            "provenance_claims": [
+                {
+                    "kind": "observation_derived",
+                    "destination_pointer": "/mailbox_refs",
+                    "source_observation_ref": "obs_v1_mailboxes",
+                    "source_pointer": "/mailboxes/*/mailbox_ref",
+                    "derivation": "copy",
+                }
+            ],
+        },
+        allowed_tool_ids={"fixture.query_mailboxes"},
+    )
+
+    MainToolLoop._validate_p3_provenance(
+        step=step,
+        text="find all email",
+        observations=[observation],
+        destination_descriptor=destination,
+        observation_descriptors={"obs_v1_mailboxes": source},
+    )
+
+    subset_step = ModelStep.from_mapping(
+        {
+            "mode": "call_tool",
+            "tool_id": "fixture.query_mailboxes",
+            "call_id": "copy-mailbox-catalog-subset",
+            "arguments": {"mailbox_refs": ["mailbox_v1_one"]},
+            "provenance_claims": [
+                {
+                    "kind": "observation_derived",
+                    "destination_pointer": "/mailbox_refs",
+                    "source_observation_ref": "obs_v1_mailboxes",
+                    "source_pointer": "/mailboxes/*/mailbox_ref",
+                    "derivation": "copy",
+                }
+            ],
+        },
+        allowed_tool_ids={"fixture.query_mailboxes"},
+    )
+    MainToolLoop._validate_p3_provenance(
+        step=subset_step,
+        text="find one mailbox",
+        observations=[observation],
+        destination_descriptor=destination,
+        observation_descriptors={"obs_v1_mailboxes": source},
+    )
+
+    recoverable_ref_step = ModelStep.from_mapping(
+        {
+            "mode": "call_tool",
+            "tool_id": "fixture.query_mailboxes",
+            "call_id": "copy-mailbox-catalog-recover-ref",
+            "arguments": {"mailbox_refs": ["mailbox_v1_one"]},
+            "provenance_claims": [
+                {
+                    "kind": "observation_derived",
+                    "destination_pointer": "/mailbox_refs",
+                    "source_observation_ref": "obs_v1_model_echo_mismatch",
+                    "source_pointer": "/mailboxes/*/mailbox_ref",
+                    "derivation": "copy",
+                }
+            ],
+        },
+        allowed_tool_ids={"fixture.query_mailboxes"},
+    )
+    MainToolLoop._validate_p3_provenance(
+        step=recoverable_ref_step,
+        text="find one mailbox",
+        observations=[observation],
+        destination_descriptor=destination,
+        observation_descriptors={"obs_v1_mailboxes": source},
+    )
+
+    mismatched_step = ModelStep.from_mapping(
+        {
+            "mode": "call_tool",
+            "tool_id": "fixture.query_mailboxes",
+            "call_id": "copy-mailbox-catalog-mismatch",
+            "arguments": {"mailbox_refs": ["mailbox_v1_not_observed"]},
+            "provenance_claims": [
+                {
+                    "kind": "observation_derived",
+                    "destination_pointer": "/mailbox_refs",
+                    "source_observation_ref": "obs_v1_mailboxes",
+                    "source_pointer": "/mailboxes/*/mailbox_ref",
+                    "derivation": "copy",
+                }
+            ],
+        },
+        allowed_tool_ids={"fixture.query_mailboxes"},
+    )
+    with pytest.raises(ToolLoopContractError, match="observation_transfer_value_mismatch"):
+        MainToolLoop._validate_p3_provenance(
+            step=mismatched_step,
+            text="find all email",
+            observations=[observation],
+            destination_descriptor=destination,
+            observation_descriptors={"obs_v1_mailboxes": source},
         )
 
 
@@ -580,6 +996,7 @@ def test_structured_request_value_requires_every_leaf_to_appear_in_request() -> 
     text = "add milk and eggs to weekend"
 
     assert MainToolLoop._request_value_appears(["milk", "eggs"], text)
+    assert MainToolLoop._request_value_appears(2, "show two recent items")
     assert not MainToolLoop._request_value_appears(["milk", "invented"], text)
     assert not MainToolLoop._request_value_appears([], text)
 
@@ -713,6 +1130,8 @@ def test_invalid_and_unauthorized_steps_stop_at_failure_limit_without_dispatch()
 
     assert outcome["status"] == "safe_stop"
     assert outcome["stop_reason"] == "failure_limit"
+    assert outcome["selected_skill_ids"] == ["skill.fixture.core"]
+    assert outcome["tool_ids"] == ["fixture.lookup"]
     assert executor.calls == []
     assert [context["schema_correction"] for context in model.step_contexts] == [False, True]
 
@@ -907,6 +1326,7 @@ def test_multiple_observations_are_bounded_and_untrusted_injection_cannot_supply
     assert outcome["stop_reason"] == "failure_limit"
     assert len(executor.calls) == 1
     assert model.observation_prompts[1][0]["untrusted"] is True
+    assert model.observation_prompts[1][0]["tool_id"] == "fixture.lookup"
 
 
 def test_distinct_calls_advance_once_and_schema_retry_does_not_consume_ordinal():

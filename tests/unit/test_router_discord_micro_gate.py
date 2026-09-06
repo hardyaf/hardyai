@@ -172,6 +172,7 @@ def _build_router(
     main_tool_execution_mode: str = "off",
     main_tool_enabled_domains: tuple[str, ...] = (),
     main_tool_enabled_operations: tuple[str, ...] = (),
+    available_runtime_dependencies: tuple[str, ...] = (),
     legacy_micro_routing_enabled: bool = True,
 ) -> tuple[JarvisRouter, EventLogService]:
     event_log = EventLogService()
@@ -197,6 +198,7 @@ def _build_router(
         main_tool_execution_mode=main_tool_execution_mode,
         main_tool_enabled_domains=main_tool_enabled_domains,
         main_tool_enabled_operations=main_tool_enabled_operations,
+        available_runtime_dependencies=available_runtime_dependencies,
         legacy_micro_routing_enabled=legacy_micro_routing_enabled,
     )
     return router, event_log
@@ -217,6 +219,21 @@ def _discord_request(*, text: str, explicit: bool, session_id: str) -> AskReques
             "agent_display_name": "Jarvis",
         },
     )
+
+
+def test_server_runtime_dependencies_replace_request_claims():
+    router, _ = _build_router(
+        micro_backend=_RecordingMicroBackend(payload={}),
+        available_runtime_dependencies=("email_operations", "email_operations"),
+    )
+    request = _discord_request(text="Manage that email.", explicit=False, session_id="runtime-deps")
+    request.context["available_runtime_dependencies"] = ["document_processing"]
+
+    prepared = router._request_flow._prepare_turn(request)
+
+    assert prepared.effective_context["available_runtime_dependencies"] == [
+        "email_operations"
+    ]
 
 
 def test_unprefixed_discord_statement_bypasses_micro_and_reaches_main():

@@ -508,6 +508,40 @@ class DurableJobRepository:
             )
             return int(cur.rowcount or 0) == 1
 
+    def checkpoint_payload(
+        self,
+        *,
+        job_id: str,
+        worker_id: str,
+        fencing_token: int,
+        payload: dict[str, Any],
+    ) -> bool:
+        """Replace a running job's bounded checkpoint under its active fenced lease."""
+
+        if not isinstance(payload, dict):
+            raise ValueError("job checkpoint payload must be an object")
+        encoded = _json_dump(payload)
+        if len(encoded) > 65536:
+            raise ValueError("job checkpoint payload exceeds 65536 characters")
+        with self._transaction(immediate=True) as cur:
+            cur.execute(
+                """
+                UPDATE durable_jobs
+                SET payload_json = ?, updated_at = ?
+                WHERE job_id = ? AND status = ? AND lease_owner = ?
+                  AND lease_fencing_token = ? AND cancel_requested_at IS NULL
+                """,
+                (
+                    encoded,
+                    _iso_utc(),
+                    job_id,
+                    JobStatus.RUNNING.value,
+                    worker_id,
+                    int(fencing_token),
+                ),
+            )
+            return int(cur.rowcount or 0) == 1
+
     def set_provider_operation(
         self,
         *,

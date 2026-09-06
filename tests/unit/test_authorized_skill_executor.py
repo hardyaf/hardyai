@@ -294,6 +294,7 @@ def _typed_context() -> dict:
         "session_id": "session-1",
         "principal_kind": "discord_user",
         "principal_subject": "subject-1",
+        "external_user_id": "external-user-1",
     }
 
 
@@ -381,6 +382,8 @@ def test_typed_execution_canonicalizes_before_identity_and_dispatches_generic_do
     assert len(handler.calls) == 1
     envelope = handler.calls[0][0]
     assert envelope.arguments == {"target_ref": "resource-1"}
+    assert envelope.principal_subject == "subject-1"
+    assert envelope.external_user_id == "external-user-1"
     assert "alias" not in envelope.arguments_hash
 
 

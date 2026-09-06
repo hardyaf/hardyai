@@ -316,6 +316,10 @@ def test_generic_main_commitment_prompt_has_no_legacy_intent_catalog_or_action_e
     assert '"intent":' not in prompt
     assert '"entities":' not in prompt
     assert '"mode":"execute_action"' in prompt
+    assert '"reason_code":"missing_referent|ambiguous_goal"' not in prompt
+    assert '"reason_code":"missing_referent"' in prompt
+    assert '"reason_code":"ambiguous_goal"' in prompt
+    assert "unresolved capability-local referent is still a plausible action" in prompt
 
 
 def test_tool_selection_and_step_prompts_treat_catalog_and_observations_as_data():
@@ -332,8 +336,10 @@ def test_tool_selection_and_step_prompts_treat_catalog_and_observations_as_data(
                 "availability": "available",
             }
         ],
-        context={},
+        context={"main_tool_followup": {"skill_ids": ["synthetic.unindexed"]}},
     )
+    assert "Content-free live-session capability marker" in selection_prompt
+    assert '"skill_ids":["synthetic.unindexed"]' in selection_prompt
     step_prompt = backend._build_tool_step_prompt(
         text="inspect it",
         selected_tools=[{"tool_id": "synthetic.inspect", "input_schema": {"type": "object"}}],
@@ -354,12 +360,25 @@ def test_tool_selection_and_step_prompts_treat_catalog_and_observations_as_data(
     assert "calling submit_model_step exactly once" in step_prompt
     assert "does not execute a Jarvis capability" in step_prompt
     assert "Never call a business tool through the provider-native tool channel" in step_prompt
+    assert "Never invent modes such as unsupported, unavailable, refuse, no_match" in step_prompt
+    assert "use the respond shape with a concise truthful message" in step_prompt
     assert step_prompt.endswith("Call submit_model_step now with the one immediate decision:")
     assert "planning feedback, not an automatic reason to stop" in step_prompt
+    assert "must call that catalog next before asking the user" in step_prompt
+    assert "human-readable resource name supplied by the user is a selector value" in step_prompt
+    assert "from/by names an originator or sender" in step_prompt
+    assert "map every independent constraint in the request" in step_prompt
+    assert "Supported constraints compose as an intersection" in step_prompt
+    assert "An omitted optional selector means the authorized unfiltered scope" in step_prompt
+    assert "every nonliteral argument must be covered" in step_prompt
+    assert "Copy source_observation_ref exactly and completely" in step_prompt
     assert "Never invent a reference" in step_prompt
     assert "do not creatively rename or embellish" in step_prompt
     assert '"kind":"observation_derived"' in step_prompt
     assert "Schema correction retry: false" in step_prompt
+    assert "Semantic correction: none" in step_prompt
+    assert "Clarifying for an optional filter is invalid" in step_prompt
+    assert "If no selected tool can achieve that outcome" in step_prompt
     assert "Never use 23:59:59 as an interval end" in step_prompt
     assert "for example /start, never arguments/start" in step_prompt
     assert "DISPATCH AN UNRELATED TOOL" in step_prompt
@@ -481,6 +500,7 @@ def test_main_conversation_and_turn_decision_apply_separate_thinking_policies(mo
         model="test-model",
         think="low",
         turn_decision_think=False,
+        tool_step_think="medium",
     )
 
     assert backend.respond("explain this", context={}) == "A concise answer."
@@ -494,12 +514,13 @@ def test_main_conversation_and_turn_decision_apply_separate_thinking_policies(mo
     ) == {"mode": "respond", "message": "Tool answer."}
     assert calls[0]["think"] == "low"
     assert calls[1]["think"] is False
-    assert calls[2]["think"] is False
+    assert calls[2]["think"] == "medium"
     assert len(calls[2]["tools"]) == 1
     assert calls[2]["tools"][0]["function"]["name"] == "submit_model_step"
     assert backend.status()["thinking_mode"] == {
         "conversation": "low",
         "turn_decision": False,
+        "tool_step": "medium",
     }
 
 
@@ -574,6 +595,1156 @@ def test_main_tool_step_uses_only_typed_submission_wrapper_and_normalizes_provid
     assert "lists.add_items" not in {
         tool["function"]["name"] for tool in calls[0]["json"]["tools"]
     }
+
+
+def test_main_tool_step_retries_a_structurally_invalid_visible_step(monkeypatch):
+    backend = OllamaMainConversationBackend(
+        base_url="http://localhost:11434",
+        model="test-model",
+    )
+    generated = iter(
+        [
+            {
+                "mode": "respond",
+                "message": "Catalog only.",
+                "tool_id": "fixture.lookup",
+            },
+            {
+                "mode": "call_tool",
+                "tool_id": "fixture.lookup",
+                "call_id": "valid-retry",
+                "arguments": {},
+            },
+        ]
+    )
+    prompts = []
+
+    def generate(*, prompt):
+        prompts.append(prompt)
+        return next(generated)
+
+    monkeypatch.setattr(backend, "_generate_typed_step", generate)
+
+    step = backend.next_tool_step(
+        "look it up",
+        [
+            {
+                "tool_id": "fixture.lookup",
+                "input_schema": {"type": "object", "required": [], "properties": {}},
+            }
+        ],
+        [],
+        {},
+        {},
+    )
+
+    assert step == {
+        "mode": "call_tool",
+        "tool_id": "fixture.lookup",
+        "call_id": "valid-retry",
+        "arguments": {},
+    }
+    assert len(prompts) == 2
+    assert "typed_step_invalid_retry" in prompts[1]
+
+
+def test_main_tool_step_replans_optional_field_clarification(monkeypatch):
+    class Response:
+        def __init__(self, arguments):
+            self._arguments = arguments
+
+        @staticmethod
+        def raise_for_status():
+            return None
+
+        def json(self):
+            return {
+                "message": {
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "submit_model_step",
+                                "arguments": self._arguments,
+                            }
+                        }
+                    ],
+                },
+                "done_reason": "stop",
+            }
+
+    responses = iter(
+        [
+            Response(
+                {
+                    "mode": "clarify",
+                    "tool_id": "fixture.query",
+                    "arguments": {},
+                    "missing_fields": ["filter"],
+                    "question": "Which filter?",
+                }
+            ),
+            Response(
+                {
+                    "mode": "call_tool",
+                    "tool_id": "fixture.catalog",
+                    "call_id": "catalog-step",
+                    "arguments": {},
+                }
+            ),
+        ]
+    )
+    calls = []
+
+    def fake_post(url, *, json, timeout, headers):
+        calls.append(json)
+        return next(responses)
+
+    monkeypatch.setattr("app.core.main_backend.httpx.post", fake_post)
+    backend = OllamaMainConversationBackend(base_url="http://localhost:11434", model="test-model")
+
+    step = backend.next_tool_step(
+        "find the named resource",
+        [
+            {
+                "tool_id": "fixture.query",
+                "input_schema": {
+                    "type": "object",
+                    "required": [],
+                    "properties": {"filter": {"type": "string"}},
+                },
+            },
+            {
+                "tool_id": "fixture.catalog",
+                "input_schema": {"type": "object", "required": [], "properties": {}},
+            },
+        ],
+        [],
+        {},
+        {},
+    )
+
+    assert step == {
+        "mode": "call_tool",
+        "tool_id": "fixture.catalog",
+        "call_id": "catalog-step",
+        "arguments": {},
+    }
+    assert len(calls) == 2
+    assert (
+        "clarification_requires_absent_required_schema_field"
+        in calls[1]["messages"][0]["content"]
+    )
+
+
+def test_main_tool_step_allows_truly_missing_required_field():
+    assert OllamaMainConversationBackend._tool_step_semantic_issue(
+        step={
+            "mode": "clarify",
+            "tool_id": "fixture.lookup",
+            "arguments": {},
+            "missing_fields": ["target"],
+            "question": "Which target?",
+        },
+        selected_tools=[
+            {
+                "tool_id": "fixture.lookup",
+                "input_schema": {
+                    "type": "object",
+                    "required": ["target"],
+                    "properties": {"target": {"type": "string"}},
+                },
+            }
+        ],
+    ) == ""
+
+
+def test_main_tool_step_reviews_every_clarification_before_returning_it():
+    assert OllamaMainConversationBackend._tool_step_requires_review(
+        step={
+            "mode": "clarify",
+            "tool_id": "fixture.lookup",
+            "arguments": {},
+            "missing_fields": ["target"],
+            "question": "Which target?",
+        },
+        selected_tools=[
+            {
+                "tool_id": "fixture.lookup",
+                "input_schema": {
+                    "type": "object",
+                    "required": ["target"],
+                    "properties": {"target": {"type": "string"}},
+                },
+            }
+        ],
+        observations=[],
+    ) is True
+
+
+def test_main_tool_step_rereasons_after_repeated_identical_clarification(monkeypatch):
+    backend = OllamaMainConversationBackend(
+        base_url="http://localhost:11434",
+        model="test-model",
+    )
+    responses = iter(
+        [
+            {
+                "mode": "clarify",
+                "tool_id": "fixture.create",
+                "arguments": {},
+                "missing_fields": ["name"],
+                "question": "What name?",
+            },
+            {
+                "mode": "clarify",
+                "tool_id": "fixture.create",
+                "arguments": {},
+                "missing_fields": ["name"],
+                "question": "What name?",
+            },
+            {
+                "mode": "call_tool",
+                "tool_id": "fixture.create",
+                "call_id": "create-road-trip",
+                "arguments": {"name": "road trip"},
+                "provenance_claims": [
+                    {
+                        "kind": "request_derived",
+                        "destination_pointer": "/name",
+                        "derivation": "extract",
+                    }
+                ],
+            },
+        ]
+    )
+    prompts = []
+
+    def generate(*, prompt):
+        prompts.append(prompt)
+        return next(responses)
+
+    monkeypatch.setattr(backend, "_generate_typed_step", generate)
+    tools = [
+        {
+            "tool_id": "fixture.create",
+            "input_schema": {
+                "type": "object",
+                "required": ["name"],
+                "properties": {"name": {"type": "string"}},
+            },
+        }
+    ]
+
+    step = backend.next_tool_step(
+        "make a road trip collection",
+        tools,
+        [],
+        {},
+        {},
+    )
+
+    assert step is not None
+    assert step["mode"] == "call_tool"
+    assert step["arguments"] == {"name": "road trip"}
+    assert len(prompts) == 3
+    assert "resolve_repeated_clarification_from_request" in prompts[2]
+
+
+def test_main_tool_step_rejects_repeating_a_tool_with_a_complete_observation():
+    assert OllamaMainConversationBackend._tool_step_semantic_issue(
+        step={
+            "mode": "call_tool",
+            "tool_id": "fixture.lookup",
+            "call_id": "repeat",
+            "arguments": {"query": "alpha"},
+        },
+        selected_tools=[
+            {
+                "tool_id": "fixture.lookup",
+                "input_schema": {
+                    "type": "object",
+                    "required": ["query"],
+                    "properties": {"query": {"type": "string"}},
+                },
+                "output_shape": {
+                    "type": "object",
+                    "required": ["value"],
+                    "properties": {"value": {"type": "string"}},
+                },
+            }
+        ],
+        observations=[
+            {
+                "status": "ok",
+                "payload": {"value": "alpha is ready"},
+                "untrusted": True,
+            }
+        ],
+    ) == "completed_tool_must_not_repeat"
+
+
+def test_main_tool_step_requires_one_catalog_completion_audit():
+    tools = [
+        {
+            "tool_id": "fixture.list_resources",
+            "input_schema": {"type": "object", "required": [], "properties": {}},
+            "output_shape": {
+                "type": "object",
+                "required": ["resources"],
+                "properties": {"resources": {"type": "array"}},
+            },
+            "transferable_observation_fields": [
+                {"pattern": "/resources/*/resource_ref", "scope": "same_domain"}
+            ],
+        },
+        {
+            "tool_id": "fixture.query",
+            "input_schema": {
+                "type": "object",
+                "required": [],
+                "properties": {"resource_refs": {"type": "array"}},
+            },
+        },
+    ]
+    observations = [
+        {
+            "status": "ok",
+            "payload": {
+                "resources": [
+                    {"resource_ref": "resource_v1_one"},
+                    {"resource_ref": "resource_v1_two"},
+                ]
+            },
+            "safe_message": "Catalog loaded.",
+            "untrusted": False,
+        }
+    ]
+    step = {"mode": "respond", "message": "Catalog loaded."}
+
+    assert OllamaMainConversationBackend._tool_step_semantic_issue(
+        step=step,
+        selected_tools=tools,
+        observations=observations,
+    ) == "verify_trusted_catalog_completed_user_goal"
+    assert OllamaMainConversationBackend._tool_step_semantic_issue(
+        step=step,
+        selected_tools=tools,
+        observations=observations,
+        semantic_correction="verify_trusted_catalog_completed_user_goal",
+    ) == ""
+    assert OllamaMainConversationBackend._completed_observation_response(
+        selected_tools=tools,
+        observations=observations,
+    ) is None
+
+
+def test_main_tool_step_detects_unproven_defaults_but_accepts_number_words():
+    base = {
+        "mode": "call_tool",
+        "tool_id": "fixture.query",
+        "call_id": "query",
+        "arguments": {"limit": 2, "order": "newest"},
+    }
+
+    assert OllamaMainConversationBackend._has_unproven_argument(
+        step=base,
+        text="show two newest results",
+    ) is False
+    assert OllamaMainConversationBackend._has_unproven_argument(
+        step={**base, "arguments": {**base["arguments"], "visibility": "active"}},
+        text="show two newest results",
+    ) is True
+
+
+def test_main_tool_step_omits_only_unproven_optional_defaults_after_observation():
+    step = {
+        "mode": "call_tool",
+        "tool_id": "fixture.query",
+        "call_id": "query",
+        "arguments": {
+            "query": "alpha",
+            "limit": 10,
+            "visibility": "active",
+        },
+        "provenance_claims": [
+            {
+                "kind": "request_derived",
+                "destination_pointer": "/query",
+                "derivation": "extract",
+            }
+        ],
+    }
+
+    sanitized = OllamaMainConversationBackend._without_unproven_optional_arguments(
+        step=step,
+        selected_tools=[
+            {
+                "tool_id": "fixture.query",
+                "input_schema": {
+                    "type": "object",
+                    "required": ["query"],
+                    "properties": {
+                        "query": {"type": "string"},
+                        "limit": {"type": "integer"},
+                        "visibility": {"type": "string"},
+                    },
+                },
+            }
+        ],
+        observations=[{"status": "ok", "payload": {"resources": []}}],
+        text="find alpha",
+    )
+
+    assert sanitized["arguments"] == {"query": "alpha"}
+    assert sanitized["provenance_claims"] == step["provenance_claims"]
+
+
+def test_main_tool_step_catalog_transfer_matches_one_human_name_from_request():
+    tools = [
+        {
+            "tool_id": "fixture.list_resources",
+            "input_schema": {"type": "object", "required": [], "properties": {}},
+            "output_shape": {
+                "type": "object",
+                "required": ["resources"],
+                "properties": {"resources": {"type": "array"}},
+            },
+            "transferable_observation_fields": [
+                {"pattern": "/resources/*/resource_ref", "scope": "same_domain"}
+            ],
+        },
+        {
+            "tool_id": "fixture.query",
+            "input_schema": {
+                "type": "object",
+                "required": [],
+                "properties": {"resource_refs": {"type": "array"}},
+            },
+            "output_shape": {
+                "type": "object",
+                "required": ["results"],
+                "properties": {"results": {"type": "array"}},
+            },
+            "transferable_observation_fields": [],
+        },
+    ]
+    observations = [
+        {
+            "status": "ok",
+            "observation_ref": "obs_v1_catalog",
+            "payload": {
+                "resources": [
+                    {"resource_ref": "resource_v1_alex", "display_name": "Alex"},
+                    {"resource_ref": "resource_v1_natasha", "display_name": "Natasha"},
+                ]
+            },
+            "safe_message": "Catalog loaded.",
+            "untrusted": False,
+        }
+    ]
+
+    steps = OllamaMainConversationBackend._transfer_recovery_steps(
+        selected_tools=tools,
+        observations=observations,
+        text="Find recent records in the Natasha resource.",
+    )
+
+    assert len(steps) == 1
+    assert steps[0]["arguments"] == {"resource_refs": ["resource_v1_natasha"]}
+    assert steps[0]["provenance_claims"][0]["source_pointer"] == (
+        "/resources/1/resource_ref"
+    )
+
+
+def test_main_tool_step_completes_multiple_exact_catalog_names_for_array_selector(monkeypatch):
+    backend = OllamaMainConversationBackend(
+        base_url="http://localhost:11434",
+        model="test-model",
+    )
+    monkeypatch.setattr(
+        backend,
+        "_generate_typed_step",
+        lambda **_kwargs: {
+            "mode": "call_tool",
+            "tool_id": "fixture.query",
+            "call_id": "query",
+            "arguments": {},
+        },
+    )
+    tools = [
+        {
+            "tool_id": "fixture.list_resources",
+            "input_schema": {"type": "object", "required": [], "properties": {}},
+            "output_shape": {
+                "type": "object",
+                "required": ["resources"],
+                "properties": {"resources": {"type": "array"}},
+            },
+            "transferable_observation_fields": [
+                {"pattern": "/resources/*/resource_ref", "scope": "same_domain"}
+            ],
+        },
+        {
+            "tool_id": "fixture.query",
+            "input_schema": {
+                "type": "object",
+                "required": [],
+                "properties": {"resource_refs": {"type": "array"}},
+            },
+            "output_shape": {
+                "type": "object",
+                "required": ["results"],
+                "properties": {"results": {"type": "array"}},
+            },
+            "transferable_observation_fields": [],
+        },
+    ]
+    observations = [
+        {
+            "status": "ok",
+            "observation_ref": "obs_v1_catalog",
+            "payload": {
+                "resources": [
+                    {"resource_ref": "resource_v1_alex", "display_name": "Alex"},
+                    {"resource_ref": "resource_v1_natasha", "display_name": "Natasha"},
+                ]
+            },
+            "safe_message": "Catalog loaded.",
+            "untrusted": False,
+        }
+    ]
+
+    step = backend.next_tool_step(
+        "Find recent records in the Alex and Natasha resources.",
+        tools,
+        observations,
+        {},
+        {},
+    )
+
+    assert step["arguments"] == {
+        "resource_refs": ["resource_v1_alex", "resource_v1_natasha"]
+    }
+    assert [claim["source_pointer"] for claim in step["provenance_claims"]] == [
+        "/resources/0/resource_ref",
+        "/resources/1/resource_ref",
+    ]
+
+
+def test_main_tool_step_falls_back_to_one_safe_completed_observation(monkeypatch):
+    backend = OllamaMainConversationBackend(
+        base_url="http://localhost:11434",
+        model="test-model",
+    )
+    monkeypatch.setattr(backend, "_generate_typed_step", lambda **_kwargs: None)
+
+    step = backend.next_tool_step(
+        "look up alpha",
+        [
+            {
+                "tool_id": "fixture.lookup",
+                "input_schema": {
+                    "type": "object",
+                    "required": ["query"],
+                    "properties": {"query": {"type": "string"}},
+                },
+                "output_shape": {
+                    "type": "object",
+                    "required": ["value"],
+                    "properties": {"value": {"type": "string"}},
+                },
+                "transferable_observation_fields": [],
+            }
+        ],
+        [
+            {
+                "status": "ok",
+                "observation_ref": "obs_v1_fixture",
+                "payload": {"value": "alpha is ready"},
+                "safe_message": "The lookup completed.",
+                "untrusted": True,
+            }
+        ],
+        {},
+        {},
+    )
+
+    assert step == {"mode": "respond", "message": "The lookup completed."}
+
+
+def test_main_tool_step_falls_back_to_latest_uniquely_matched_read(monkeypatch):
+    backend = OllamaMainConversationBackend(
+        base_url="http://localhost:11434",
+        model="test-model",
+    )
+    monkeypatch.setattr(backend, "_generate_typed_step", lambda **_kwargs: None)
+    descriptors = [
+        {
+            "tool_id": "fixture.list_mailboxes",
+            "output_shape": {
+                "type": "object",
+                "required": ["mailboxes"],
+                "properties": {"mailboxes": {"type": "array"}},
+            },
+            "transferable_observation_fields": [
+                {"pattern": "/mailboxes/*/mailbox_ref", "scope": "same_domain"}
+            ],
+        },
+        {
+            "tool_id": "fixture.query",
+            "output_shape": {
+                "type": "object",
+                "required": ["results", "normalized_query"],
+                "properties": {
+                    "results": {"type": "array"},
+                    "normalized_query": {"type": "object"},
+                },
+            },
+            "transferable_observation_fields": [],
+        },
+    ]
+
+    step = backend.next_tool_step(
+        "show two mailboxes",
+        descriptors,
+        [
+            {
+                "status": "ok",
+                "observation_ref": "obs_v1_catalog",
+                "payload": {"mailboxes": [{"mailbox_ref": "one"}]},
+                "safe_message": "Catalog loaded.",
+                "untrusted": False,
+            },
+            {
+                "status": "ok",
+                "observation_ref": "obs_v1_query",
+                "payload": {"results": [], "normalized_query": {}},
+                "safe_message": "No results matched.",
+                "untrusted": True,
+            },
+        ],
+        {},
+        {},
+    )
+
+    assert step == {"mode": "respond", "message": "No results matched."}
+
+
+def test_active_turn_commitment_retries_one_invalid_typed_shape(monkeypatch):
+    backend = OllamaMainConversationBackend(
+        base_url="http://localhost:11434",
+        model="test-model",
+    )
+    responses = iter(
+        [
+            {"mode": "execute_action", "confidence": 0.9},
+            {
+                "mode": "execute_action",
+                "confidence": 0.9,
+                "reason_code": "plausible_action",
+            },
+        ]
+    )
+    prompts = []
+
+    def generate(*, prompt, think):
+        del think
+        prompts.append(prompt)
+        return next(responses)
+
+    monkeypatch.setattr(backend, "_generate_typed_json", generate)
+
+    decision = backend.decide_turn(
+        "show the next page",
+        context={"main_tool_execution_mode": "active"},
+    )
+
+    assert decision == {
+        "mode": "execute_action",
+        "confidence": 0.9,
+        "reason_code": "plausible_action",
+    }
+    assert len(prompts) == 2
+    assert "Schema correction retry: true" in prompts[1]
+
+
+def test_active_turn_commitment_defers_missing_referent_to_capability_discovery(monkeypatch):
+    backend = OllamaMainConversationBackend(
+        base_url="http://localhost:11434",
+        model="test-model",
+    )
+    responses = iter(
+        [
+            {
+                "mode": "clarify_action",
+                "confidence": 0.0,
+                "reason_code": "missing_referent",
+                "question": "Which page?",
+            },
+            {
+                "mode": "clarify_action",
+                "confidence": 0.0,
+                "reason_code": "missing_referent",
+                "question": "Which page?",
+            },
+        ]
+    )
+    prompts = []
+
+    def generate(*, prompt, think):
+        del think
+        prompts.append(prompt)
+        return next(responses)
+
+    monkeypatch.setattr(backend, "_generate_typed_json", generate)
+
+    decision = backend.decide_turn(
+        "show the next page",
+        context={"main_tool_execution_mode": "active"},
+    )
+
+    assert decision == {
+        "mode": "execute_action",
+        "confidence": 0.0,
+        "reason_code": "plausible_action",
+    }
+    assert len(prompts) == 2
+    assert "defer_capability_local_referent_resolution" in prompts[1]
+
+
+def test_active_turn_commitment_defers_ambiguous_goal_to_capability_discovery(monkeypatch):
+    backend = OllamaMainConversationBackend(
+        base_url="http://localhost:11434",
+        model="test-model",
+    )
+    responses = iter(
+        [
+            {
+                "mode": "clarify_action",
+                "confidence": 0.0,
+                "reason_code": "ambiguous_goal",
+                "question": "What should I continue?",
+            },
+            {
+                "mode": "clarify_action",
+                "confidence": 0.0,
+                "reason_code": "ambiguous_goal",
+                "question": "What should I continue?",
+            },
+        ]
+    )
+    monkeypatch.setattr(
+        backend,
+        "_generate_typed_json",
+        lambda **_kwargs: next(responses),
+    )
+
+    assert backend.decide_turn(
+        "continue",
+        context={"main_tool_execution_mode": "active"},
+    ) == {
+        "mode": "execute_action",
+        "confidence": 0.0,
+        "reason_code": "plausible_action",
+    }
+
+
+def test_active_turn_commitment_labels_available_content_free_continuation(monkeypatch):
+    backend = OllamaMainConversationBackend(
+        base_url="http://localhost:11434",
+        model="test-model",
+    )
+    responses = iter(
+        [
+            {
+                "mode": "clarify_action",
+                "confidence": 0.0,
+                "reason_code": "ambiguous_goal",
+                "question": "What should I continue?",
+            },
+            {
+                "mode": "clarify_action",
+                "confidence": 0.0,
+                "reason_code": "ambiguous_goal",
+                "question": "What should I continue?",
+            },
+        ]
+    )
+    monkeypatch.setattr(
+        backend,
+        "_generate_typed_json",
+        lambda **_kwargs: next(responses),
+    )
+
+    assert backend.decide_turn(
+        "show the next page",
+        context={
+            "main_tool_execution_mode": "active",
+            "main_tool_followup": {
+                "skill_ids": ["skill.fixture.core"],
+                "continuations": [
+                    {
+                        "skill_id": "skill.fixture.core",
+                        "tool_id": "fixture.page",
+                        "argument_field": "cursor",
+                        "argument_literal": "next",
+                    }
+                ],
+            },
+        },
+    ) == {
+        "mode": "execute_action",
+        "confidence": 0.0,
+        "reason_code": "continuation_action",
+    }
+
+
+def test_main_tool_step_uses_exact_observed_tool_id_for_completion():
+    tools = [
+        {
+            "tool_id": "fixture.catalog",
+            "output_shape": {
+                "type": "object",
+                "required": ["items"],
+                "properties": {"items": {"type": "array"}},
+            },
+        },
+        {
+            "tool_id": "fixture.query",
+            "output_shape": {
+                "type": "object",
+                "required": ["results", "normalized_query"],
+                "properties": {
+                    "results": {"type": "array"},
+                    "normalized_query": {"type": "object"},
+                },
+            },
+        },
+    ]
+    observation = {
+        "status": "ok",
+        "tool_id": "fixture.query",
+        "payload": {"results": []},
+        "safe_message": "No matches.",
+        "untrusted": True,
+    }
+
+    assert OllamaMainConversationBackend._tool_observation_already_present(
+        descriptor=tools[1],
+        observations=[observation],
+    ) is True
+    assert OllamaMainConversationBackend._tool_observation_already_present(
+        descriptor=tools[0],
+        observations=[observation],
+    ) is False
+    assert OllamaMainConversationBackend._completed_observation_response(
+        selected_tools=tools,
+        observations=[observation],
+    ) == {"mode": "respond", "message": "No matches."}
+
+
+def test_main_tool_step_recovers_unique_catalog_from_needs_input_observation():
+    step = OllamaMainConversationBackend._catalog_recovery_step(
+        rejected_steps=[{"mode": "respond", "message": "I need a mailbox."}],
+        selected_tools=[
+            {
+                "tool_id": "fixture.list_resources",
+                "effect": "read",
+                "input_schema": {"type": "object", "required": [], "properties": {}},
+                "transferable_observation_fields": [
+                    {"pattern": "/resources/*/resource_ref", "scope": "same_domain"}
+                ],
+            },
+            {
+                "tool_id": "fixture.query",
+                "effect": "read",
+                "input_schema": {
+                    "type": "object",
+                    "required": [],
+                    "properties": {"resource_refs": {"type": "array"}},
+                },
+                "transferable_observation_fields": [],
+            },
+        ],
+        observations=[
+            {
+                "status": "needs_input",
+                "missing_fields": ["resource_refs"],
+                "payload": {},
+            }
+        ],
+    )
+
+    assert step == {
+        "mode": "call_tool",
+        "tool_id": "fixture.list_resources",
+        "call_id": "semantic-catalog-fixture-list_resources-resource_ref",
+        "arguments": {},
+    }
+
+
+def test_main_tool_step_recovers_one_safe_transfer_and_stops_after_target_observation():
+    descriptors = [
+        {
+            "tool_id": "fixture.list_labels",
+            "effect": "read",
+            "input_schema": {"type": "object", "required": [], "properties": {}},
+            "output_shape": {
+                "type": "object",
+                "required": ["labels"],
+                "properties": {"labels": {"type": "array"}},
+            },
+            "transferable_observation_fields": [
+                {"pattern": "/labels/*/label_ref", "scope": "same_domain"}
+            ],
+        },
+        {
+            "tool_id": "fixture.query",
+            "effect": "read",
+            "input_schema": {
+                "type": "object",
+                "required": [],
+                "properties": {"label_refs": {"type": "array"}},
+            },
+            "output_shape": {
+                "type": "object",
+                "required": ["results"],
+                "properties": {"results": {"type": "array"}},
+            },
+            "transferable_observation_fields": [],
+        },
+    ]
+    catalog_observation = {
+        "status": "ok",
+        "observation_ref": "obs_v1_labels",
+        "payload": {"labels": [{"label_ref": "label_v1_bills"}]},
+        "untrusted": False,
+    }
+
+    assert OllamaMainConversationBackend._transfer_recovery_steps(
+        selected_tools=descriptors,
+        observations=[catalog_observation],
+    ) == [
+        {
+            "mode": "call_tool",
+            "tool_id": "fixture.query",
+            "call_id": "semantic-transfer-fixture-query-label_refs",
+            "arguments": {"label_refs": ["label_v1_bills"]},
+            "provenance_claims": [
+                {
+                    "kind": "observation_derived",
+                    "destination_pointer": "/label_refs/0",
+                    "source_observation_ref": "obs_v1_labels",
+                    "source_pointer": "/labels/0/label_ref",
+                    "derivation": "copy",
+                }
+            ],
+        }
+    ]
+    assert OllamaMainConversationBackend._transfer_recovery_steps(
+        selected_tools=descriptors,
+        observations=[
+            catalog_observation,
+            {
+                "status": "ok",
+                "observation_ref": "obs_v1_results",
+                "payload": {"results": []},
+                "untrusted": False,
+            },
+        ],
+    ) == []
+
+
+def test_main_tool_step_does_not_guess_when_catalog_transfer_is_ambiguous():
+    assert OllamaMainConversationBackend._transfer_recovery_steps(
+        selected_tools=[
+            {
+                "tool_id": "fixture.list_labels",
+                "effect": "read",
+                "input_schema": {"type": "object", "required": [], "properties": {}},
+                "transferable_observation_fields": [
+                    {"pattern": "/labels/*/label_ref", "scope": "same_domain"}
+                ],
+            },
+            {
+                "tool_id": "fixture.query",
+                "effect": "read",
+                "input_schema": {
+                    "type": "object",
+                    "required": [],
+                    "properties": {"label_refs": {"type": "array"}},
+                },
+                "transferable_observation_fields": [],
+            },
+        ],
+        observations=[
+            {
+                "status": "ok",
+                "observation_ref": "obs_v1_labels",
+                "payload": {
+                    "labels": [
+                        {"label_ref": "label_v1_bills"},
+                        {"label_ref": "label_v1_todo"},
+                    ]
+                },
+                "untrusted": False,
+            }
+        ],
+    ) == []
+
+
+def test_main_tool_step_reviews_complex_call_and_keeps_more_complete_schema_coverage(
+    monkeypatch,
+):
+    class Response:
+        def __init__(self, arguments):
+            self._arguments = arguments
+
+        @staticmethod
+        def raise_for_status():
+            return None
+
+        def json(self):
+            return {
+                "message": {
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "submit_model_step",
+                                "arguments": self._arguments,
+                            }
+                        }
+                    ],
+                },
+                "done_reason": "stop",
+            }
+
+    responses = iter(
+        [
+            Response(
+                {
+                    "mode": "call_tool",
+                    "tool_id": "fixture.query",
+                    "call_id": "first",
+                    "arguments": {"mailbox_refs": ["work"]},
+                }
+            ),
+            Response(
+                {
+                    "mode": "call_tool",
+                    "tool_id": "fixture.query",
+                    "call_id": "reviewed",
+                    "arguments": {
+                        "mailbox_refs": ["work"],
+                        "has_attachment": True,
+                        "order": "newest",
+                    },
+                }
+            ),
+            Response(
+                {
+                    "mode": "call_tool",
+                    "tool_id": "fixture.query",
+                    "call_id": "adjudicated",
+                    "arguments": {
+                        "mailbox_refs": ["work"],
+                        "has_attachment": True,
+                        "order": "newest",
+                    },
+                }
+            ),
+        ]
+    )
+    calls = []
+
+    def fake_post(url, *, json, timeout, headers):
+        calls.append(json)
+        return next(responses)
+
+    monkeypatch.setattr("app.core.main_backend.httpx.post", fake_post)
+    backend = OllamaMainConversationBackend(base_url="http://localhost:11434", model="test-model")
+
+    step = backend.next_tool_step(
+        "find work messages with attachments, newest first",
+        [
+            {
+                "tool_id": "fixture.query",
+                "input_schema": {
+                    "type": "object",
+                    "required": [],
+                    "properties": {
+                        "mailbox_refs": {"type": "array"},
+                        "has_attachment": {"type": "boolean"},
+                        "order": {"type": "string"},
+                    },
+                },
+            }
+        ],
+        [],
+        {},
+        {},
+    )
+
+    assert step["call_id"] == "adjudicated"
+    assert step["arguments"] == {
+        "mailbox_refs": ["work"],
+        "has_attachment": True,
+        "order": "newest",
+    }
+    assert len(calls) == 3
+    assert "review_proposed_step_for_completeness" in calls[1]["messages"][0]["content"]
+    assert '"call_id":"first"' in calls[1]["messages"][0]["content"]
+    assert "adjudicate_conflicting_complete_steps" in calls[2]["messages"][0]["content"]
+    assert '"call_id":"first"' in calls[2]["messages"][0]["content"]
+    assert '"call_id":"reviewed"' in calls[2]["messages"][0]["content"]
+
+
+def test_main_tool_step_review_does_not_replace_a_more_complete_original_call():
+    original = {
+        "mode": "call_tool",
+        "tool_id": "fixture.query",
+        "call_id": "first",
+        "arguments": {"mailbox_refs": ["work"], "order": "newest"},
+    }
+    reviewed = {
+        "mode": "call_tool",
+        "tool_id": "fixture.query",
+        "call_id": "reviewed",
+        "arguments": {"mailbox_refs": ["work"]},
+    }
+
+    assert OllamaMainConversationBackend._preferred_tool_step(
+        [original, reviewed]
+    ) == original
+
+
+def test_main_tool_step_requires_final_temporal_audit_even_when_candidates_agree():
+    candidates = [
+        {
+            "mode": "call_tool",
+            "tool_id": "fixture.query",
+            "call_id": "first",
+            "arguments": {
+                "start": "2026-08-28T04:00:00Z",
+                "end": "2026-08-31T04:00:00Z",
+            },
+        },
+        {
+            "mode": "call_tool",
+            "tool_id": "fixture.query",
+            "call_id": "reviewed",
+            "arguments": {
+                "start": "2026-08-28T04:00:00Z",
+                "end": "2026-08-31T04:00:00Z",
+            },
+        },
+    ]
+
+    assert OllamaMainConversationBackend._tool_steps_require_temporal_adjudication(
+        candidates
+    ) is True
 
 
 def test_main_tool_step_accepts_exact_visible_typed_fallback_but_rejects_business_native_tool(

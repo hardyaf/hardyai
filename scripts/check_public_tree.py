@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import os
 import re
-import sys
 from pathlib import Path
 
 
@@ -73,6 +72,7 @@ SECRET_PATTERNS = {
 
 EMAIL_PATTERN = re.compile(r"(?<![\w.+-])([A-Z0-9._%+-]+)@([A-Z0-9.-]+\.[A-Z]{2,})(?![\w.-])", re.I)
 SNOWFLAKE_PATTERN = re.compile(r"(?<!\d)(\d{17,20})(?!\d)")
+HEX_DIGEST_PATTERN = re.compile(r"(?<![0-9A-F])([0-9A-F]{32,128})(?![0-9A-F])", re.I)
 PRIVATE_IPV4_PATTERN = re.compile(
     r"(?<!\d)(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|"
     r"172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})(?!\d)"
@@ -152,7 +152,10 @@ def check_tree(root: Path) -> list[str]:
                 errors.append(f"non-example email address: {relative.as_posix()}")
                 break
 
+        digest_spans = [match.span(1) for match in HEX_DIGEST_PATTERN.finditer(text)]
         for match in SNOWFLAKE_PATTERN.finditer(text):
+            if any(start <= match.start(1) and match.end(1) <= end for start, end in digest_spans):
+                continue
             value = match.group(1)
             if len(set(value)) > 1:
                 errors.append(f"non-placeholder long numeric identifier: {relative.as_posix()}")

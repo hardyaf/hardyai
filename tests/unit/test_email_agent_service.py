@@ -223,7 +223,7 @@ def test_activation_does_not_backfill_then_next_bucket_indexes_and_discusses(tmp
     storage.close()
 
 
-def test_enabled_managed_labels_queue_each_current_classification_once(tmp_path):
+def test_legacy_label_flag_never_queues_from_sync_classification(tmp_path):
     now = current_test_day()
     service, storage, _ = build_service(
         tmp_path,
@@ -233,12 +233,11 @@ def test_enabled_managed_labels_queue_each_current_classification_once(tmp_path)
 
     activated = service.run_due(now=now)
     synced = service.run_due(now=now + timedelta(minutes=1))
-    repeated = service.run_due(now=now + timedelta(minutes=1, seconds=1))
+    service.run_due(now=now + timedelta(minutes=1, seconds=1))
 
-    assert activated["managed_label_operations_queued"] == 0
-    assert synced["managed_label_operations_queued"] == 1
-    assert repeated["managed_label_operations_queued"] == 0
-    assert storage.status()["label_queued_count"] == 1
+    assert activated["status"] == "activated"
+    assert synced["accepted_count"] == 1
+    assert storage.status()["label_queued_count"] == 0
     storage.close()
 
 
@@ -545,17 +544,42 @@ def test_read_and_complete_all_queues_every_current_reference_once(tmp_path):
     storage.close()
 
 
-def test_typed_email_contract_publishes_only_the_phase_four_read_surface() -> None:
+def test_typed_email_contract_publishes_p5f_reads_and_managed_label_operations() -> None:
     descriptors = email_tool_descriptors()
 
     assert list(descriptors) == [
+        "email.list_mailboxes",
+        "email.list_labels",
         "email.query_messages",
         "email.get_message",
         "email.get_thread",
         "email.summarize",
         "email.status",
+        "email.get_operation",
+        "email.apply_labels",
+        "email.remove_labels",
+        "email.set_read_state",
+        "email.archive_messages",
+        "email.restore_to_inbox",
     ]
-    assert all(item.effect == "read" for item in descriptors.values())
+    assert all(
+        descriptors[tool_id].effect == "read"
+        for tool_id in (
+            "email.list_mailboxes",
+            "email.list_labels",
+            "email.query_messages",
+            "email.get_message",
+            "email.get_thread",
+            "email.summarize",
+            "email.status",
+            "email.get_operation",
+        )
+    )
+    assert descriptors["email.apply_labels"].effect == "external_write"
+    assert descriptors["email.remove_labels"].effect == "external_write"
+    assert descriptors["email.set_read_state"].effect == "external_write"
+    assert descriptors["email.archive_messages"].effect == "external_write"
+    assert descriptors["email.restore_to_inbox"].effect == "external_write"
     assert all(item.approval_rule == "none" for item in descriptors.values())
     assert descriptors["email.query_messages"].persistence == "no_store"
     assert descriptors["email.status"].persistence == "redacted"
@@ -563,9 +587,48 @@ def test_typed_email_contract_publishes_only_the_phase_four_read_surface() -> No
         "email.list_recent",
         "email.search",
     )
+    assert descriptors["email.query_messages"].validate_arguments({"cursor": "next"})[
+        "cursor"
+    ] == "next"
     serialized = str([item.to_storage_dict() for item in descriptors.values()])
     for forbidden in ("email.send", "email.reply", "email.forward", "email.delete"):
         assert forbidden not in serialized
+
+
+def test_typed_query_resolves_next_page_inside_user_channel_scope(tmp_path) -> None:
+    now = current_test_day()
+    service, storage, _ = build_service(tmp_path, now=now)
+    reference_now = datetime.now(timezone.utc)
+    cursor = storage.create_reference_set(
+        user_id="jordan",
+        discord_channel_id="222222222222222222",
+        query_text='cursor:query:v1:{"arguments":{"limit":2}}',
+        message_ids=[],
+        thread_ids=[],
+        focused_message_id=None,
+        focused_thread_id=None,
+        created_at=reference_now.isoformat(),
+        expires_at=(reference_now + timedelta(hours=1)).isoformat(),
+    )
+
+    canonical = service.canonicalize_tool_arguments(
+        tool_id="email.query_messages",
+        validated_arguments={"cursor": "next"},
+        request_context=authorized_context(),
+    )
+
+    assert canonical == {"cursor": "cursor_v1_" + cursor["reference_set_id"]}
+    empty_path = tmp_path / "empty"
+    empty_path.mkdir()
+    empty_service, empty_storage, _ = build_service(empty_path, now=now)
+    with pytest.raises(ToolArgumentCanonicalizationError, match="cursor_unavailable"):
+        empty_service.canonicalize_tool_arguments(
+            tool_id="email.query_messages",
+            validated_arguments={"cursor": "next"},
+            request_context=authorized_context(),
+        )
+    empty_storage.close()
+    storage.close()
 
 
 def test_typed_query_reads_projection_without_sync_or_review_state_write(tmp_path):
@@ -596,9 +659,9 @@ def test_typed_query_reads_projection_without_sync_or_review_state_write(tmp_pat
         arguments={
             "start": (now - timedelta(days=3)).isoformat(),
             "end": (now + timedelta(seconds=1)).isoformat(),
-            "senders": ["person@example.edu"],
-            "source": "work",
-            "category": "work_mail",
+            "sender_addresses": ["person@example.edu"],
+            "mailbox_refs": ["work"],
+            "classification": "work_mail",
             "text": "budget",
             "order": "newest",
             "limit": 10,
@@ -668,9 +731,10 @@ def test_typed_focus_reads_and_status_validate_against_closed_observations(tmp_p
     )
 
     calls = (
+        ("email.list_mailboxes", {}),
+        ("email.list_labels", {}),
         ("email.get_message", {"message_ref": "E1"}),
         ("email.get_thread", {"message_ref": "E1", "limit": 5}),
-        ("email.summarize", {"message_refs": ["E1"], "focus": "deadlines"}),
         ("email.status", {}),
     )
     for tool_id, arguments in calls:
@@ -698,10 +762,10 @@ def test_typed_email_invalid_filters_limits_and_scope_fail_before_read(tmp_path)
         "end": now.isoformat(),
     }
 
-    with pytest.raises(ToolArgumentCanonicalizationError, match="source_invalid"):
+    with pytest.raises(ToolArgumentCanonicalizationError, match="classification_invalid"):
         service.canonicalize_tool_arguments(
             tool_id="email.query_messages",
-            validated_arguments={**base_arguments, "source": "unknown"},
+            validated_arguments={**base_arguments, "classification": "unknown"},
             request_context=authorized_context(),
         )
     with pytest.raises(ToolArgumentCanonicalizationError, match="unauthorized"):
@@ -773,10 +837,11 @@ def test_authorized_executor_dispatches_real_email_handler_from_compiled_registr
         execution_mode="active",
         enabled_domains=("email",),
         enabled_operations=(
+            "email.list_mailboxes",
+            "email.list_labels",
             "email.query_messages",
             "email.get_message",
             "email.get_thread",
-            "email.summarize",
             "email.status",
         ),
     )
@@ -807,10 +872,11 @@ def test_authorized_executor_dispatches_real_email_handler_from_compiled_registr
 
     assert sync_result["status"] == "ok"
     assert [item["tool_id"] for item in projections] == [
+        "email.list_mailboxes",
+        "email.list_labels",
         "email.query_messages",
         "email.get_message",
         "email.get_thread",
-        "email.summarize",
         "email.status",
     ]
     assert result["status"] == "ok"

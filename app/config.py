@@ -170,6 +170,7 @@ class Settings:
     main_conversation_model_num_predict: int
     main_conversation_model_think: OllamaThinkMode
     main_turn_decision_model_think: OllamaThinkMode
+    main_tool_step_model_think: OllamaThinkMode
     model_adaptive_token_budget_enabled: bool
     model_adaptive_token_max_attempts: int
     model_adaptive_token_growth_factor: float
@@ -275,6 +276,12 @@ class Settings:
     email_agent_spam_max_attempts: int
     email_agent_spam_max_writes_per_hour: int
     email_agent_spam_max_writes_per_day: int
+    email_agent_operations_worker_enabled: bool
+    email_agent_operations_worker_poll_seconds: float
+    email_agent_operations_worker_batch_size: int
+    email_agent_operations_worker_lease_seconds: int
+    email_agent_operations_max_writes_per_hour: int
+    email_agent_operations_max_writes_per_day: int
     action_tickets_enabled: bool
     action_ticket_capture_mode: str
     action_ticket_review_enabled: bool
@@ -420,7 +427,8 @@ settings = Settings(
     main_conversation_model_num_ctx=max(512, _as_int("MAIN_CONVERSATION_MODEL_NUM_CTX", 32768)),
     main_conversation_model_num_predict=max(1, _as_int("MAIN_CONVERSATION_MODEL_NUM_PREDICT", 1024)),
     main_conversation_model_think=_as_ollama_think("MAIN_CONVERSATION_MODEL_THINK", "low"),
-    main_turn_decision_model_think=_as_ollama_think("MAIN_TURN_DECISION_MODEL_THINK", False),
+    main_turn_decision_model_think=_as_ollama_think("MAIN_TURN_DECISION_MODEL_THINK", "low"),
+    main_tool_step_model_think=_as_ollama_think("MAIN_TOOL_STEP_MODEL_THINK", "medium"),
     model_adaptive_token_budget_enabled=_as_bool("MODEL_ADAPTIVE_TOKEN_BUDGET_ENABLED", True),
     model_adaptive_token_max_attempts=max(
         1,
@@ -705,6 +713,30 @@ settings = Settings(
     email_agent_spam_max_writes_per_day=max(
         1,
         min(_as_int("EMAIL_AGENT_SPAM_MAX_WRITES_PER_DAY", 10), 200),
+    ),
+    email_agent_operations_worker_enabled=_as_bool(
+        "EMAIL_AGENT_OPERATIONS_WORKER_ENABLED",
+        False,
+    ),
+    email_agent_operations_worker_poll_seconds=max(
+        1.0,
+        min(_as_float("EMAIL_AGENT_OPERATIONS_WORKER_POLL_SECONDS", 2.0), 60.0),
+    ),
+    email_agent_operations_worker_batch_size=max(
+        1,
+        min(_as_int("EMAIL_AGENT_OPERATIONS_WORKER_BATCH_SIZE", 5), 25),
+    ),
+    email_agent_operations_worker_lease_seconds=max(
+        15,
+        min(_as_int("EMAIL_AGENT_OPERATIONS_WORKER_LEASE_SECONDS", 90), 600),
+    ),
+    email_agent_operations_max_writes_per_hour=max(
+        1,
+        min(_as_int("EMAIL_AGENT_OPERATIONS_MAX_WRITES_PER_HOUR", 40), 500),
+    ),
+    email_agent_operations_max_writes_per_day=max(
+        1,
+        min(_as_int("EMAIL_AGENT_OPERATIONS_MAX_WRITES_PER_DAY", 200), 2000),
     ),
     action_tickets_enabled=_as_bool("ACTION_TICKETS_ENABLED", False),
     action_ticket_capture_mode=os.getenv("ACTION_TICKET_CAPTURE_MODE", "shadow").strip().lower(),

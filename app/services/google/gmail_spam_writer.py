@@ -41,6 +41,16 @@ class GmailSpamWriteResult:
     gmail_label_id: str | None = None
 
 
+@dataclass(frozen=True)
+class GmailManagedLabelWriteResult:
+    message_id: str
+    labels_before: tuple[str, ...]
+    labels_after: tuple[str, ...]
+    provider_modified: bool
+    verified: bool
+    managed_label_ids: tuple[tuple[str, str], ...]
+
+
 class GmailSpamWriter(Protocol):
     def verify_profile(self) -> None: ...
 
@@ -65,6 +75,25 @@ class GmailSpamWriter(Protocol):
         operation_id: str,
         label_name: str,
         managed_label_names: tuple[str, ...],
+    ) -> GmailSpamWriteResult: ...
+
+    def mutate_managed_labels(
+        self,
+        *,
+        message_id: str,
+        operation_id: str,
+        action: str,
+        label_names: tuple[str, ...],
+        managed_label_names: tuple[str, ...],
+    ) -> GmailManagedLabelWriteResult: ...
+
+    def mutate_system_label(
+        self,
+        *,
+        message_id: str,
+        operation_id: str,
+        action: str,
+        system_label: str,
     ) -> GmailSpamWriteResult: ...
 
 
@@ -303,6 +332,147 @@ class GoogleGmailSpamWriter:
             provider_modified=provider_modified,
             verified=verified,
             gmail_label_id=target_id,
+        )
+
+    def mutate_managed_labels(
+        self,
+        *,
+        message_id: str,
+        operation_id: str,
+        action: str,
+        label_names: tuple[str, ...],
+        managed_label_names: tuple[str, ...],
+    ) -> GmailManagedLabelWriteResult:
+        key = self._message_id(message_id)
+        if not str(operation_id or "").strip():
+            raise ValueError("operation_id is required.")
+        normalized_action = str(action or "").strip().casefold()
+        if normalized_action not in {"apply", "remove"}:
+            raise ValueError("Managed-label action must be apply or remove.")
+        targets = tuple(dict.fromkeys(self._managed_label_name(item) for item in label_names))
+        allowed_names = tuple(
+            dict.fromkeys(self._managed_label_name(item) for item in managed_label_names)
+        )
+        if not targets or any(item not in allowed_names for item in targets):
+            raise ValueError("Every target Gmail label must be in the managed allowlist.")
+
+        labels_by_name = self._labels_by_name()
+        if normalized_action == "apply":
+            for target_name in targets:
+                if target_name in labels_by_name:
+                    continue
+                created = (
+                    self._gmail()
+                    .users()
+                    .labels()
+                    .create(
+                        userId="me",
+                        body={
+                            "name": target_name,
+                            "labelListVisibility": "labelShow",
+                            "messageListVisibility": "show",
+                        },
+                    )
+                    .execute()
+                )
+                target_id = str(created.get("id") or "").strip() if isinstance(created, dict) else ""
+                if not target_id:
+                    raise RuntimeError("Gmail did not return an ID for the managed label.")
+                labels_by_name[target_name] = target_id
+
+        target_ids = {
+            labels_by_name[name]
+            for name in targets
+            if str(labels_by_name.get(name) or "").strip()
+        }
+        before = self._label_ids(message_id=key)
+        add_ids = sorted(target_ids - before) if normalized_action == "apply" else []
+        remove_ids = sorted(target_ids & before) if normalized_action == "remove" else []
+        provider_modified = bool(add_ids or remove_ids)
+        if provider_modified:
+            (
+                self._gmail()
+                .users()
+                .messages()
+                .modify(
+                    userId="me",
+                    id=key,
+                    body={"addLabelIds": add_ids, "removeLabelIds": remove_ids},
+                )
+                .execute()
+            )
+        after = self._label_ids(message_id=key)
+        target_verified = (
+            target_ids <= after
+            if normalized_action == "apply"
+            else not bool(target_ids & after)
+        )
+        unrelated_unchanged = (before ^ after) <= target_ids
+        return GmailManagedLabelWriteResult(
+            message_id=key,
+            labels_before=tuple(sorted(before)),
+            labels_after=tuple(sorted(after)),
+            provider_modified=provider_modified,
+            verified=target_verified and unrelated_unchanged,
+            managed_label_ids=tuple(
+                sorted(
+                    (name, labels_by_name[name])
+                    for name in allowed_names
+                    if str(labels_by_name.get(name) or "").strip()
+                )
+            ),
+        )
+
+    def mutate_system_label(
+        self,
+        *,
+        message_id: str,
+        operation_id: str,
+        action: str,
+        system_label: str,
+    ) -> GmailSpamWriteResult:
+        """Apply one fixed reversible Inbox/read-state transition and verify it."""
+
+        key = self._message_id(message_id)
+        if not str(operation_id or "").strip():
+            raise ValueError("operation_id is required.")
+        normalized_action = str(action or "").strip().casefold()
+        normalized_label = str(system_label or "").strip().upper()
+        if normalized_action not in {"apply", "remove"}:
+            raise ValueError("System-label action must be apply or remove.")
+        if normalized_label not in {"INBOX", "UNREAD"}:
+            raise ValueError("Only INBOX and UNREAD system-label transitions are supported.")
+
+        before = self._label_ids(message_id=key)
+        if normalized_label == "INBOX" and normalized_action == "apply" and (
+            {"SPAM", "TRASH"} & before
+        ):
+            raise RuntimeError("email_restore_source_state_forbidden")
+        target_present = normalized_label in before
+        already_applied = target_present if normalized_action == "apply" else not target_present
+        if not already_applied:
+            add_ids = [normalized_label] if normalized_action == "apply" else []
+            remove_ids = [normalized_label] if normalized_action == "remove" else []
+            (
+                self._gmail()
+                .users()
+                .messages()
+                .modify(
+                    userId="me",
+                    id=key,
+                    body={"addLabelIds": add_ids, "removeLabelIds": remove_ids},
+                )
+                .execute()
+            )
+        after = self._label_ids(message_id=key)
+        desired = normalized_label in after if normalized_action == "apply" else normalized_label not in after
+        unrelated_unchanged = (before ^ after) <= {normalized_label}
+        return GmailSpamWriteResult(
+            message_id=key,
+            labels_before=tuple(sorted(before)),
+            labels_after=tuple(sorted(after)),
+            provider_modified=not already_applied,
+            verified=desired and unrelated_unchanged,
         )
 
     def _labels_by_name(self) -> dict[str, str]:

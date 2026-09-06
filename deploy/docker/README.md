@@ -128,6 +128,12 @@ must preserve the full configured scope superset; a Gmail-only refresh would min
 temporarily downscoped access token and cause Calendar reads to return HTTP 403 until
 another full-scope refresh. Keep all three scopes above in the protected policy.
 
+The application image installs `deploy/docker/gai.conf`, which preserves glibc's
+default address-selection precedence while preferring IPv4. Hardybot currently
+receives IPv6 DNS answers without working IPv6 reachability; without this image-local
+policy, Google API clients can stall on an unreachable IPv6 address instead of using
+the verified IPv4 route. This does not disable IPv6 on the host or change router state.
+
 For hourly invitation/forwarded-`.ics` reconciliation, enable the Gmail API for the OAuth project,
 reauthorize the house token with the Gmail Readonly scope, then set:
 

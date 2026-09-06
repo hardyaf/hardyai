@@ -70,8 +70,13 @@ _RUNTIME_DEPENDENCIES = frozenset(
 _EMAIL_UNORDERED_TARGET_TOOLS = frozenset(
     {
         "email.apply_managed_category_label",
+        "email.apply_labels",
+        "email.archive_messages",
         "email.mark_read_complete",
         "email.move_to_spam",
+        "email.remove_labels",
+        "email.restore_to_inbox",
+        "email.set_read_state",
     }
 )
 
@@ -883,6 +888,7 @@ class ToolCallEnvelope:
     session_id: str
     principal_kind: str
     principal_subject: str
+    external_user_id: str
     user_id: str
     agent_id: str
     source_interface: str
@@ -900,6 +906,7 @@ class ToolCallEnvelope:
             "session_id",
             "principal_kind",
             "principal_subject",
+            "external_user_id",
             "user_id",
             "agent_id",
             "source_interface",
@@ -942,6 +949,7 @@ class ToolCallEnvelope:
         descriptor: ToolDescriptor,
         authorization_snapshot_ref: str,
         validated_arguments: Mapping[str, Any],
+        external_user_id: str | None = None,
     ) -> ToolCallEnvelope:
         operation_id, arguments_hash, normalized = tool_operation_id(
             root_request_id=root_request_id,
@@ -957,6 +965,7 @@ class ToolCallEnvelope:
             session_id=session_id,
             principal_kind=principal_kind,
             principal_subject=principal_subject,
+            external_user_id=external_user_id or principal_subject,
             user_id=user_id,
             agent_id=agent_id,
             source_interface=source_interface,
@@ -977,6 +986,7 @@ class ToolCallEnvelope:
             "session_id": self.session_id,
             "principal_kind": self.principal_kind,
             "principal_subject": self.principal_subject,
+            "external_user_id": self.external_user_id,
             "user_id": self.user_id,
             "agent_id": self.agent_id,
             "source_interface": self.source_interface,

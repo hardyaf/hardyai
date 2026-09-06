@@ -19,10 +19,13 @@ def _query(**overrides) -> EmailQuery:
         "start": "2026-08-20T04:00:00Z",
         "end": "2026-08-25T04:00:00Z",
         "timezone_name": "America/New_York",
-        "senders": ("sender@example.com",),
-        "recipients": ("jarvis@example.com",),
-        "source": "work",
-        "category": "work_mail",
+        "mailbox_refs": ("work",),
+        "sender_addresses": ("sender@example.com",),
+        "sender_domains": ("example.com",),
+        "sender_text": "Sender Org",
+        "recipient_addresses": ("jarvis@example.com",),
+        "label_refs": ("label",),
+        "classification": "work_mail",
         "visibility": "active",
         "text": "budget review",
         "has_attachment": True,
@@ -38,10 +41,13 @@ def test_email_query_is_immutable_normalized_and_closed() -> None:
         {
             "start": "2026-08-20T00:00:00-04:00",
             "end": "2026-08-25T00:00:00-04:00",
-            "senders": ["Sender@Example.com"],
-            "recipients": ["Jarvis@Example.com"],
-            "source": "WORK",
-            "category": "WORK_MAIL",
+            "mailbox_refs": ["Work"],
+            "sender_addresses": ["Sender@Example.com"],
+            "sender_domains": ["Example.com"],
+            "sender_text": "Sender Org",
+            "recipient_addresses": ["Jarvis@Example.com"],
+            "label_refs": ["Done"],
+            "classification": "WORK_MAIL",
             "visibility": "all",
             "text": "  budget   review ",
             "has_attachment": True,
@@ -49,14 +55,15 @@ def test_email_query_is_immutable_normalized_and_closed() -> None:
             "limit": 25,
         },
         timezone_name="America/New_York",
-        allowed_sources=("work", "personal"),
+        allowed_mailbox_selectors=("work", "personal"),
         allowed_categories=("work_mail", "needs_review"),
     )
 
     assert query.start == datetime(2026, 8, 20, 4, tzinfo=UTC)
     assert query.end == datetime(2026, 8, 25, 4, tzinfo=UTC)
-    assert query.senders == ("sender@example.com",)
-    assert query.recipients == ("jarvis@example.com",)
+    assert query.sender_addresses == ("sender@example.com",)
+    assert query.sender_domains == ("example.com",)
+    assert query.recipient_addresses == ("jarvis@example.com",)
     assert query.text_terms == ("budget", "review")
     assert query.to_arguments()["start"] == "2026-08-20T04:00:00Z"
     assert query.normalized(returned_count=3)["timezone"] == "America/New_York"
@@ -71,7 +78,7 @@ def test_email_query_is_immutable_normalized_and_closed() -> None:
                 "provider_query": "from:anyone",
             },
             timezone_name="America/New_York",
-            allowed_sources=("work",),
+            allowed_mailbox_selectors=("work",),
             allowed_categories=("work_mail",),
         )
 
@@ -79,11 +86,11 @@ def test_email_query_is_immutable_normalized_and_closed() -> None:
 @pytest.mark.parametrize(
     ("arguments", "code"),
     [
-        ({"source": "unknown"}, "source_invalid"),
-        ({"category": "unknown"}, "category_invalid"),
+        ({"classification": "unknown"}, "classification_invalid"),
         ({"visibility": "whatever"}, "visibility_invalid"),
-        ({"limit": 101}, "limit_invalid"),
-        ({"senders": ["not-an-email"]}, "senders_invalid"),
+        ({"limit": 51}, "limit_invalid"),
+        ({"sender_addresses": ["not-an-email"]}, "sender_addresses_invalid"),
+        ({"sender_domains": ["invalid"]}, "sender_domains_invalid"),
         ({"start": "2026-08-25T04:00:00Z"}, "interval_reversed"),
     ],
 )
@@ -97,7 +104,7 @@ def test_email_query_filters_fail_closed(arguments: dict, code: str) -> None:
         EmailQuery.from_arguments(
             base,
             timezone_name="America/New_York",
-            allowed_sources=("work", "personal"),
+            allowed_mailbox_selectors=("work", "personal"),
             allowed_categories=("work_mail", "needs_review"),
         )
 
@@ -170,3 +177,17 @@ def test_future_interval_is_valid_but_reversed_interval_is_not() -> None:
             start="2030-01-02T00:00:00Z",
             end="2030-01-01T00:00:00Z",
         )
+
+
+def test_no_interval_means_all_indexed_history_and_cursor_is_internal_only() -> None:
+    query = EmailQuery.from_arguments(
+        {"visibility": "all", "limit": 20},
+        timezone_name="America/New_York",
+        allowed_mailbox_selectors=("work",),
+        allowed_categories=("work_mail", "needs_review"),
+    )
+
+    assert query.start is None
+    assert query.end is None
+    assert "start" not in query.to_arguments()
+    assert query.limit == 20

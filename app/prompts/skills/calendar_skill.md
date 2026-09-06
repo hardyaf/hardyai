@@ -54,6 +54,170 @@ main_handoff_context:
     - last_time_reference
     - last_calendar_action
     - pending_event_confirmation
+main_tools_contract_version: 1
+main_tools:
+  - tool_id: calendar.query_events
+    contract_version: 1
+    purpose: "Query one authorized Calendar scope over an inclusive-start, exclusive-end interval. Use default only for the authorized default; preserve explicit scope selectors. Copy requested title/topic words into text. All constraints compose. Use time_basis=local_calendar for dates/local wall times and absolute for rolling or explicitly absolute instants; the server corrects local offsets from its timezone."
+    interactive: true
+    effect: read
+    approval_rule: none
+    approval_conditions: []
+    idempotency: not_applicable
+    sensitivity: private
+    persistence: no_store
+    effect_cardinality: single
+    runtime_dependencies: []
+    transferable_observation_fields:
+      - pattern: /events
+        scope: cross_domain
+      - pattern: /normalized_range
+        scope: same_domain
+      - pattern: /calendar_scope
+        scope: same_domain
+      - pattern: /source
+        scope: same_domain
+      - pattern: /truncated
+        scope: same_domain
+    timeout_seconds: 30
+    max_result_items: 100
+    max_observation_chars: 8000
+    legacy_intents:
+      - calendar.view
+    input_schema:
+      type: object
+      additionalProperties: false
+      required: [start, end, calendar_scope, time_basis]
+      properties:
+        start:
+          type: string
+          format: date-time
+          maxLength: 64
+          description: "Inclusive aware RFC 3339 value. With local_calendar, preserve the intended local wall-clock fields in the server Time timezone (do not convert those fields to UTC); the server corrects the offset. With absolute, encode the exact instant."
+        end:
+          type: string
+          format: date-time
+          maxLength: 64
+          description: "Exclusive aware RFC 3339 value. With local_calendar, preserve the intended next local wall-clock boundary; the server corrects DST/offsets independently. With absolute, encode the exact instant."
+        calendar_scope:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: "One explicit person/calendar selector (plain or possessive, such as Alex or Alex's calendar), or the literal default for the authorized default Calendar."
+        time_basis:
+          type: string
+          enum: [local_calendar, absolute]
+          description: "local_calendar for named dates or local wall-clock boundaries; absolute for rolling intervals ending now or explicitly absolute instants."
+        text:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: "Event-title/topic text explicitly requested by the user; preserve it whenever present."
+        order:
+          type: string
+          enum: [oldest, newest]
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+    observation_schema:
+      type: object
+      additionalProperties: false
+      required: [events, normalized_range, calendar_scope, source, truncated]
+      properties:
+        events:
+          type: array
+          minItems: 0
+          maxItems: 100
+          items:
+            type: object
+            additionalProperties: false
+            required: [event_ref, title, start, end, all_day, location, calendar_name]
+            properties:
+              event_ref:
+                type: string
+                minLength: 16
+                maxLength: 80
+              title:
+                type: string
+                minLength: 1
+                maxLength: 200
+              start:
+                type: string
+                maxLength: 64
+              end:
+                type: string
+                maxLength: 64
+              all_day:
+                type: boolean
+              location:
+                type: string
+                maxLength: 300
+              calendar_name:
+                type: string
+                minLength: 1
+                maxLength: 100
+        normalized_range:
+          type: object
+          additionalProperties: false
+          required: [start, end, timezone]
+          properties:
+            start:
+              type: string
+              format: date-time
+              maxLength: 64
+            end:
+              type: string
+              format: date-time
+              maxLength: 64
+            timezone:
+              type: string
+              minLength: 1
+              maxLength: 64
+        calendar_scope:
+          type: object
+          additionalProperties: false
+          required: [requested, display_name, resolved, is_default, candidates]
+          properties:
+            requested:
+              type: string
+              minLength: 1
+              maxLength: 100
+            display_name:
+              type: string
+              minLength: 1
+              maxLength: 100
+            resolved:
+              type: boolean
+            is_default:
+              type: boolean
+            candidates:
+              type: array
+              minItems: 0
+              maxItems: 10
+              uniqueItems: true
+              items:
+                type: string
+                minLength: 1
+                maxLength: 100
+        source:
+          type: object
+          additionalProperties: false
+          required: [kind, synchronized, coverage_complete, queried_at]
+          properties:
+            kind:
+              type: string
+              enum: [google_calendar_live, local_in_memory]
+            synchronized:
+              type: boolean
+            coverage_complete:
+              type: boolean
+            queried_at:
+              type: string
+              format: date-time
+              maxLength: 64
+        truncated:
+          type: boolean
 ---
 
 # Calendar Skill

@@ -99,6 +99,7 @@ class TurnFinalizer:
         finalization = options or TurnFinalizationOptions()
         effective_request_id = str(request_id or uuid4())
         internal_result_payload = dict(result)
+        content_free_followup = internal_result_payload.pop("_main_tool_followup", None)
         declared_policy = internal_result_payload.pop("_persistence_policy", None)
         policy = most_restrictive_persistence_policy(
             persistence_policy_for_intent(intent.value),
@@ -116,6 +117,13 @@ class TurnFinalizer:
             result_payload = stripped if isinstance(stripped, dict) else {}
         else:
             result_payload = internal_result_payload
+
+        self._record_content_free_main_tool_followup(
+            session=session,
+            route=route,
+            result=result_payload,
+            marker=content_free_followup,
+        )
 
         main_intent_label = self._main_intent_label(
             route=route,
@@ -315,6 +323,69 @@ class TurnFinalizer:
             },
         )
         return response
+
+    def _record_content_free_main_tool_followup(
+        self,
+        *,
+        session: SessionRecord,
+        route: str,
+        result: dict[str, Any],
+        marker: Any = None,
+    ) -> None:
+        """Persist only skill identity needed to resume a no-store capability turn."""
+
+        if str(route or "").strip().casefold() != "main_tool_loop":
+            return
+        status = str(result.get("status") or "").strip().casefold()
+        if status not in {"ok", "partial", "responded", "queued", "waiting_for_approval"}:
+            return
+        skill_ids = []
+        for raw in result.get("selected_skill_ids") or []:
+            skill_id = str(raw or "").strip().casefold()
+            if skill_id and len(skill_id) <= 160 and skill_id not in skill_ids:
+                skill_ids.append(skill_id)
+            if len(skill_ids) >= 3:
+                break
+        if not skill_ids:
+            return
+        validated_continuations: list[dict[str, str]] = []
+        raw_continuations = marker.get("continuations") if isinstance(marker, dict) else None
+        for item in raw_continuations or []:
+            if not isinstance(item, dict):
+                continue
+            continuation = {
+                "skill_id": str(item.get("skill_id") or "").strip().casefold(),
+                "tool_id": str(item.get("tool_id") or "").strip().casefold(),
+                "argument_field": str(item.get("argument_field") or "").strip(),
+                "argument_literal": str(item.get("argument_literal") or "").strip().casefold(),
+            }
+            if (
+                continuation["skill_id"] in skill_ids
+                and continuation["tool_id"]
+                and len(continuation["tool_id"]) <= 160
+                and continuation["argument_field"]
+                and len(continuation["argument_field"]) <= 80
+                and continuation["argument_literal"] == "next"
+            ):
+                validated_continuations.append(continuation)
+            if len(validated_continuations) >= 3:
+                break
+        persisted_marker: dict[str, Any] = {"skill_ids": skill_ids}
+        if validated_continuations:
+            persisted_marker["continuations"] = validated_continuations
+        if session.context_reference.get("main_tool_followup") == persisted_marker:
+            return
+        session.context_reference = {
+            **dict(session.context_reference),
+            "main_tool_followup": persisted_marker,
+        }
+        session.touch()
+        self._session_store.save(session)
+        self._event_log.record(
+            event_type="context.main_tool_followup.updated",
+            session_id=session.session_id,
+            payload={"skill_ids": skill_ids},
+        )
 
     def _update_session_context_from_result(
         self,

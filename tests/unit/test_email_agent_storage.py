@@ -104,6 +104,49 @@ def test_reference_sets_are_channel_scoped_and_expire(tmp_path):
     storage.close()
 
 
+def test_latest_cursor_reference_set_ignores_newer_non_cursor_rows(tmp_path):
+    storage = EmailAgentSQLiteStorage(str(tmp_path / "email.db"))
+    cursor = storage.create_reference_set(
+        user_id="jordan",
+        discord_channel_id="100",
+        query_text='cursor:query:v1:{"arguments":{"limit":2}}',
+        message_ids=[],
+        thread_ids=[],
+        focused_message_id=None,
+        focused_thread_id=None,
+        created_at=NOW,
+        expires_at=LATER,
+    )
+    storage.create_reference_set(
+        user_id="jordan",
+        discord_channel_id="100",
+        query_text="typed query result",
+        message_ids=["m1"],
+        thread_ids=["t1"],
+        focused_message_id="m1",
+        focused_thread_id="t1",
+        created_at="2026-08-16T14:30:00+00:00",
+        expires_at=LATER,
+    )
+
+    latest = storage.latest_cursor_reference_set(
+        kind="query",
+        user_id="jordan",
+        discord_channel_id="100",
+        now=NOW,
+    )
+
+    assert latest is not None
+    assert latest["reference_set_id"] == cursor["reference_set_id"]
+    assert storage.latest_cursor_reference_set(
+        kind="query",
+        user_id="jordan",
+        discord_channel_id="999",
+        now=NOW,
+    ) is None
+    storage.close()
+
+
 def test_explicit_category_correction_wins_over_later_automatic_proposal(tmp_path):
     storage = EmailAgentSQLiteStorage(str(tmp_path / "email.db"))
     storage.upsert_message(record=message_record(), now=NOW)
@@ -251,10 +294,11 @@ def test_typed_query_combines_filters_and_fails_closed_for_invalid_allowlists(tm
         now=NOW,
     )
     query = _typed_query(
-        senders=("boss@example.edu",),
-        recipients=("jordan@example.com",),
-        source="work",
-        category="work_mail",
+        sender_addresses=("boss@example.edu",),
+        sender_domains=("example.edu",),
+        sender_text="boss",
+        recipient_addresses=("jordan@example.com",),
+        classification="work_mail",
         text="budget Tuesday",
         has_attachment=True,
     )
@@ -266,6 +310,7 @@ def test_typed_query_combines_filters_and_fails_closed_for_invalid_allowlists(tm
         discord_channel_id="100",
         allowed_source_keys=("work", "personal"),
         allowed_category_keys=("work_mail", "needs_review"),
+        selected_source_keys=("work",),
         now=NOW,
     )
     injection = storage.query_messages(
@@ -283,12 +328,13 @@ def test_typed_query_combines_filters_and_fails_closed_for_invalid_allowlists(tm
     assert injection == []
     with pytest.raises(ValueError, match="Unsupported email source"):
         storage.query_messages(
-            query=_typed_query(source="unknown"),
+            query=_typed_query(),
             taxonomy_version="shared-v1",
             user_id="jordan",
             discord_channel_id="100",
             allowed_source_keys=("work", "personal"),
             allowed_category_keys=("work_mail", "needs_review"),
+            selected_source_keys=("unknown",),
             now=NOW,
         )
     with pytest.raises(ValueError, match="allowlist"):

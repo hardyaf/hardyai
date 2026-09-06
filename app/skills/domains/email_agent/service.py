@@ -12,6 +12,10 @@ from app.services.google.gmail_gateway import GmailHistoryExpiredError, GmailRea
 from app.services.google.gmail_mime import GmailMimeParser
 from app.skills.domains.email_agent.classification import EmailClassifier
 from app.skills.domains.email_agent.config import EmailAgentPermissions
+from app.skills.domains.email_agent.operations import (
+    EMAIL_MANAGED_LABEL_TOOLS,
+    EmailManagedLabelToolExecutor,
+)
 from app.skills.domains.email_agent.query import EmailReadToolExecutor
 from app.skills.domains.email_agent.storage import EmailAgentSQLiteStorage
 from app.skills.domains.email_agent.summarization import (
@@ -222,6 +226,11 @@ class EmailAgentService:
             reference_retention_hours=config.reference_retention_hours,
             stale_seconds=config.on_demand_stale_seconds,
         )
+        self._typed_label_operations = EmailManagedLabelToolExecutor(
+            storage=storage,
+            permissions=permissions,
+            max_attempts=config.max_provider_attempts,
+        )
 
     def run_due(self, *, now: datetime | None = None) -> dict[str, Any] | None:
         if not self.config.sync_enabled:
@@ -233,7 +242,7 @@ class EmailAgentService:
             run_kind="scheduled",
             bucket_key=f"scheduled:{bucket}",
         )
-        return self._with_label_reconciliation(result=result, now=current)
+        return result
 
     def sync_if_stale(self, *, now: datetime | None = None) -> dict[str, Any]:
         if not self.config.sync_enabled:
@@ -245,54 +254,14 @@ class EmailAgentService:
             if last_success is not None:
                 age = (current - last_success).total_seconds()
                 if age < self.config.on_demand_stale_seconds:
-                    return self._with_label_reconciliation(
-                        result={"status": "fresh", "age_seconds": max(0, int(age))},
-                        now=current,
-                    )
+                    return {"status": "fresh", "age_seconds": max(0, int(age))}
         bucket = int(current.timestamp()) // self.config.on_demand_stale_seconds
         result = self._run_sync(
             now=current,
             run_kind="on_demand",
             bucket_key=f"on_demand:{bucket}",
         )
-        return self._with_label_reconciliation(result=result, now=current)
-
-    def _with_label_reconciliation(
-        self,
-        *,
-        result: dict[str, Any],
-        now: datetime,
-    ) -> dict[str, Any]:
-        if not self.config.label_writes_enabled:
-            return result
-        candidates = self._storage.list_category_label_candidates(
-            taxonomy_version=self._permissions.taxonomy_version,
-            limit=self.config.max_messages_per_run,
-        )
-        managed_labels = self._permissions.managed_gmail_labels
-        queued = 0
-        for row in candidates:
-            category_key = str(row.get("logical_category_key") or "").strip().casefold()
-            label_name = managed_labels.get(category_key)
-            message_id = str(row.get("gmail_message_id") or "").strip()
-            classification_updated_at = str(row.get("classification_updated_at") or "").strip()
-            if not label_name or not message_id or not classification_updated_at:
-                continue
-            self._storage.enqueue_label_operation(
-                gmail_message_id=message_id,
-                taxonomy_version=self._permissions.taxonomy_version,
-                logical_category_key=category_key,
-                gmail_label_name=label_name,
-                operation_type="add",
-                idempotency_key=(
-                    f"email-label:add:v1:{self._permissions.taxonomy_version}:"
-                    f"{message_id}:{category_key}:{classification_updated_at}"
-                ),
-                max_attempts=self.config.max_provider_attempts,
-                now=_iso(now),
-            )
-            queued += 1
-        return {**result, "managed_label_operations_queued": queued}
+        return result
 
     def bootstrap_recent_canaries(
         self,
@@ -433,6 +402,63 @@ class EmailAgentService:
         }
         self._record("email.sync.bootstrap_completed", result)
         return result
+
+    def process_historical_backfill_page(
+        self,
+        *,
+        page_token: str | None,
+        page_size: int,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Process one operator-owned durable historical page from the central mailbox."""
+
+        if not self.config.allow_historical_backfill:
+            raise RuntimeError("email_historical_backfill_disabled")
+        limit = max(1, min(int(page_size), self.config.max_messages_per_run, 100))
+        current = self._normalize_now(now)
+        state = self._storage.get_sync_state()
+        activation = self._parse_iso((state or {}).get("activation_at"))
+        if activation is None:
+            raise RuntimeError("email_backfill_requires_activation")
+        alias_query = " OR ".join(
+            f"deliveredto:{alias}" for alias in self._permissions.destination_aliases
+        )
+        query = f"before:{max(0, int(activation.timestamp()))} {{{alias_query}}}"
+        page = self._gateway.search_messages(
+            query=query,
+            page_token=str(page_token or "").strip() or None,
+            limit=limit,
+        )
+        counts = {
+            "candidate_count": 0,
+            "accepted_count": 0,
+            "ignored_count": 0,
+            "failed_count": 0,
+            "summary_count": 0,
+            "classification_count": 0,
+        }
+        for ref in list(page.messages)[:limit]:
+            counts["candidate_count"] += 1
+            outcome = self._process_message_id(
+                message_id=ref.message_id,
+                now=current,
+                activation_at=str((state or {}).get("activation_at") or ""),
+            )
+            for key in (
+                "accepted_count",
+                "ignored_count",
+                "failed_count",
+                "summary_count",
+                "classification_count",
+            ):
+                counts[key] += int(outcome.get(key) or 0)
+            if outcome.get("retry_required"):
+                raise RuntimeError("email_backfill_message_processing_incomplete")
+        return {
+            "status": "page_completed",
+            "next_page_token": page.next_page_token,
+            **counts,
+        }
 
     def _run_sync(
         self,
@@ -840,7 +866,12 @@ class EmailAgentService:
         validated_arguments: dict[str, Any],
         request_context: dict[str, Any],
     ) -> dict[str, Any]:
-        return self._typed_reads.canonicalize(
+        executor = (
+            self._typed_label_operations
+            if str(tool_id or "").strip().casefold() in EMAIL_MANAGED_LABEL_TOOLS
+            else self._typed_reads
+        )
+        return executor.canonicalize(
             tool_id=tool_id,
             validated_arguments=validated_arguments,
             request_context=request_context,
@@ -853,7 +884,13 @@ class EmailAgentService:
         services: dict[str, Any],
     ) -> dict[str, Any]:
         del services
-        return self._typed_reads.execute(envelope=envelope)
+        executor = (
+            self._typed_label_operations
+            if str(getattr(envelope, "tool_id", "")).strip().casefold()
+            in EMAIL_MANAGED_LABEL_TOOLS
+            else self._typed_reads
+        )
+        return executor.execute(envelope=envelope)
 
     def capability_access(self, *, context: dict[str, Any]) -> dict[str, Any]:
         """Return safe, content-free capability status for Main's runtime catalog."""
@@ -1148,20 +1185,12 @@ class EmailAgentService:
             corrected_by_user_id=user_id,
             now=_iso(_utc_now()),
         )
-        label_queue = self._with_label_reconciliation(
-            result={"status": "ok"},
-            now=_utc_now(),
-        )
         display = next(item.display_name for item in self._permissions.categories if item.key == category)
         return {
             "status": "ok",
             "message": (
                 f"I corrected {resolved.get('reference') or 'that email'} to {display} in Jarvis. "
-                + (
-                    "The matching managed Gmail label is queued for verified synchronization."
-                    if self.config.label_writes_enabled
-                    else "No Gmail label was changed."
-                )
+                "No Gmail label was changed."
             ),
             "operation_id": str(uuid4()),
             "classification": {
@@ -1170,7 +1199,7 @@ class EmailAgentService:
                 "decision_source": stored.get("decision_source"),
             },
             "gmail_message_id": str(resolved["gmail_message_id"]),
-            "managed_label_operations_queued": label_queue.get("managed_label_operations_queued", 0),
+            "managed_label_operations_queued": 0,
         }
 
     def _mark_spam(

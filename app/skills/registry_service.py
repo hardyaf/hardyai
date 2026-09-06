@@ -517,7 +517,9 @@ class SkillRegistryService:
                     "app.skills.domains.email_agent.storage:EmailAgentSQLiteStorage("
                     "email_sync_state,email_sync_runs,email_messages,email_threads,email_summaries,"
                     "email_classifications,email_user_state,email_reference_sets,email_action_links,"
-                    "email_label_operations,email_mailbox_operations);"
+                    "email_label_operations,email_mailbox_operations,email_managed_labels,"
+                    "email_message_managed_labels,email_tool_operations,"
+                    "email_managed_label_operations);"
                     "google_gmail_readonly+isolated_gmail_mailbox_writer"
                 ),
                 "critical_level": 1,

@@ -94,6 +94,20 @@ def test_generic_commitment_is_closed_and_has_no_intent_authority():
         {**action, "intent": "lists.add_item"},
         execution_mode="active",
     ) is None
+
+    continuation = normalize_main_turn_decision(
+        {
+            "mode": "execute_action",
+            "confidence": 0.0,
+            "reason_code": "continuation_action",
+        },
+        execution_mode="active",
+    )
+    assert continuation == {
+        "mode": "execute_action",
+        "confidence": 0.0,
+        "reason_code": "continuation_action",
+    }
     assert normalize_main_turn_decision(
         {
             "mode": "clarify_action",
