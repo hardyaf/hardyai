@@ -62,6 +62,9 @@ class DocumentStructuredSearchResponse(BaseModel):
 class DocumentReprocessRequest(BaseModel):
     idempotency_key: str = Field(min_length=8, max_length=120, pattern=r"^[A-Za-z0-9_.:-]+$")
     processing_tier: Literal["default", "review_fallback"] = "default"
+    operation_id: str | None = Field(default=None, min_length=16, max_length=120)
+    tool_id: str | None = Field(default=None, min_length=3, max_length=120)
+    arguments_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
 class DocumentReprocessResponse(BaseModel):
@@ -105,6 +108,9 @@ class DocumentEvidenceResponse(BaseModel):
 class DocumentMetadataProposalRequest(BaseModel):
     field_name: str = Field(min_length=1, max_length=40)
     proposed_value: str = Field(min_length=1, max_length=500)
+    operation_id: str | None = Field(default=None, min_length=16, max_length=120)
+    tool_id: str | None = Field(default=None, min_length=3, max_length=120)
+    arguments_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
 class DocumentMetadataProposalResponse(BaseModel):
@@ -175,6 +181,9 @@ class DocumentFieldDecisionRequest(BaseModel):
     review_decision_id: str = Field(min_length=8, max_length=160)
     decision_kind: Literal["confirm", "correct"]
     corrected_value: str | None = Field(default=None, max_length=500)
+    operation_id: str | None = Field(default=None, min_length=16, max_length=120)
+    tool_id: str | None = Field(default=None, min_length=3, max_length=120)
+    arguments_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
 class DocumentFieldDecisionResponse(BaseModel):
@@ -185,6 +194,37 @@ class DocumentFieldDecisionResponse(BaseModel):
     review_decision_id: str
     selected_observation_id: str | None = None
     decision_kind: Literal["confirm", "correct"]
+    idempotent_replay: bool = False
+
+
+class DocumentFieldConfirmationItem(BaseModel):
+    field_name: str = Field(min_length=1, max_length=120, pattern=r"^[a-z0-9_]+$")
+    observation_id: str = Field(min_length=8, max_length=120)
+    review_binding_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    review_decision_id: str = Field(min_length=8, max_length=160)
+
+
+class DocumentFieldConfirmationsRequest(BaseModel):
+    source_version_id: str = Field(min_length=8, max_length=120)
+    confirmations: list[DocumentFieldConfirmationItem] = Field(min_length=1, max_length=64)
+    operation_id: str = Field(min_length=16, max_length=120)
+    tool_id: Literal["documents.confirm_fields"]
+    arguments_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class DocumentFieldConfirmationsResponse(BaseModel):
+    document_id: str
+    source_version_id: str
+    decisions: list[DocumentFieldDecisionResponse] = Field(default_factory=list)
+    result_ref: str
+    idempotent_replay: bool = False
+
+
+class DocumentToolOperationCompleteRequest(BaseModel):
+    tool_id: str = Field(min_length=3, max_length=120)
+    arguments_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    target_ref: str = Field(min_length=1, max_length=256)
+    result_ref: str = Field(min_length=1, max_length=256)
 
 
 class DocumentActionProposalView(BaseModel):

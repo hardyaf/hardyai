@@ -205,7 +205,6 @@ def test_pytest_runtime_is_forced_to_disposable_database() -> None:
     assert database_path.parent.name == "pytest_runtime"
     assert database_path.name.startswith("jarvis_pytest_")
     assert settings.discord_enabled is False
-    assert settings.micro_model_enabled is False
     assert settings.main_repair_model_enabled is False
     assert settings.calendar_google_enabled is False
     assert settings.skill_artifact_auto_compile_enabled is False
@@ -220,8 +219,6 @@ def test_ollama_model_matching_normalizes_latest_tag() -> None:
 
 def test_configured_models_are_enabled_and_deduplicated() -> None:
     profile = SimpleNamespace(
-        micro_model_enabled=True,
-        micro_model_name="qwen2.5:3b",
         main_repair_model_enabled=True,
         main_repair_model_name="qwen2.5:3b",
     )
@@ -241,9 +238,6 @@ def test_model_probe_allows_reasoning_model_to_reach_visible_output(monkeypatch)
     monkeypatch.setattr(verify_install, "_request_json", fake_request_json)
     checks = InstallChecks()
     profile = SimpleNamespace(
-        micro_model_enabled=False,
-        micro_model_name="qwen2.5:3b",
-        micro_model_provider="ollama",
         main_repair_model_enabled=True,
         main_repair_model_name="gpt-oss:20b",
         main_repair_model_provider="ollama",
@@ -293,8 +287,6 @@ def test_live_smoke_accepts_model_backed_main_repair(monkeypatch) -> None:
     )
     checks = InstallChecks()
     profile = SimpleNamespace(
-        micro_model_enabled=True,
-        micro_model_name="qwen2.5:3b",
         main_repair_model_enabled=True,
         main_repair_model_name="gpt-oss:20b",
         operator_api_key="test-operator-key",
@@ -329,8 +321,6 @@ def test_live_smoke_refuses_operator_key_over_plain_remote_http(monkeypatch) -> 
     )
     checks = InstallChecks()
     profile = SimpleNamespace(
-        micro_model_enabled=True,
-        micro_model_name="qwen2.5:3b",
         main_repair_model_enabled=True,
         main_repair_model_name="gpt-oss:20b",
         operator_api_key="test-operator-key",
@@ -416,7 +406,6 @@ def test_web_research_verifier_probes_searxng_json(monkeypatch) -> None:
         web_research_timeout_seconds=10,
         web_research_safe_search=1,
         web_research_children_enabled=False,
-        micro_model_enabled=False,
         main_repair_model_enabled=True,
     )
 
@@ -432,7 +421,6 @@ def test_web_research_verifier_rejects_missing_model_lane() -> None:
     profile = SimpleNamespace(
         web_research_enabled=True,
         web_research_provider="searxng",
-        micro_model_enabled=False,
         main_repair_model_enabled=False,
     )
 

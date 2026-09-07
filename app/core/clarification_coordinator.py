@@ -6,7 +6,7 @@ from uuid import uuid4
 
 from app.core.action_execution import ActionExecutionService
 from app.core.domain_context import DomainContextService
-from app.core.micro_jarvis import MicroDecision
+from app.core.types import RoutingDecision
 from app.core.pending_interaction import PendingInteractionCoordinator
 from app.core.session_store import SessionRecord, SessionStore
 from app.core.session_transitions import SessionTransitionService
@@ -53,6 +53,14 @@ class ClarificationCoordinator:
     ) -> dict[str, Any] | None:
         pending = self._pending_interactions.get(session=session)
         if pending is None:
+            return None
+
+        # Approval decisions are made through the protected review channel, not
+        # by interpreting a later conversational turn as clarification input.
+        # Keep the opaque correlation pointer until its normal TTL/overwrite,
+        # while allowing the user to continue the conversation independently.
+        pending_type = str(pending.get("pending_type") or pending.get("kind") or "").strip()
+        if pending_type == "action_approval_v1":
             return None
 
         intent = self._coerce_intent(str(pending.get("intent") or ""))
@@ -260,7 +268,7 @@ class ClarificationCoordinator:
         entities: dict[str, Any],
         open_tool_followup: Callable[..., dict[str, Any] | None],
     ) -> dict[str, Any]:
-        repaired = MicroDecision(
+        repaired = RoutingDecision(
             intent=intent,
             confidence=0.8,
             entities=entities,

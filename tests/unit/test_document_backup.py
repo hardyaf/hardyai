@@ -159,18 +159,48 @@ def test_document_reader_check_accepts_version_14_without_mutation(tmp_path, cap
     }
 
 
-def test_document_reader_check_rejects_newer_schema(tmp_path, capsys) -> None:
+def test_document_reader_check_rejects_unproven_newer_schema(tmp_path, capsys) -> None:
     source = tmp_path / "documents-newer.db"
     connection = sqlite3.connect(source)
     try:
-        connection.execute("PRAGMA user_version = 15")
+        connection.execute("PRAGMA user_version = 16")
         connection.commit()
     finally:
         connection.close()
 
     assert reader_check(Namespace(source=str(source))) == 1
     assert json.loads(capsys.readouterr().out) == {
-        "reason": "schema_newer",
+        "reason": "compatibility_table_missing",
         "result": "incompatible",
-        "version": 15,
+        "version": 16,
+    }
+
+
+def test_document_reader_check_accepts_complete_additive_newer_chain(tmp_path, capsys) -> None:
+    source = tmp_path / "documents-additive.db"
+    connection = sqlite3.connect(source)
+    try:
+        connection.execute(
+            """
+            CREATE TABLE document_schema_reader_compatibility (
+                schema_version INTEGER PRIMARY KEY,
+                minimum_reader_version INTEGER NOT NULL,
+                change_class TEXT NOT NULL,
+                description TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO document_schema_reader_compatibility VALUES (16, 15, 'additive', 'fixture')"
+        )
+        connection.execute("PRAGMA user_version = 16")
+        connection.commit()
+    finally:
+        connection.close()
+
+    assert reader_check(Namespace(source=str(source))) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "reason": "additive_reader_bridge",
+        "result": "compatible",
+        "version": 16,
     }

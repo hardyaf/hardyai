@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 
 from app.core.request_pipeline import JarvisRequestPipeline, PipelineDecision
 from app.core.state_machine import choose_owner_for_intent
-from app.core.types import FAST_COMMAND_INTENTS, Intent, SessionOwner
+from app.core.types import Intent, SessionOwner
 
 if TYPE_CHECKING:
     from app.skills.registry_service import SkillRegistryService
@@ -17,7 +17,7 @@ class AgentRoutingDecision:
     pipeline: PipelineDecision
     reasons: list[str]
     channel_forced_main: bool
-    micro_contract_escalation: bool
+    legacy_contract_escalation: bool
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -25,7 +25,7 @@ class AgentRoutingDecision:
             "pipeline": self.pipeline.to_dict(),
             "reasons": list(self.reasons),
             "channel_forced_main": self.channel_forced_main,
-            "micro_contract_escalation": self.micro_contract_escalation,
+            "legacy_contract_escalation": self.legacy_contract_escalation,
         }
 
 
@@ -55,7 +55,7 @@ class AgentRoutingPolicy:
         )
         reasons: list[str] = []
         channel_forced_main = False
-        micro_contract_escalation = False
+        legacy_contract_escalation = False
 
         if (
             force_main_channel
@@ -65,19 +65,6 @@ class AgentRoutingPolicy:
             owner = SessionOwner.MAIN
             channel_forced_main = True
             reasons.append("channel_force_main_owner")
-
-        if (
-            owner == SessionOwner.MICRO
-            and intent in FAST_COMMAND_INTENTS
-            and self._skill_registry is not None
-            and not self._skill_registry.is_micro_allowed_for_intent(
-                skill=skill,
-                intent=intent.value,
-            )
-        ):
-            owner = SessionOwner.MAIN
-            micro_contract_escalation = True
-            reasons.append("micro_contract_escalation")
 
         pipeline = self._pipeline.classify(
             intent=intent,
@@ -90,5 +77,5 @@ class AgentRoutingPolicy:
             pipeline=pipeline,
             reasons=reasons,
             channel_forced_main=channel_forced_main,
-            micro_contract_escalation=micro_contract_escalation,
+            legacy_contract_escalation=legacy_contract_escalation,
         )

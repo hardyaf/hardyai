@@ -33,6 +33,9 @@ class DocumentFieldReviewCoordinator:
         decision_kind: str,
         corrected_value: str | None,
         context: dict[str, Any],
+        operation_id: str | None = None,
+        tool_id: str | None = None,
+        arguments_hash: str | None = None,
     ) -> dict[str, Any]:
         source_version_id = str(fields_response.get("source_version_id") or "").strip()
         if not source_version_id:
@@ -89,6 +92,13 @@ class DocumentFieldReviewCoordinator:
             decision_kind=decision_kind,
             context=context,
         )
+        operation_kwargs: dict[str, str] = {}
+        if operation_id:
+            operation_kwargs = {
+                "operation_id": operation_id,
+                "tool_id": str(tool_id or ""),
+                "arguments_hash": str(arguments_hash or ""),
+            }
         applied = self.gateway.apply_field_decision(
             document_id=document_id,
             source_version_id=source_version_id,
@@ -98,12 +108,99 @@ class DocumentFieldReviewCoordinator:
             review_decision_id=str(decision["decision_id"]),
             decision_kind=decision_kind,
             corrected_value=corrected_value,
+            **operation_kwargs,
         )
         self.reviews.mark_applied(
             decision_id=str(decision["decision_id"]),
             action_receipt_ref=f"document-field-decision:{applied['field_decision_id']}",
         )
         return applied
+
+    def apply_confirmations(
+        self,
+        *,
+        document_id: str,
+        document_class: str,
+        fields_response: dict[str, Any],
+        candidates: list[dict[str, Any]],
+        context: dict[str, Any],
+        operation_id: str,
+        tool_id: str,
+        arguments_hash: str,
+    ) -> dict[str, Any]:
+        """Approve bounded field reviews, then commit their Documents writes atomically."""
+
+        source_version_id = str(fields_response.get("source_version_id") or "").strip()
+        if not source_version_id:
+            raise ValueError("document source version is unavailable")
+        confirmations: list[dict[str, str]] = []
+        for current in sorted(
+            candidates[:64], key=lambda item: str(item.get("field_name") or "").casefold()
+        ):
+            field_name = str(current.get("field_name") or "").strip().casefold()
+            spec = field_spec_for(document_class, field_name)
+            observation_id = str(current.get("observation_id") or "").strip()
+            review_binding_hash = str(
+                current.get("review_binding_hash") or ""
+            ).strip().casefold()
+            if not observation_id or len(review_binding_hash) != 64:
+                raise ValueError("document field review binding is unavailable")
+            review_item_hash = field_decision_item_hash(
+                review_binding_hash=review_binding_hash,
+                decision_kind="confirm",
+                corrected_value=None,
+            )
+            review = self.reviews.create_review(
+                review_kind=ReviewKind.FIELD_CORRECTION,
+                subject_type="document_field_observation",
+                subject_id=observation_id,
+                subject_version=source_version_id,
+                item_hash=review_item_hash,
+                sensitivity=str(current.get("sensitivity") or spec.sensitivity.value),
+                source_ref=document_id,
+                confidence=float(current.get("confidence") or 0.0),
+                validator_summary=[{"code": "user_confirm", "passed": True}],
+                target_operation="documents.apply_field_decision",
+            )
+            decision = self._approve_or_recover(
+                review=review,
+                review_item_hash=review_item_hash,
+                document_id=document_id,
+                field_name=field_name,
+                decision_kind="confirm",
+                context=context,
+            )
+            confirmations.append(
+                {
+                    "field_name": field_name,
+                    "observation_id": observation_id,
+                    "review_binding_hash": review_binding_hash,
+                    "review_decision_id": str(decision["decision_id"]),
+                }
+            )
+        result = self.gateway.confirm_fields(
+            document_id=document_id,
+            source_version_id=source_version_id,
+            confirmations=confirmations,
+            operation_id=operation_id,
+            tool_id=tool_id,
+            arguments_hash=arguments_hash,
+        )
+        self.mark_confirmation_result_applied(result)
+        return result
+
+    def mark_confirmation_result_applied(self, result: dict[str, Any]) -> None:
+        for raw in result.get("decisions", [])[:64]:
+            if not isinstance(raw, dict):
+                raise ValueError("document field confirmation result is invalid")
+            decision_id = str(raw.get("review_decision_id") or "").strip()
+            field_decision_id = str(raw.get("field_decision_id") or "").strip()
+            if not decision_id or not field_decision_id:
+                raise ValueError("document field confirmation result is invalid")
+            self.reviews.mark_applied(
+                decision_id=decision_id,
+                action_receipt_ref=f"document-field-decision:{field_decision_id}",
+            )
 
     def _approve_or_recover(
         self,

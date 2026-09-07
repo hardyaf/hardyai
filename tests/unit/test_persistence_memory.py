@@ -5,7 +5,6 @@ from uuid import uuid4
 import pytest
 
 from app.core.main_jarvis import MainJarvis
-from app.core.micro_jarvis import MicroJarvis
 from app.core.types import Intent, SessionOwner, SessionState
 from app.core.persistence_policy import persistence_policy
 from tests.router_support import RegistryBackedTestRouter as JarvisRouter
@@ -42,7 +41,6 @@ def test_router_persists_sessions_events_and_memory():
             ]
         )
         router = JarvisRouter(
-            micro_jarvis=MicroJarvis(),
             main_jarvis=MainJarvis(),
             session_store=SessionStore(persistence=store),
             runtime_power=RuntimePowerController(),
@@ -66,7 +64,7 @@ def test_router_persists_sessions_events_and_memory():
 
         session = store.get_session("persist-1")
         assert session is not None
-        assert session["owner"] == "micro_jarvis"
+        assert session["owner"] == "main_jarvis"
 
         events = store.recent_events(limit=20)
         assert any(item["event_type"] == "input.received" for item in events)
@@ -75,9 +73,9 @@ def test_router_persists_sessions_events_and_memory():
         assert "text" not in received["payload"]
         assert "normalized_text" not in received["payload"]
         assert received["payload"]["text_chars"] == len("add milk to groceries")
-        micro = next(item for item in events if item["event_type"] == "micro.decision")
-        assert "entities" not in micro["payload"]
-        assert micro["payload"]["entity_fields"]
+        routing = next(item for item in events if item["event_type"] == "routing.compatibility_decision")
+        assert "entities" not in routing["payload"]
+        assert isinstance(routing["payload"]["entity_fields"], list)
 
         memories = store.recent_memory_entries(limit=20)
         assert len(memories) == 1
@@ -105,7 +103,6 @@ def test_document_intent_fails_closed_when_skill_error_loses_policy_marker():
             ]
         )
         router = JarvisRouter(
-            micro_jarvis=MicroJarvis(),
             main_jarvis=MainJarvis(),
             session_store=SessionStore(persistence=store),
             runtime_power=RuntimePowerController(),
@@ -177,7 +174,6 @@ def test_typed_tool_policy_keeps_live_answer_out_of_every_generic_sink(policy):
             ]
         )
         router = JarvisRouter(
-            micro_jarvis=MicroJarvis(),
             main_jarvis=MainJarvis(),
             session_store=SessionStore(persistence=store),
             runtime_power=RuntimePowerController(),

@@ -41,7 +41,7 @@ Use this to avoid false promises while still understanding user intent at produc
   delete, mark read, fetch attachment content, or apply Gmail labels.
 - Email-to-List/Calendar promotion is staged but not executed in the read-only implementation; generic
   Tasks and Wave providers are also not configured.
-- Micro Jarvis is optimized for fast routing and common commands.
+- Main is the only live semantic reasoning plane and selects authorized typed tools at runtime.
 - Unsupported intents should return `not_actionable` with clear messaging.
 
 ## Planned Capabilities (Not Wired Yet)

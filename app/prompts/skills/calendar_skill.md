@@ -19,31 +19,6 @@ legacy_skill_ids:
   - skill.calendar.core
 version: 2
 
-micro_enabled: true
-micro_functions:
-  - function_id: calendar.view
-    intent: calendar.view
-    regex_contract: "direct bounded calendar view with deterministic date extraction"
-    supported_actions:
-      - read_calendar
-    required_entities:
-      - when_hint
-    unsupported_or_escalate:
-      - calendar.add_event
-      - calendar.update_event
-      - calendar.delete_event
-      - calendar.invite
-      - ambiguous_time_reference
-micro_failure_handoff:
-  baseline_context_keys:
-    - micro_intent
-    - micro_confidence
-    - micro_entities
-    - micro_ambiguity_flags
-    - required_missing_fields
-    - token_session_turn_summaries
-  capability_context_keys: []
-
 main_handoff_context:
   always_pass_from_session:
     - pending_clarification
@@ -132,12 +107,20 @@ main_tools:
           items:
             type: object
             additionalProperties: false
-            required: [event_ref, title, start, end, all_day, location, calendar_name]
+            required: [event_ref, calendar_ref, resource_version, title, start, end, all_day, location, calendar_name]
             properties:
               event_ref:
                 type: string
                 minLength: 16
                 maxLength: 80
+              calendar_ref:
+                type: string
+                minLength: 16
+                maxLength: 100
+              resource_version:
+                type: string
+                minLength: 16
+                maxLength: 100
               title:
                 type: string
                 minLength: 1
@@ -218,6 +201,180 @@ main_tools:
               maxLength: 64
         truncated:
           type: boolean
+  - tool_id: calendar.create_event
+    contract_version: 1
+    purpose: "Create one event without attendees using exact start/end values. Never add invitees; use calendar.create_event_with_invites for outbound invitations. The server resolves the Calendar target, timezone, and resource version before operation identity."
+    interactive: true
+    effect: external_write
+    approval_rule: none
+    approval_conditions: []
+    idempotency: required
+    sensitivity: private
+    persistence: standard
+    effect_cardinality: single
+    runtime_dependencies: []
+    transferable_observation_fields:
+      - pattern: /event_ref
+        scope: same_domain
+      - pattern: /resource_version
+        scope: same_domain
+    timeout_seconds: 30
+    max_result_items: 1
+    max_observation_chars: 4000
+    legacy_intents: [calendar.add_event]
+    input_schema:
+      type: object
+      additionalProperties: false
+      required: [title, start, end, all_day, timezone, calendar_scope]
+      properties: &calendar_create_properties
+        title: {type: string, minLength: 1, maxLength: 200}
+        start: {type: string, minLength: 10, maxLength: 64}
+        end: {type: string, minLength: 10, maxLength: 64}
+        all_day: {type: boolean}
+        timezone: {type: string, minLength: 1, maxLength: 64}
+        calendar_scope: {type: string, minLength: 1, maxLength: 100}
+        calendar_ref: {type: string, minLength: 16, maxLength: 100}
+        resource_version: {type: string, minLength: 16, maxLength: 100}
+        location: {type: string, minLength: 1, maxLength: 300}
+        description: {type: string, minLength: 1, maxLength: 2000}
+    observation_schema: &calendar_write_observation
+      type: object
+      additionalProperties: false
+      required: [action, sync_status, provider_event_id, event_ref, calendar_ref, resource_version, idempotent_replay, event]
+      properties:
+        action: {type: string, enum: [created, updated, deleted]}
+        sync_status: {type: string, enum: [synced, not_synced]}
+        provider_event_id: {type: string, minLength: 0, maxLength: 1024}
+        event_ref: {type: string, minLength: 16, maxLength: 100}
+        calendar_ref: {type: string, minLength: 16, maxLength: 100}
+        resource_version: {type: string, minLength: 16, maxLength: 100}
+        idempotent_replay: {type: boolean}
+        event:
+          type: object
+          additionalProperties: false
+          required: [title, start, end, all_day, timezone, location, attendee_emails, deleted]
+          properties:
+            title: {type: string, minLength: 0, maxLength: 200}
+            start: {type: string, minLength: 0, maxLength: 64}
+            end: {type: string, minLength: 0, maxLength: 64}
+            all_day: {type: boolean}
+            timezone: {type: string, minLength: 1, maxLength: 64}
+            location: {type: string, minLength: 0, maxLength: 300}
+            attendee_emails:
+              type: array
+              minItems: 0
+              maxItems: 20
+              uniqueItems: true
+              items: {type: string, minLength: 3, maxLength: 254}
+            deleted: {type: boolean}
+  - tool_id: calendar.create_event_with_invites
+    contract_version: 1
+    purpose: "Create one exact event and send invitations to one or more explicit email addresses. This is outbound communication and always pauses for formal approval."
+    interactive: true
+    effect: outbound_communication
+    approval_rule: always
+    approval_conditions: []
+    idempotency: required
+    sensitivity: private
+    persistence: redacted
+    effect_cardinality: single
+    runtime_dependencies: [action_approval]
+    transferable_observation_fields:
+      - pattern: /event_ref
+        scope: same_domain
+      - pattern: /resource_version
+        scope: same_domain
+    timeout_seconds: 30
+    max_result_items: 1
+    max_observation_chars: 4000
+    legacy_intents: []
+    input_schema:
+      type: object
+      additionalProperties: false
+      required: [title, start, end, all_day, timezone, calendar_scope, invitee_emails]
+      properties:
+        <<: *calendar_create_properties
+        invitee_emails:
+          type: array
+          minItems: 1
+          maxItems: 20
+          uniqueItems: true
+          items: {type: string, minLength: 3, maxLength: 254}
+    observation_schema: *calendar_write_observation
+  - tool_id: calendar.update_event
+    contract_version: 1
+    purpose: "Update only the supplied non-attendee fields of one exact event. Use event_ref/event_start from calendar.query_events; the server re-resolves the target and binds its current resource version before a conditional write."
+    interactive: true
+    effect: external_write
+    approval_rule: none
+    approval_conditions: []
+    idempotency: required
+    sensitivity: private
+    persistence: standard
+    effect_cardinality: single
+    runtime_dependencies: []
+    transferable_observation_fields:
+      - pattern: /event_ref
+        scope: same_domain
+      - pattern: /resource_version
+        scope: same_domain
+    timeout_seconds: 30
+    max_result_items: 1
+    max_observation_chars: 4000
+    legacy_intents: [calendar.update_event]
+    input_schema:
+      type: object
+      additionalProperties: false
+      required: [event_ref, event_start, calendar_scope, timezone, patch]
+      properties:
+        event_ref: {type: string, minLength: 16, maxLength: 100}
+        event_start: {type: string, minLength: 10, maxLength: 64}
+        calendar_scope: {type: string, minLength: 1, maxLength: 100}
+        timezone: {type: string, minLength: 1, maxLength: 64}
+        calendar_ref: {type: string, minLength: 16, maxLength: 100}
+        resource_version: {type: string, minLength: 16, maxLength: 100}
+        patch:
+          type: object
+          additionalProperties: false
+          required: []
+          minProperties: 1
+          properties:
+            title: {type: string, minLength: 1, maxLength: 200}
+            start: {type: string, minLength: 10, maxLength: 64}
+            end: {type: string, minLength: 10, maxLength: 64}
+            all_day: {type: boolean}
+            location: {type: string, minLength: 1, maxLength: 300}
+            description: {type: string, minLength: 1, maxLength: 2000}
+    observation_schema: *calendar_write_observation
+  - tool_id: calendar.delete_event
+    contract_version: 1
+    purpose: "Delete one exact event using event_ref/event_start from calendar.query_events. The server re-resolves the target and binds its current resource version before a conditional delete. Always requires formal approval."
+    interactive: true
+    effect: destructive_external
+    approval_rule: always
+    approval_conditions: []
+    idempotency: required
+    sensitivity: private
+    persistence: redacted
+    effect_cardinality: single
+    runtime_dependencies: [action_approval]
+    transferable_observation_fields: []
+    timeout_seconds: 30
+    max_result_items: 1
+    max_observation_chars: 4000
+    legacy_intents: [calendar.delete_event]
+    input_schema:
+      type: object
+      additionalProperties: false
+      required: [event_ref, event_start, calendar_scope, timezone]
+      properties:
+        event_ref: {type: string, minLength: 16, maxLength: 100}
+        event_start: {type: string, minLength: 10, maxLength: 64}
+        calendar_scope: {type: string, minLength: 1, maxLength: 100}
+        timezone: {type: string, minLength: 1, maxLength: 64}
+        calendar_ref: {type: string, minLength: 16, maxLength: 100}
+        resource_version: {type: string, minLength: 16, maxLength: 100}
+    observation_schema: *calendar_write_observation
 ---
 
 # Calendar Skill
@@ -435,27 +592,13 @@ Never:
 - never assume duration unless system defines default
 - always confirm destructive actions if ambiguity exists
 
-## MicroJarvis Contract
+## Execution Ownership
 
-### Micro functions that are allowed
-
-- None.
-
-### Escalation triggers to Main Jarvis
-
-- All calendar requests route to Main Jarvis.
-
-### Failure handoff payload to Main Jarvis
-
-- Include baseline micro decision context for interpretability.
-- Include `required_missing_fields` when micro classification indicates missing required inputs.
-- Include `last_event_reference`, `last_calendar_action`, and the condensed session summary.
-- Resolve deictic follow-ups such as "make that all day" from the latest unambiguous calendar event.
-- If no safe event reference is available, preserve `deictic_event_reference` and ask which event.
+Main owns every interactive Calendar turn.
 
 ## Main Jarvis Responsibilities
 
-Since micro is disabled, all requests go through Main Jarvis.
+All interactive Calendar requests go through Main Jarvis.
 
 Main Jarvis must:
 - interpret natural language time expressions

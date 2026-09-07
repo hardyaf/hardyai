@@ -271,7 +271,7 @@ class MainJarvis:
 
     def respond(self, text: str, context: dict[str, Any] | None = None) -> dict[str, Any]:
         context = context or {}
-        intent = str(context.get("micro_intent") or "unknown")
+        intent = str(context.get("initial_intent") or "unknown")
         all_lights_action = self._extract_all_lights_action(text)
         switch_names = self._extract_switch_names(context)
         last_list_name = str(self._extract_last_list_name(context) or "").strip()

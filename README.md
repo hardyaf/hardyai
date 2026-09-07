@@ -6,7 +6,7 @@ web research, session memory, and action verification through registered skill d
 
 The v0 deployment works. The present engineering focus is a safe first-pass agent loop with explicit
 authorization, inspectable state, bounded concurrency, durable writes, and clean separation between
-Micro, Main, skills, sessions, memory, and adapters.
+Main reasoning, skills, sessions, memory, and adapters.
 
 ## Current runtime decisions
 
@@ -16,8 +16,8 @@ Micro, Main, skills, sessions, memory, and adapters.
 - Every production Compose command must include `--env-file .env`; otherwise model, Discord, and bind
   settings can silently fall back to disabled or loopback defaults.
 - The production GPU profile is sized for an NVIDIA RTX 3090 with 24 GB VRAM.
-- MicroJarvis uses `qwen2.5:7b`. It is an explicit, fast command classifier/executor.
-- Main repair and conversation are migrating from `gpt-oss:20b` to `qwen3.8:27b` under the gated
+- Main is the only semantic model plane. Main repair and conversation are migrating from
+  `gpt-oss:20b` to `qwen3.8:27b` under the gated
   [Main model migration plan](docs/QWEN38-MAIN-MIGRATION-PLAN.md). The protected Hardybot `.env`
   remains authoritative during rollout; `gpt-oss:20b` is retained as the rollback model.
 - SQLite is authoritative for sessions, skills, domain state, action tickets, and the durable job
@@ -27,13 +27,12 @@ Micro, Main, skills, sessions, memory, and adapters.
 
 ## Request and authorization boundaries
 
-Discord has two deliberate lanes:
+Discord has one semantic lane:
 
-- A message beginning with the configured prefix (`!` in production) is an explicit Micro command.
-  Both `!phrase` and `! phrase` are accepted.
-- An accepted message without the prefix bypasses Micro and enters Main as an `unknown` handoff.
-- The Discord adapter records `micro_command_explicit`; the router fails closed to Main when that
-  trusted field is absent or false.
+- A message beginning with the configured prefix (`!` in production) remains accepted UI syntax.
+  Both `!phrase` and `! phrase` are accepted, and the prefix grants no execution authority.
+- Prefixed and unprefixed accepted messages enter Main through the same typed commitment boundary.
+- The Discord adapter records `command_prefix_explicit` for provenance only.
 - Prefix removal happens only after the adapter creates the command envelope.
 
 The embedded Discord adapter calls the bounded in-process turn service. It does not make a loopback
@@ -67,7 +66,7 @@ behavior. Domain writes that return success are committed synchronously.
 
 ```text
 app/api/                 HTTP routes, trusted principals, operator auth, security headers
-app/core/                request pipeline, Micro/Main routing, planning, session state
+app/core/                Main request pipeline, planning, typed-tool loop, session state
 app/skills/              registry, capability projection, execution dispatcher, domain packages
 app/services/            bounded turn service, durable writes, adapters, schedulers, integrations
 app/db/                  SQLite schema, migrations, and persistence

@@ -1,10 +1,10 @@
 # Reasoning-Led Capability Execution Plan
 
-Status: `execution_in_progress`; P0A, P1, P2, and accelerated P5A complete; P3 framework rollout evidence remains open; P5F Email mailbox-state expansion is live with corrected Discord canary, model-certification, and observation gates open
+Status: `implementation_complete_batch_gate_pending`; P0A-P2, P5A, P6, and P7 are complete; P3/P5 observation debt remains; P5C-P5E and P8-P10 implementations await the consolidated authoritative gates; P11 is prepared but unexecuted
 
 Prepared: 2026-08-30
 
-Current phase: `P5F Email reasoning and central-inbox management is live; corrected real-Discord canary pending before expanded observation`
+Current phase: `P10A-P10B implementation complete locally; P11 consolidated certification runbook ready`
 
 Authority: this plan records the approved architecture. A later instruction to begin work authorizes
 only the named phase or subphase. Completing one phase does not authorize the next phase, production
@@ -442,6 +442,13 @@ review, operation, authorization-binding, batch-manifest, and transfer-binding I
 execution. Same-key/same-payload reuse returns the existing job; any payload mismatch is a terminal
 conflict. Enqueue failure rolls the entire decision transaction back. Duplicate identical decisions
 return the existing decision; conflicts fail.
+
+An `executed|denied|failed_terminal` transition atomically enqueues one content-free
+`review.outcome.discord.v1` job with dedupe key
+`review-outcome-discord:v1:<proposal_id>:<terminal_state>`. Its closed payload carries only proposal,
+review, operation, authorization-binding, terminal-state, and symbolic-destination bindings. Delivery
+re-resolves the protected destination, publishes a bounded status/reason and receipt reference when one
+exists, and records the Discord receipt. It never carries destination arguments or provider content.
 
 The worker may claim only an unexpired `approved` proposal and atomically moves it to `executing` under
 the durable job's lease/fencing token. Immediately before dispatch it rechecks every binding, descriptor,
@@ -1153,14 +1160,14 @@ Global invariants:
 | P4 | Email read/query proving slice | implementation retained; activation absorbed by P5F | implementation_verified_activation_superseded |
 | P5A | Lists end-to-end reasoning slice | Lists reads plus safe create/add may be active | complete |
 | P5F | Accelerated Email reasoning and central-inbox management | Email routed reads plus additive labels and reversible read/Inbox state may be active | mailbox_state_discord_canary_pending |
-| P5B-E | Remaining read surfaces | per-domain active reads | P5B default-calendar observation in progress; P5C-E not started |
-| P6 | Durable approval and protected Discord delivery | approval path available | not_started |
-| P7 | Ticket/receipt/recovery hardening | safer effects | not_started |
-| P8A-E | Existing writes by domain/risk | per-domain active writes | not_started |
-| P9 | Cross-domain composition and partial completion | ordinary enabled-tool composition | not_started |
-| P10A | Main-only cutover with dormant Micro rollback | Main semantic authority | not_started |
-| P10B | Micro code retirement | Main only | review_required |
-| P11 | Authoritative Ubuntu certification and release | deployed or rolled back | not_started |
+| P5B-E | Remaining read surfaces | per-domain active reads | P5B observation in progress; P5C-E implementation complete/batch gate pending |
+| P6 | Durable approval and protected Discord delivery | approval path available | complete |
+| P7 | Ticket/receipt/recovery hardening | safer effects | complete |
+| P8A-E | Existing writes by domain/risk | per-domain active writes | implementation_complete_activation_gates_pending |
+| P9 | Cross-domain composition and partial completion | ordinary enabled-tool composition | implementation_complete_batch_gate_pending |
+| P10A | Main-only cutover | Main semantic authority | implementation_complete_batch_gate_pending |
+| P10B | Retired classifier code removal | Main only | implementation_complete_batch_gate_pending |
+| P11 | Authoritative Ubuntu certification and release | deployed or rolled back | runbook_ready_batch_pending |
 
 ## Phase execution protocol
 
@@ -2203,7 +2210,7 @@ chooses to share those calendars and the protected bindings can be reconciled ex
 
 ### P5C - Home/Lights reads and naming repair
 
-Status: `not_started`
+Status: `implementation_complete_batch_gate_pending`
 Depends on: `P4` framework gate; P5A/P5B need not be complete
 Runtime default after subphase: Home reads may be independently active
 
@@ -2211,26 +2218,43 @@ Allowed files: `app/skills/domains/lights/context.py`, `app/skills/domains/light
 `app/skills/domains/lights/service.py`, `app/skills/domains/lights/storage.py`,
 `app/skills/domains/lights/receipts.py`, `app/prompts/skills/lights_skill.md`,
 `tests/unit/test_home_service_persistence.py`,
-`tests/unit/test_skill_context_contracts.py`, and `tests/unit/test_main_tool_loop.py`.
+`tests/unit/test_skill_context_contracts.py`, `tests/unit/test_main_tool_loop.py`, and composition-only
+`app/runtime.py` registration of the Home typed handler. The composition-root addition is required by
+the existing `SkillExecutionDispatcher`; it may not contain Home policy or read behavior.
+
+P5C reuse and ownership decision: reuse `HomeService` and `LightsStorage` as the existing simulated
+Home state authority, the Markdown/SQLite skill registry for discovery, and the existing authorized
+typed executor/Main loop for policy, bounds, and dispatch. No new store, queue, identity, policy,
+credential surface, provider, or physical-device claim is introduced. The existing `switches` table
+remains authoritative; read observations are bounded projections and create no durable data or action
+log effects.
 
 Tasks:
 
-- [ ] `P5C-01` Publish and implement `home.list_devices` and `home.get_device_state` over the existing
+- [x] `P5C-01` Publish and implement `home.list_devices` and `home.get_device_state` over the existing
   simulated SQLite authority; use canonical opaque references and bounded alias hints.
-- [ ] `P5C-02` Replace stale `home.get_switch_state`/`home.list_switches` declarations and receipt names
+- [x] `P5C-02` Replace stale `home.get_switch_state`/`home.list_switches` declarations and receipt names
   additively while retaining legacy compatibility aliases outside the model projection.
-- [ ] `P5C-03` Return ambiguity instead of silently selecting a fuzzy candidate. Always state simulated
+- [x] `P5C-03` Return ambiguity instead of silently selecting a fuzzy candidate. Always state simulated
   state; do not imply physical-device truth.
-- [ ] `P5C-04` Test exact/alias/ambiguous/missing devices, user scope, bounded enumeration, stale aliases,
+- [x] `P5C-04` Test exact/alias/ambiguous/missing devices, user scope, bounded enumeration, stale aliases,
   and zero action-log writes.
 
 Gate and rollback: targeted Home tests, common exit commands, and a 24-hour read canary with domain
 `home` and only `home.list_devices,home.get_device_state` newly present in the operation allowlist. Remove
 those IDs to roll back; remove the domain only if no Home operation remains active.
 
+Implementation evidence (2026-09-06): baseline commit `c8c3a95`. The source tranche publishes only
+`home.list_devices` and `home.get_device_state`, adapts the existing simulated Home service/storage,
+registers the typed handler in the composition root, uses stable `device_v1` references, and retains the
+two historical read names only as non-projected compatibility aliases. The focused Home suite passed
+11 tests in 0.76 seconds; targeted Python static-error checks and `git diff --check` passed. Per the
+user's batch-verification direction, the common architecture/full/export gates, model certification,
+Ubuntu promotion, activation, and 24-hour canary remain pending. No runtime flags or deployment changed.
+
 ### P5D - Documents restricted reads
 
-Status: `not_started`
+Status: `implementation_complete_batch_gate_pending`
 Depends on: `P4` framework gate; other P5 subphases need not be complete
 Runtime default after subphase: scoped Documents reads may be independently active
 
@@ -2239,18 +2263,29 @@ Allowed files: `app/skills/domains/documents/handler.py`,
 `app/skills/domains/documents/schemas.py`, `app/skills/domains/documents/types.py`,
 `app/skills/domains/documents/permissions.py`, `app/prompts/skills/documents_skill.md`,
 `tests/unit/test_document_query_service.py`, `tests/unit/test_document_phase10_restricted_gate.py`,
-`tests/unit/test_document_request_guard.py`, and `tests/unit/test_main_tool_loop.py`.
+`tests/unit/test_document_request_guard.py`, `tests/unit/test_main_tool_loop.py`, and composition-only
+`app/runtime.py` registration of the Documents typed handler. The composition-root addition is required
+by the existing `SkillExecutionDispatcher`; it may not contain Documents policy or query behavior.
+
+P5D reuse and ownership decision: reuse `DocumentQueryService`, its existing bounded gateway port, the
+shared `HumanReviewService`, the trusted Discord attachment context, the Markdown/SQLite skill registry,
+and the authorized typed executor/Main loop. Paperless remains authoritative for originals; the isolated
+Documents store remains authoritative for mappings, derivatives, fields, and reviews; Core receives only
+the existing content-free control data. No store, provider, queue, credential surface, or permission
+authority is added. `query_service.py` is near the size ratchet, so P5D limits its change there to existing
+read bounds and centralizes typed projection in the small domain handler. A later write phase must extract
+mixed query/mutation responsibilities before expanding that service further.
 
 Tasks:
 
-- [ ] `P5D-01` Publish truthful contracts for `documents.upload_capability`, `documents.search`,
+- [x] `P5D-01` Publish truthful contracts for `documents.upload_capability`, `documents.search`,
   `documents.status`, `documents.inspect`, `documents.source_link`, and `documents.list_reviews`.
-- [ ] `P5D-02` Preserve the existing operator versus scoped-Discord permission matrix. Discovery must not
+- [x] `P5D-02` Preserve the existing operator versus scoped-Discord permission matrix. Discovery must not
   reveal document existence outside scope; every Discord call must recheck current attachment binding.
-- [ ] `P5D-03` Preserve restricted-read/no-generic-memory behavior and all content/item/field/snippet
+- [x] `P5D-03` Preserve restricted-read/no-generic-memory behavior and all content/item/field/snippet
   bounds. Return provider artifacts only as existing safe links or opaque IDs, never model-visible
   provider objects or source bytes.
-- [ ] `P5D-04` Test cross-user/channel denial, stale attachment, unsupported operation, injection content,
+- [x] `P5D-04` Test cross-user/channel denial, stale attachment, unsupported operation, injection content,
   truncation, and exact equivalence with legacy authorized reads.
 
 Gate and rollback: all named restricted-boundary tests plus common exit commands and a 24-hour scoped
@@ -2260,9 +2295,20 @@ operation allowlist. Any content
 leak is a global rollback trigger. Remove those six IDs to roll back; remove the domain only if no
 Documents operation remains active.
 
+Implementation evidence (2026-09-06): baseline commit `c8c3a95`. The source tranche publishes only the
+six named restricted read tools, registers their handler in the existing composition root, adapts the
+existing Documents facade and gateway, and centralizes the operator/scoped-Discord request policy. Typed
+results use closed, bounded projections; document content is marked untrusted and no-store, review rows
+are content-free, and source access permits only authenticated relative gateway links. A current Discord
+attachment supersedes older recent attachment IDs. The three named restricted-boundary files passed 22
+tests in 0.90 seconds; targeted Python static-error checks passed and no trailing whitespace was found in
+the P5D files. Per the user's batch-verification direction, the common architecture/full/export gates,
+model certification, Ubuntu promotion, activation, and 24-hour canary remain pending. No runtime flags or
+deployment changed.
+
 ### P5E - Bounded web research tool
 
-Status: `not_started`
+Status: `implementation_complete_batch_gate_pending`
 Depends on: `P4` framework gate; other P5 subphases need not be complete
 Runtime default after subphase: Research may be independently active under its existing policy
 
@@ -2276,19 +2322,37 @@ Allowed production files:
 - `app/research/decision_backend.py`
 - ADD `app/prompts/skills/research_skill.md`
 - `app/config.py`
+- `app/skills/authorized_executor.py` - exact propagation of trusted child-policy context only
+- `app/core/main_tool_loop.py` - generic final-link allowlisting for untrusted observations only
+- `app/runtime.py` - composition-only service binding and typed-handler registration
+
+The three shared-file additions are required to preserve existing policy at the typed boundary: the
+executor previously dropped `is_child`/`policy_profile`, the generic loop exposed no deterministic way to
+remove a model-fabricated URL after consuming untrusted evidence, and the existing dispatcher requires
+explicit composition registration. They may not contain provider selection, research routing, or query
+policy.
 
 Allowed tests: `tests/unit/test_web_research.py`, `tests/unit/test_main_tool_loop.py`, and
 `tests/unit/test_architecture_boundaries.py`.
 
+P5E reuse and ownership decision: adapt the existing `WebResearchService`, `SearchProvider` protocol,
+SearXNG adapter, configured timeout/safe-search/result limits, in-process TTL cache, Markdown/SQLite skill
+registry, authorized executor, and bounded Main loop. SearXNG remains the external result authority;
+`WebResearchService` remains the sole request-policy/cache/metrics owner; Main receives only a bounded
+ephemeral projection of public result fields. No durable datum, database, provider, credential surface,
+queue, scheduler, approval path, or side-effect ledger is added. The only cross-cutting changes preserve
+trusted child context and apply a generic safe-URL allowlist to answers derived from any untrusted
+observation.
+
 Tasks:
 
-- [ ] `P5E-01` Publish `research.search_web(query, limit)` as a read tool only when existing research
+- [x] `P5E-01` Publish `research.search_web(query, limit)` as a read tool only when existing research
   configuration and request policy authorize it. Reuse `WebResearchService` and SearXNG; add no provider.
-- [ ] `P5E-02` Enforce the existing query/result limits, safe search, child restriction, timeouts, URL
+- [x] `P5E-02` Enforce the existing query/result limits, safe search, child restriction, timeouts, URL
   sanitation, and cache policy per call. Permit repeated refinement only within global loop/repeat caps.
-- [ ] `P5E-03` Mark every snippet/title/URL untrusted, restrict answer links to returned safe URLs, and
+- [x] `P5E-03` Mark every snippet/title/URL untrusted, restrict answer links to returned safe URLs, and
   ensure research observations cannot grant another tool or authority.
-- [ ] `P5E-04` Test disabled/unhealthy service, injection snippets, unsafe URL, child policy, repeated
+- [x] `P5E-04` Test disabled/unhealthy service, injection snippets, unsafe URL, child policy, repeated
   refinement, total observation cap, and zero side effects.
 
 Gate and rollback: tests plus common exit commands, then a 24-hour read canary with domain `research`,
@@ -2296,13 +2360,26 @@ only `research.search_web` in the operation allowlist, and existing research pol
 Disable research or remove that exact operation ID to roll back; remove the domain only if no Research
 operation remains active.
 
+Implementation evidence (2026-09-06): baseline commit `c8c3a95`. The source tranche publishes only
+`research.search_web`, adapts `WebResearchService` and its existing TTL cache, preserves configured
+result/safe-search/timeout policy, remains unavailable to child typed-tool contexts, and registers the
+handler only when the existing default-off research service is configured. Results use a closed bounded
+projection, reject local/private/credential-bearing/non-HTTP(S) URLs, are marked untrusted and no-store,
+and expose no transferable observation fields. The generic Main guard now removes model-fabricated links
+and URLs found only inside untrusted snippets, retaining only safe URLs from explicit observation `url`
+fields. The focused Research/loop/ownership batch passed 13 tests in 0.82 seconds and the added total-
+observation-budget case passed in 0.17 seconds; targeted Python static-error checks passed and no trailing
+whitespace was found in P5E files. Per the user's batch-verification direction, common architecture/full/
+export gates, model certification, Ubuntu promotion, activation, and the 24-hour canary remain pending.
+No runtime flags, provider configuration, durable data, or deployment changed.
+
 P5 completion evidence must explicitly reaffirm that Conversation is the outer response, interaction
 Memory is context-only, Private Notes is adapter/scheduler-owned, and Calendar Inbox is scheduler-only.
 None may appear in the interactive effective-tool catalog.
 
 ## P6 - Durable pre-action approval and protected Discord delivery
 
-Status: `not_started`
+Status: `complete`
 Depends on: `P5F`; P5F reserves migrations 010-011 and P6 follows with migration 012
 Runtime default after phase: approval infrastructure available; no new write tool active
 
@@ -2318,8 +2395,12 @@ Allowed production/configuration files:
 - `app/db/migrations.py`
 - `app/jobs/types.py`
 - `app/jobs/repository.py`
+- `app/skills/authorized_executor.py` - exact prepare/reauthorize seam only
 - `app/core/main_tool_loop.py`
 - `app/core/pending_interaction.py`
+- `app/core/clarification_coordinator.py` - approval-pointer isolation only
+- `app/core/router.py` - composition seam only
+- ADD `app/core/router_defaults.py` - extracted immutable router defaults only
 - ADD `app/core/approved_action_execution.py`
 - `app/services/identity_service.py`
 - `app/services/discord/bot.py`
@@ -2330,6 +2411,8 @@ Allowed production/configuration files:
 - `app/api/routes/reviews.py`
 - `app/container.py`
 - `app/runtime.py` - composition only
+- `app/main.py` - Discord composition only
+- `app/services/offline_runtime_policy.py` - networked-worker fail-closed rule only
 - `app/config.py`
 - `.env.example`
 - `deploy/docker/compose.yaml`
@@ -2357,7 +2440,7 @@ before its sender is known.
 
 Tasks:
 
-- [ ] `P6-01` Add `action_proposals` to `app/db/review_schema.py` and ordered core migration 012 to
+- [x] `P6-01` Add `action_proposals` to `app/db/review_schema.py` and ordered core migration 012 to
   `app/db/migrations.py`; record version 12 as additive with minimum reader 7 in the compatibility table.
   Fresh creation, upgrade from version 11, populated-row preservation, idempotent reopen, and P1-reader
   startup must pass in `tests/unit/test_core_schema_migrations.py`. Store every required
@@ -2367,20 +2450,24 @@ Tasks:
   but no secrets, source value/observation payload, raw email body, raw document text, or hidden reasoning.
   Terminal transitions atomically clear the optional destination-argument payload while retaining the
   content-free manifest and hashes.
-- [ ] `P6-02` Enforce `authorization_binding`, exact canonical argument hash, descriptor/resource version,
+- [x] `P6-02` Enforce `authorization_binding`, exact canonical argument hash, descriptor/resource version,
   requester/channel, destination purpose, immutable approver, expiry, and allowed lifecycle transitions.
   When the optional transfer manifest is present, validate its exact closed shape, bounds, canonical
   hash, request/identity binding, source and destination versions, and absence of source values. Reusing
   an idempotency key with different content, batch manifest, or transfer manifest must fail as a
   conflict. An independent batch requires an exact child manifest before notification; single/atomic
-  calls reject one.
-- [ ] `P6-03` Convert a policy result requiring approval into `waiting_for_approval`, persist only an
+  calls reject one. The current generic independent-batch convention treats the first required array
+  property in descriptor order as the canonical target set, canonical-sorts its unique targets, and
+  treats any other array properties as shared arguments; descriptors that need different semantics must
+  define a later domain-owned batch contract rather than bypass this manifest.
+- [x] `P6-03` Convert a policy result requiring approval into `waiting_for_approval`, persist only an
   opaque pending pointer, and atomically create the proposal, linked pending review, and exactly one
   `review.notification.discord.v1` job using the locked dedupe key before acknowledging the pause. The
   Human Review and durable-job repositories must share the same Core transaction for this method; a
   post-commit best-effort enqueue is forbidden. No domain dispatch, ticket, or effect occurs yet.
-- [ ] `P6-04` Add durable job types `review.notification.discord.v1` and
-  `review.action_execution.v1` to the existing job ledger. Add default-off settings
+- [x] `P6-04` Add durable job types `review.notification.discord.v1`,
+  `review.action_execution.v1`, and the content-free terminal-reply type
+  `review.outcome.discord.v1` to the existing job ledger. Add default-off settings
   `ACTION_APPROVAL_WORKER_ENABLED=false`, batch size `10`, lease `60` seconds, and poll `2` seconds, plus
   a Compose `approvals` profile running `python -m app.workers.action_approval_worker`. The worker owns
   claims, heartbeats, bounded retry/backoff, dead letters, lease recovery, cancellation, and process
@@ -2389,17 +2476,17 @@ Tasks:
   `ApprovedActionExecutionService`; the Discord adapter never executes a domain action. Enforce the
   locked notification and execution-job dedupe keys and same-key/same-payload reuse versus mismatched-
   payload conflict rules at the repository boundary.
-- [ ] `P6-05` Add symbolic protected destination purposes `human_reviews` and `operator_notices`.
+- [x] `P6-05` Add symbolic protected destination purposes `human_reviews` and `operator_notices`.
   Resolve IDs only from protected runtime configuration at send/decision time. Tracked examples use fake
   values that pass the public-tree checker. Existing and new Human Review notification kinds use
   `human_reviews`; non-review proactive status notices use `operator_notices`.
-- [ ] `P6-06` Deliver a bounded approval card containing review ID, safe action summary, requester, risk,
+- [x] `P6-06` Deliver a bounded approval card containing review ID, safe action summary, requester, risk,
   expiry, and exact deterministic commands `approve <review-id>` and
   `reject <review-id> [reason]`. Do not include raw email/document bodies or credentials.
-- [ ] `P6-07` Accept decisions only in the resolved `human_reviews` destination from the configured
+- [x] `P6-07` Accept decisions only in the resolved `human_reviews` destination from the configured
   immutable approver identity. Bind Discord guild/channel/message/actor IDs, make duplicate identical
   decisions idempotent, and reject conflicting/stale/wrong-actor/wrong-channel decisions.
-- [ ] `P6-08` Approved execution reloads the proposal, descriptor, resource version, identity, current
+- [x] `P6-08` Approved execution reloads the proposal, descriptor, resource version, identity, current
   authorization, and both domain and exact-operation allowlists immediately before dispatch. For a
   transfer-bound proposal it also reloads every named source descriptor/version, verifies the source
   tool is still currently authorized for the same identity/channel, the recorded pointer still matches
@@ -2409,7 +2496,7 @@ Tasks:
   unavailable/revoked/changed source denies execution. Use the
   original stable operation ID; execute at most once; atomically clear the purpose-bound argument payload
   on every terminal transition; publish a bounded completion/failure reply and receipt reference.
-- [ ] `P6-09` Add a restart matrix covering restart before notification, after notification, before
+- [x] `P6-09` Add a restart matrix covering restart before notification, after notification, before
   decision persistence, after approval/before execution, during an expired lease, after effect commit/
   before job completion, and duplicate Discord delivery. Each path must end in one durable state and at
   most one effect. Include a synthetic transfer manifest: restart must preserve content-free source/
@@ -2420,12 +2507,12 @@ Tasks:
   stranded pending proposal without its one deduplicated notification job. Repeat the same crash and
   conflict checks around approval/review/execution-job commit and prove exactly one
   `review-action-execution:v1:<proposal_id>:<operation_id>` job exists.
-- [ ] `P6-10` On the authoritative Ubuntu runtime, attribute the currently misplaced proactive message using content-free
+- [x] `P6-10` On the authoritative Ubuntu runtime, attribute the currently misplaced proactive message using content-free
   event/job/message IDs and sender implementation. Check Private Notes delivery, model-compute notices,
   document completion, and other notifiers. Only after positive attribution, update that sender's
   protected destination to the appropriate named purpose. If attribution is uncertain, stop without
   changing either destination.
-- [ ] `P6-11` Add two operator-only, content-free verification CLIs. `canary_action_approval.py` may create
+- [x] `P6-11` Add two operator-only, content-free verification CLIs. `canary_action_approval.py` may create
   and inspect only a `canary.no_effect` proposal; that descriptor exists only inside the canary/integration
   harness, is never compiled into the registry or Main catalog, and its executor can only record an
   in-memory/test receipt. The production approval worker must set it `denied` at execution-time
@@ -2477,7 +2564,7 @@ Tasks:
   services. The release shell must separately prove each listed Compose service is running/healthy and,
   when `email_consumer_required=true`, prove the tracked Compose-owned Email worker, its fresh heartbeat,
   and its readiness-only invocation before a canary.
-- [ ] `P6-12` On the authoritative Ubuntu runtime, set protected
+- [x] `P6-12` On the authoritative Ubuntu runtime, set protected
   `ACTION_APPROVAL_WORKER_ENABLED=true`, retain mode `active` with only already-certified read IDs, and
   start the worker with
   `docker compose --env-file .env -f deploy/docker/compose.yaml --profile approvals up -d --no-build action-approval-worker`.
@@ -2502,7 +2589,7 @@ worker gate before the live no-effect canary:
 ```bash
 p6_dead_letter_baseline="/opt/jarvis/data/action-approval-p6-dead-letters.json"
 docker compose --env-file .env -f deploy/docker/compose.yaml --profile approvals up -d --no-deps --no-build action-approval-worker
-docker compose --env-file .env -f deploy/docker/compose.yaml run --rm --no-deps --no-build -T \
+docker compose --env-file .env -f deploy/docker/compose.yaml run --rm --no-deps -T \
   jarvis python scripts/check_worker_readiness.py \
   --database /opt/jarvis/data/jarvis_v2.db \
   --require-worker action_approval=120 \
@@ -2528,9 +2615,75 @@ claim/effect, atomically cancel each approved proposal and its unclaimed executi
 `executing` proposal to truthful effect/no-effect state before a terminal transition. Never execute work
 merely to drain it during rollback.
 
+Implementation evidence (2026-09-06): baseline commit `c8c3a95`. This source tranche adapts the existing
+Human Review authority, Core SQLite transaction seam, durable-job ledger, pending-interaction store,
+external-identity resolver, skill registry/authorized executor, and protected Discord permission file;
+it introduces no second review, identity, queue, session, or effect store. `action_proposals` and review
+decisions are Human Review-owned; notification, execution, and terminal-reply work remains owned by the
+shared durable-job ledger; protected guild/channel/approver values remain protected-configuration-owned
+and only their exact audit bindings are retained; each eventual domain effect and receipt remains owned
+by its domain. The only new service boundary is the bounded approval worker, which owns lifecycle and
+delegates delivery and execution rather than owning policy or effects.
+
+Implemented files in this tranche are `app/reviews/{types,service,repository}.py`,
+`app/db/{review_schema,migrations}.py`, `app/jobs/{types,repository}.py`,
+`app/core/{main_tool_loop,pending_interaction,clarification_coordinator,router,router_defaults,
+approved_action_execution}.py`, `app/skills/authorized_executor.py`,
+`app/services/discord/{bot,approval_delivery}.py`, `app/services/offline_runtime_policy.py`,
+`app/{config,main,runtime}.py`, `.env.example`, `deploy/docker/compose.yaml`, the protected-config
+example, both operator CLIs, and the P6 unit/integration tests named above. The proposal/review/initial
+notification transaction and the decision/review/execution-job transaction are atomic. Exact bindings,
+immutable reviewer/channel checks, execution fencing, current identity/catalog/operation reauthorization,
+terminal argument clearing, bounded approval and outcome cards, default-off worker configuration,
+heartbeats, lease recovery, retry/dead-letter behavior, content-free operator APIs, an inert canary, and
+read-only readiness/runtime-requirement checks are present. Approval pointers are explicitly excluded
+from conversational clarification handling, preventing a later chat turn from authorizing or replaying
+the paused call.
+
+Verification was consolidated per the user's batch-test direction. The complete focused P6 batch passed
+`131` tests. The local full run reached `945` passed and `2` skipped while exposing eleven stale P5E
+generated-contract failures; the Research contract was completed, its generated artifacts were rebuilt,
+and those exact eleven tests then passed. A clean authoritative export passed the public-tree checker and
+its Ubuntu full suite passed `958` tests with six environment warnings. Targeted Ruff, bytecode
+compilation, architecture/size ratchets, the two direct-invocation CLI tests, and scoped diff checks pass.
+The final clean export contained `578` tracked public files.
+
+The clean candidate was promoted as image `6e289896975c` with the prior image, protected configuration,
+source, and integrity-checked version-11 Core backup retained for rollback. Migration 012 advanced Core
+to version 12. Protected configuration now resolves the two symbolic purposes without placing their
+values in the tracked tree. The approval worker is enabled, healthy, and publishing fresh
+`action_approval` heartbeats; the content-free readiness gate reports zero durable and Email dead-letter
+growth. A live inert proposal produced exactly one delivered approval card. A production wrong-
+destination decision was denied with `action_decision_channel_denied`, left the proposal pending, and
+created zero execution jobs. The protected raw-YAML `approver_user_id` was then verified against the
+active non-child external identity and through the production loader; the prior incorrectly bound cards
+were retained as expired or superseded with their argument payloads cleared.
+
+The final immutable-approver Discord command passed the adapter and durably recorded approval. Production
+execution-time reauthorization then denied the harness-only operation with
+`tool_unknown_or_unauthorized`, as required: no receipt/effect exists, destination arguments are cleared,
+and exactly one notification, execution, and outcome job each completed on attempt one without an error.
+The bounded terminal outcome was delivered and bound. The post-canary readiness comparison remains
+`ready`, with a fresh idle approval heartbeat and zero durable or Email dead-letter growth. This closes
+the P6 live gate without activating any real write operation.
+
+Positive `P6-10` attribution used only durable job type/status counts and provider message references:
+the model-compute sender accounted for 60 completed/delivered notices, while the separate document
+completion sender accounted for six. Only after that distinction was proven was the former changed to
+resolve `operator_notices`; Human Review delivery resolves `human_reviews` independently.
+
+Remaining compatibility debt: Discord sends are at-least-once across a crash between provider acceptance
+and receipt binding, while decisions and domain execution are idempotent/fenced. `HumanReviewRepository`
+is over the size ratchet because this phase requires one transaction owner across proposals, decisions,
+and jobs; extract its cohesive action-proposal methods behind a Human Review-owned collaborator sharing
+the same connection/lock without changing ownership. `app.runtime` remains compatibility composition
+debt for the standalone worker. Rollback stops only the approval worker, clears exact write allowlists,
+sets mode off, restores the retained protected configuration/image, retains proposal audit, and uses the
+documented fenced cancellation/reconciliation path; no database downgrade is required.
+
 ## P7 - Action-ticket, receipt, replay, and recovery hardening
 
-Status: `not_started`
+Status: `complete`
 Depends on: `P6`
 Runtime default after phase: no additional tools active
 
@@ -2572,9 +2725,9 @@ expectations, and durable-job payloads.
 
 Tasks:
 
-- [ ] `P7-01` Characterize ticket creation, receipt capture, verifier scheduling, watchdog, replay, and
+- [x] `P7-01` Characterize ticket creation, receipt capture, verifier scheduling, watchdog, replay, and
   remediation before changing them.
-- [ ] `P7-02` Give every accepted complete tool call its locked stable operation ID and every committed
+- [x] `P7-02` Give every accepted complete tool call its locked stable operation ID and every committed
   effect a distinct receipt. For ticket-eligible tools only, before dispatch persist a content-minimized
   execution manifest (parent operation ID, every independent-batch child ID/index/target hash/argument
   hash, expected count, tool/version hashes, and an opaque owning-domain recovery-manifest hash when one
@@ -2587,27 +2740,27 @@ Tasks:
   with the existing ticket/job transaction boundary or report queued/partial, never hard success.
   Restricted Documents tools remain ticket-exempt and cannot activate until P8C proves their named
   domain-owned reservation.
-- [ ] `P7-02A` Add a transaction-aware `EffectManifestReservation` application protocol for an owning
+- [x] `P7-02A` Add a transaction-aware `EffectManifestReservation` application protocol for an owning
   domain whose operation ledger shares Core SQLite. It accepts a redacted immutable ticket projection and
   a domain callback that writes its private recovery record using the caller's existing connection/
   transaction; it opens one `BEGIN IMMEDIATE`, exact-compares both dedupe records, and commits both or
   neither. It does not expose private domain values to Ticket code or let a domain import Ticket storage.
   P7 proves the seam with a synthetic domain; P8D is its first production consumer. A database without a
   shared Core transaction must use its separately named durable reconciliation boundary instead.
-- [ ] `P7-03` Make watchdog expected-count aware. Missing receipts, expired claims, partially finalized
+- [x] `P7-03` Make watchdog expected-count aware. Missing receipts, expired claims, partially finalized
   turns, partially committed independent batches, and effect-committed/job-incomplete states must
   reconcile after restart without duplicating a committed child. Atomic batches must have either their
   one parent receipt or no committed effect. Keep the original parent manifest immutable; child progress
   is append-only ticket transitions reduced from owning-domain rows and receipts, never an in-place rewrite
   that disguises a changed manifest.
-- [ ] `P7-04` Make replay reconstruct only from durable receipts/events and clearly label unverifiable
+- [x] `P7-04` Make replay reconstruct only from durable receipts/events and clearly label unverifiable
   local Calendar and simulated Home truth. It must not infer success from model prose.
-- [ ] `P7-05` Require remediation to create a child ticket/operation before execution, use the same
+- [x] `P7-05` Require remediation to create a child ticket/operation before execution, use the same
   authorization/idempotency/approval path, and reconcile a crash between effect and completion.
-- [ ] `P7-06` Apply the already-enforced P3 sensitivity/persistence policy to ticket-eligible execution
+- [x] `P7-06` Apply the already-enforced P3 sensitivity/persistence policy to ticket-eligible execution
   context and safe events. Raw Email, Documents, Private Notes, credentials, and hidden reasoning are
   forbidden; this task does not weaken or replace P3 generic-history enforcement.
-- [ ] `P7-07` Add a narrow `AsyncChildOutcomeSink`/reconciliation protocol in
+- [x] `P7-07` Add a narrow `AsyncChildOutcomeSink`/reconciliation protocol in
   `app/tickets/async_receipts.py`. A domain worker reports a terminal child by immutable parent
   operation ID, parent-manifest hash, child operation ID, effect state, and bounded domain receipt fields;
   the sink resolves and exact-validates the one ticket manifest itself, so the domain row does not need a
@@ -2634,6 +2787,85 @@ Gate: all targeted tests, full restart/replay integration matrix, common exit co
 change for inactive domains. Stop if a side effect has no authoritative verifier/truth statement or if
 atomic capture requires a new ledger or schema. Rollback: disable tool execution and deploy the prior
 code; P7 creates no schema to reverse, and legacy ticket workers continue against existing rows.
+
+Implementation record - 2026-09-06:
+
+- Baseline commit: `c8c3a95596050514e6d58e85323d9cd60c34fbaf`. P7-attributable production
+  changes are limited to `app/tickets/{types,repository,service,remediation_service,async_receipts}.py`
+  and `app/workers/ticket_review_worker.py`; tests are limited to the two authorized new files plus
+  `test_action_ticket_repository.py`, `test_action_ticket_service.py`, and
+  `test_action_ticket_review_flow.py`. The plan file carries only
+  checklist/evidence updates. P7 did not change Core schema, migrations, tool descriptors, rollout
+  flags, provider clients, Compose, or protected configuration.
+- Characterization confirmed that legacy entry/receipt conflicts silently reused existing rows, replay
+  preferred assistant prose, the watchdog knew only whether any receipt existed, and remediation called
+  Lists directly. The retained legacy path remains compatible, while new control records use strict
+  comparison and append-only transitions.
+- The immutable manifest authority uses existing `ticket_entries`, exact dedupe
+  `tool-execution-manifest:v1:<parent_operation_id>`, closed hashes/counts, and no private recovery
+  values. `EffectManifestReservation` proves one `BEGIN IMMEDIATE` can commit the redacted Ticket entry
+  and an owning-domain private row together or roll both back. This phase's synthetic proof is not a new
+  production store; P8D remains the first production domain callback.
+- `AsyncChildOutcomeSink` resolves the ticket from the parent operation, validates the exact manifest
+  and child binding, atomically records the canonical receipt/expectation/outcome/watchdog, and rejects
+  conflicting terminal replay. Its reducer implements the closed queued/completed/partial/failed mapping.
+  Missing children never cause a domain call. The watchdog now moves complete sets to the existing
+  verifier schedule, recreates a legacy receipt's missing expectation/reference/review job after a
+  finalization crash, and leaves missing/partial/conflicting sets visibly reconcilable.
+- Replay no longer reads assistant response text or classification claims. It derives status/result only
+  from durable ticket/receipt/outcome state, labels local Calendar as unverifiable and simulated Home as
+  non-physical truth, and suppresses persisted result bodies for Email, Documents, and Private Notes.
+  No-store manifests are rejected; redacted receipts prohibit result/observation bodies; all control
+  payloads are closed, bounded, and reject raw mail/document/note, credential, prompt, transcript, and
+  hidden-reasoning fields.
+- Remediation now creates its child ticket, stable child operation, parent relationship, and immutable
+  manifest before calling an injected execution gateway. It no longer imports or invokes Lists domain
+  code directly. The gateway contract requires current authorization, approval, and the same operation
+  binding; production has no injected gateway and existing auto-remediation remains default-off, so any
+  accidental activation fails closed until a composition phase supplies the canonical path. Crash-after-
+  effect retry reuses one operation and produces one receipt.
+
+Reuse map:
+
+| Need | Decision | Existing authority and P7 adaptation |
+| --- | --- | --- |
+| Parent effect manifest | adapt | Existing Ticket `ticket_entries`; add strict typed entry kinds and exact comparison, not a new table. |
+| Effect receipt and delayed verification | adapt | Existing `operation_receipts` and `ticket_expectations`; canonical child receipt and expectation now commit in the same transaction. |
+| Recovery wake-up | adapt | Existing durable-job ledger and `ticket_watchdog`; one idempotent child-outcome wake-up is committed with the outcome. |
+| Ticket lifecycle/replay | adapt | Existing `ActionTicketService`, ticket states, verifier schedule, and receipt/event history. |
+| Domain effect state | reuse | Owning-domain ledger remains authoritative; P7 stores hashes and outcome projections only. |
+| Remediation execution | adapt | Existing child-ticket/remediation policy, behind a narrow gateway to the canonical authorization/approval/idempotency path. |
+| New queue, store, or schema | reuse / none | No new subsystem or migration; existing Core SQLite transaction authority is sufficient. |
+
+Data ownership impact:
+
+| Datum/effect | Authoritative owner | Projection/cache and consistency/deletion behavior |
+| --- | --- | --- |
+| Redacted parent manifest and child outcome | Action Tickets in Core SQLite | Immutable append-only control record; no mutable cache and no hidden deletion path. |
+| Canonical shared receipt and verifier expectation | Action Tickets in Core SQLite | One exact child operation row; conflicting replay fails and review reads the same rows. |
+| Private recovery manifest and domain child state | Owning domain | Ticket keeps only its opaque hash/outcome projection; domain clears private recovery only under its future phase policy. |
+| Watchdog/review work | Existing durable-job ledger | Idempotent job keys, bounded claims/retries, restart recovery, and normal dead-letter visibility. |
+| External/local side effect | Owning domain/provider | P7 never performs or reconstructs it; the sink records only reported verified/no-effect terminal truth. |
+| Safe operational event | Existing `EventLogService` | Optional content-free IDs, hashes, state, and counts; no raw request/provider content. |
+
+Verification and closure:
+
+- Initial consolidated focused batch: `30 passed`, with one test-only ownership-view assertion corrected;
+  the exact failed recovery case then passed. The final crash-window focused batch passed 24/25 before a
+  test-only job-state constant correction, then its exact failed case passed. Final full local batch:
+  `972 passed, 2 skipped` in 76.36s.
+  The full batch includes the architecture-boundary test and the complete restart/replay recovery matrix.
+- Full-tree fatal Ruff selection, targeted full Ruff for all P7 files, `compileall`, diff whitespace check,
+  clean export (581 files), and explicit public-tree scan passed. The local staging evidence is the
+  machine-neutral export labeled `p7-complete-final-20260906-03` under the approved test-artifact root.
+- Runtime/canary: not applicable. P7 activates no tool or domain, changes no flag/configuration, and was
+  intentionally not deployed. Rollback is a code revert/prior image plus existing tool kill switches;
+  there is no schema downgrade and durable audit rows remain valid.
+- Compatibility debt: `TicketRepository` is 1,227 lines because exact manifest, receipt, expectation,
+  outcome, and job writes must share its existing connection/lock and one transaction. After P8D proves
+  the second consumer, extract a cohesive strict-effect-ledger collaborator that shares those primitives;
+  do not create a second store. Production remediation remains fail-closed until a canonical execution
+  gateway is composed, and P8 domains still own their reservation/outcome integration and live gates.
 
 ## P8 - Existing writes by domain and risk
 
@@ -2744,7 +2976,7 @@ worker supplement. These supplements are requirements, not optional diagnostics.
 
 ### P8A - Remaining Lists writes and destructive operations
 
-Status: `not_started`
+Status: `implementation_complete_activation_gates_pending`
 Depends on: `P5A`, `P6`, and `P7`
 Runtime default after subphase: the remaining Lists writes may be independently active
 
@@ -2757,17 +2989,17 @@ Allowed files: `app/skills/domains/lists/context.py`, `app/skills/domains/lists/
 `tests/unit/test_lists_service_resolution.py`, `tests/unit/test_lists_service_sqlite_persistence.py`,
 `tests/unit/test_action_ticket_service.py`, and `tests/unit/test_main_tool_loop.py`.
 
-- [ ] `P8A-01` Retain the P5A-certified `lists.create_collection` and `lists.add_items` operations and
+- [x] `P8A-01` Retain the P5A-certified `lists.create_collection` and `lists.add_items` operations and
   publish `lists.update_item`, `lists.remove_items`, `lists.clear_collection`, and
   `lists.delete_collection` with closed batch/reference schemas and bounded item counts.
-- [ ] `P8A-02` Keep all new-path semantics typed: Main supplies explicit item references and patches;
+- [x] `P8A-02` Keep all new-path semantics typed: Main supplies explicit item references and patches;
   missing or ambiguous collections/items clarify without phrase parsing or fuzzy execution.
-- [ ] `P8A-03` Apply stable idempotency through the P5A-created `list_operations` authority. Single
+- [x] `P8A-03` Apply stable idempotency through the P5A-created `list_operations` authority. Single
   explicit item removal is `local_write`;
   clear/delete always pause for formal approval and bind current collection version.
-- [ ] `P8A-04` Preserve per-user/shared ownership only through explicit policy, return one receipt per
+- [x] `P8A-04` Preserve per-user/shared ownership only through explicit policy, return one receipt per
   committed mutation, and verify restart/duplicate/partial-batch behavior.
-- [ ] `P8A-05` Extend the existing P5A Lists transaction helpers for update/remove/clear/delete without a
+- [x] `P8A-05` Extend the existing P5A Lists transaction helpers for update/remove/clear/delete without a
   new store or schema path. Each mutation and its completed operation record commit in one SQLite
   transaction; same ID/hash replays the bounded stored result and a different hash conflicts. Test crash
   before/after commit and compatibility with populated P5A rows.
@@ -2783,7 +3015,7 @@ create, and add operations; do not reverse already approved committed changes au
 
 ### P8B - Home/Lights writes
 
-Status: `not_started`
+Status: `implementation_complete_activation_gates_pending`
 Depends on: `P8A` and `P5C`
 Runtime default after subphase: Home writes may be independently active
 
@@ -2794,15 +3026,15 @@ Allowed files: `app/skills/domains/lights/context.py`, `app/skills/domains/light
 `tests/unit/test_core_schema_migrations.py`,
 `tests/unit/test_home_service_persistence.py`, and `tests/unit/test_main_tool_loop.py`.
 
-- [ ] `P8B-01` Publish `home.set_device_state(device_ref, state)` only; group/all-device mutation remains
+- [x] `P8B-01` Publish `home.set_device_state(device_ref, state)` only; group/all-device mutation remains
   absent.
-- [ ] `P8B-02` Require an exact canonical device after bounded resolution. Ambiguity clarifies; fuzzy
+- [x] `P8B-02` Require an exact canonical device after bounded resolution. Ambiguity clarifies; fuzzy
   score alone never authorizes execution.
-- [ ] `P8B-03` Make repeated desired state idempotent without duplicate action-log effects and preserve a
+- [x] `P8B-03` Make repeated desired state idempotent without duplicate action-log effects and preserve a
   truthful simulated-state receipt/ticket classification.
-- [ ] `P8B-04` Test unauthorized/missing/ambiguous devices, duplicate calls, restart, partial loop, and
+- [x] `P8B-04` Test unauthorized/missing/ambiguous devices, duplicate calls, restart, partial loop, and
   absence of hidden group execution.
-- [ ] `P8B-05` Update the baseline core schema and ordered migration 013 to add nullable `operation_id`
+- [x] `P8B-05` Update the baseline core schema and ordered migration 013 to add nullable `operation_id`
   and `arguments_hash` to
   `switch_actions_log`, a unique partial operation-ID index, and an additive compatibility row with
   minimum reader 7. State update and action-log insert commit atomically; same ID/hash replays the stored
@@ -2814,7 +3046,7 @@ Home read IDs. No claim of physical rollback is permitted.
 
 ### P8C - Documents controlled writes and durable work
 
-Status: `not_started`
+Status: `implementation_complete_live_bridge_gate_pending`
 Depends on: `P8B` and `P5D`
 Runtime default after subphase: scoped Documents writes may be independently active
 
@@ -2832,13 +3064,13 @@ Allowed files: `app/skills/domains/documents/handler.py`,
 `tests/unit/test_document_backup.py`, `tests/unit/test_durable_job_repository.py`, and
 `tests/unit/test_main_tool_loop.py`.
 
-- [ ] `P8C-01` Publish `documents.queue_processing` with allowlisted tiers, `documents.propose_metadata`,
+- [x] `P8C-01` Publish `documents.queue_processing` with allowlisted tiers, `documents.propose_metadata`,
   `documents.review_field`, and `documents.confirm_fields`; keep Discord attachment and operator scopes.
-- [ ] `P8C-02` Reuse existing durable processing jobs and request IDs. Queued work returns `queued`, not
+- [x] `P8C-02` Reuse existing durable processing jobs and request IDs. Queued work returns `queued`, not
   hard success; duplicate/restart/dead-letter behavior stays bounded and visible.
-- [ ] `P8C-03` Preserve existing HumanReview and field/resource-version binding. Tool approval may not
+- [x] `P8C-03` Preserve existing HumanReview and field/resource-version binding. Tool approval may not
   bypass domain review or broaden business-card-only Discord mutation.
-- [ ] `P8C-04` Keep restricted content out of generic pending state, tickets, memory, events, and approval
+- [x] `P8C-04` Keep restricted content out of generic pending state, tickets, memory, events, and approval
   cards. Test stale evidence, cross-user references, conflicting correction, and duplicate confirmation.
 - [ ] `P8C-05` Before changing the encrypted Documents database from version 14, add and deploy a
   compatibility-aware Documents reader that, when encountering a newer version, requires a
@@ -2850,7 +3082,7 @@ Allowed files: `app/skills/domains/documents/handler.py`,
   `scripts/manage_document_backup.py reader-check --source PATH` through this bridge without changing its
   read-only/no-migration contract. The retained bridge image must pass this command against a version-15
   fixture and later against the live verified Documents database.
-- [ ] `P8C-06` Use `operation_id` as the existing durable-job idempotency key for
+- [x] `P8C-06` Use `operation_id` as the existing durable-job idempotency key for
   `documents.queue_processing`; its Core payload contains only opaque document ref, tier, and argument
   hash. Set `DOCUMENT_SCHEMA_VERSION=15`; ordered Documents migration 15 adds
   `document_schema_reader_compatibility`, records version 15 as additive with minimum reader 14, and adds
@@ -2879,7 +3111,7 @@ policy.
 
 ### P8D - Existing Email projection/provider writes
 
-Status: `not_started`
+Status: `implementation_complete_activation_gates_pending`
 Depends on: `P8C`, `P7`, and `P5F`
 Runtime default after subphase: local review/category and approved spam writes may be independently active
 while P5F additive-label, read/unread, and archive/restore tools remain intact
@@ -2897,18 +3129,18 @@ ADD `tests/unit/test_email_agent_schema.py`, `tests/unit/test_core_schema_migrat
 `tests/unit/test_action_ticket_service.py`; ADD
 `tests/integration/test_email_batch_recovery.py`.
 
-- [ ] `P8D-01` Publish `email.set_review_state`, `email.correct_local_category`, and
+- [x] `P8D-01` Publish `email.set_review_state`, `email.correct_local_category`, and
   `email.move_to_spam` with the locked separate effect classes. Retain P5F's managed-label,
   `email.set_read_state`, `email.archive_messages`, and `email.restore_to_inbox` tools unchanged; do not
   publish the superseded exclusive `email.apply_managed_category_label` or `email.mark_read_complete`.
   Sending/replying/forwarding/deletion and generic Gmail query execution remain absent.
-- [ ] `P8D-02` Implement Email's P2 argument canonicalizer for all three new writes. Under the immutable
+- [x] `P8D-02` Implement Email's P2 argument canonicalizer for all three new writes. Under the immutable
   user/channel/reference-set binding, resolve current `E1`-style display aliases to authorized Gmail
   message IDs or an equivalent Email-owned opaque stable ref after schema/authorization checks but before
   parent/child hashing or approval. Reject stale, missing, ambiguous, cross-channel, and duplicate targets;
   sort the stable refs for independent batches. Re-run resolution at approved execution and require the
   same canonical refs/hashes. E-labels remain presentation metadata only and never enter an operation ID.
-- [ ] `P8D-03` Make `email.set_review_state` and `email.correct_local_category` true atomic batches. Add
+- [x] `P8D-03` Make `email.set_review_state` and `email.correct_local_category` true atomic batches. Add
   bulk storage methods that validate every target first, open one `BEGIN IMMEDIATE`, insert-or-compare the
   parent in `email_tool_operations` as transaction-local `reserved`, perform every local mutation through transaction-aware
   no-commit primitives, store the bounded result, and mark the row `committed` in that same transaction.
@@ -2918,7 +3150,7 @@ ADD `tests/unit/test_email_agent_schema.py`, `tests/unit/test_core_schema_migrat
   invariant violation and blocks retry. Set `operation_identity_hash` to the 64-hex digest suffix of the
   matching `toolop_v1_` operation ID and set the unique parent key to
   `main-email-parent:v1:<operation_id>`.
-- [ ] `P8D-04` For each provider independent batch, use P7's `EffectManifestReservation` to atomically
+- [x] `P8D-04` For each provider independent batch, use P7's `EffectManifestReservation` to atomically
   commit two records in one Core transaction: P7's immutable redacted ticket manifest, and an Email-owned
   `email_tool_operations` parent whose private bounded `recovery_manifest_json` contains the canonical
   target refs plus every validated per-child argument required to recreate the child rows. The two records
@@ -2949,13 +3181,13 @@ ADD `tests/unit/test_email_agent_schema.py`, `tests/unit/test_core_schema_migrat
   parent is never an effect-recovery candidate; P8D-06's separate outcome-reconciliation sweep may inspect
   it but can neither recreate nor claim effects. Verified children remain committed and receive no
   duplicate effect.
-- [ ] `P8D-05` Classify projection-only versus provider effects truthfully.
+- [x] `P8D-05` Classify projection-only versus provider effects truthfully.
   `email.move_to_spam` is destructive external and always requires formal approval; approval cards use
   bounded sender/subject-safe summaries, never bodies. `email.correct_local_category` must use a new
   local-only service path and must never call `_with_label_reconciliation` or create a label/mailbox
   operation. Gmail labeling occurs only when Main separately selects and authorizes P5F's additive
   `email.apply_labels` or `email.remove_labels`; classifier category never implies either call.
-- [ ] `P8D-06` Preserve the existing read-before/write/read-after provider protocol and wire P7's
+- [x] `P8D-06` Preserve the existing read-before/write/read-after provider protocol and wire P7's
   `AsyncChildOutcomeSink` into P5F's `app/workers/email_operations_worker.py`. The child ID is not a Gmail
   idempotency token--Gmail receives only the state mutation. Retry safety comes from desired-state checks,
   leases, and idempotent label state. A queued call returns child operation/job refs, not a committed
@@ -2974,7 +3206,7 @@ ADD `tests/unit/test_email_agent_schema.py`, `tests/unit/test_core_schema_migrat
   authorization denial transitions its existing row, or materializes the full missing set from the private
   parent manifest, as `cancelled/policy_denied` before reporting P7 `denied`; it can never leave an absent
   child that effect recovery could recreate as queued.
-- [ ] `P8D-07` Make Core migration 014 the only P8D schema-change authority. P5F migrations 010-011 already
+- [x] `P8D-07` Make Core migration 014 the only P8D schema-change authority. P5F migrations 010-011 already
   owns `email_tool_operations`, `email_managed_labels`, `email_message_managed_labels`, and
   `email_managed_label_operations`; P8D must extend those authorities rather than recreate or replace
   them. Refactor any remaining Email schema SQL into a transaction-safe helper that never commits
@@ -3080,7 +3312,7 @@ claimable. Never down-migrate, try to unsend, or automatically reverse spam move
 
 ### P8E - Calendar writes
 
-Status: `not_started`
+Status: `implementation_complete_activation_gates_pending`
 Depends on: `P8D` and `P5B`
 Runtime default after subphase: Calendar writes may be independently active
 
@@ -3093,11 +3325,11 @@ Allowed files: `app/skills/domains/calendar/context.py`, `app/skills/domains/cal
 `tests/unit/test_main_tool_loop.py`, and
 `tests/integration/test_action_approval_restart.py`.
 
-- [ ] `P8E-01` Publish typed `calendar.create_event` (invitees forbidden),
+- [x] `P8E-01` Publish typed `calendar.create_event` (invitees forbidden),
   `calendar.create_event_with_invites` (one or more invitees), `calendar.update_event`, and
   `calendar.delete_event` with exact event/reference/patch schemas, timezone, calendar target, and
   resource version. Quick Add is not the new execution contract.
-- [ ] `P8E-02` For both create tools, derive the provider event ID as lowercase
+- [x] `P8E-02` For both create tools, derive the provider event ID as lowercase
   `"jarvis" + base32hex(SHA-256(operation_id)).rstrip("=")`, set private operation/argument-hash
   properties, and use typed Events Insert rather than Quick Add. On conflict or uncertain response, GET
   that exact ID: matching hashes/spec return idempotent success; mismatch is a terminal conflict; absence
@@ -3106,10 +3338,10 @@ Allowed files: `app/skills/domains/calendar/context.py`, `app/skills/domains/cal
   recorded pre-delete snapshot before classifying committed/retryable; never blindly repeat. The ID
   encoding and length must remain within the documented
   [Google Calendar event-ID contract](https://developers.google.com/workspace/calendar/api/v3/reference/events).
-- [ ] `P8E-03` `calendar.create_event` and non-attendee update require no formal approval.
+- [x] `P8E-03` `calendar.create_event` and non-attendee update require no formal approval.
   `calendar.create_event_with_invites` is outbound communication and always requires formal approval.
   Attendee mutation on update remains absent in this phase. Delete always requires formal approval.
-- [ ] `P8E-04` Reauthorize calendar/person and resource version after approval; return provider event ID,
+- [x] `P8E-04` Reauthorize calendar/person and resource version after approval; return provider event ID,
   committed state, and receipt. Local fallback must return `not_synced` truth and may not satisfy a live
   Google request.
 - [ ] `P8E-05` Test duplicate/retry/timeout, stale event, ambiguous reference, wrong calendar, invitee
@@ -3120,9 +3352,59 @@ Rollback: remove exactly `calendar.create_event`, `calendar.create_event_with_in
 `calendar.query_events`; do not automatically recreate deleted events or delete created events. Surface
 committed effects and require a separately authorized compensation.
 
+### P8 local implementation record
+
+Implementation state: all five subphases are represented in the local source tree and remain default-off.
+The operation allowlist was not broadened, no production image was deployed, no database was migrated on
+Hardybot, and no shadow/canary clock has started. Therefore the live portions of P8C-05/P8C-07,
+P8D-08/P8D-09, and the final P8E-05 acceptance gate remain open even after the local batch is green.
+
+Reuse map:
+
+| Subphase | Decision | Existing authority retained | Result |
+|---|---|---|---|
+| P8A Lists | adapt | Lists service/storage, P5A `list_operations`, receipt/verifier boundary | Four closed-schema writes share the existing transaction/idempotency authority. |
+| P8B Home | adapt | Home service/storage, switch state/action log, existing verifier | One exact-device state write; no group mutation or second store. |
+| P8C Documents | adapt | private Documents database/gateway, durable processing jobs, HumanReview | Four bounded writes; field confirmations and their parent operation commit in one Documents transaction. |
+| P8D Email | adapt | P5F Email tables/worker, P7 manifest/outcome ledger, ExternalIdentity policy | Two local atomic batches and one approved independent Gmail batch; no new queue or provider client. |
+| P8E Calendar | adapt | Calendar service/provider binding and P7 approval/receipt path | Four typed writes use deterministic provider identity, conditional revisions, and truthful local fallback. |
+
+Data ownership impact:
+
+| Datum/effect | Authoritative owner | Projection/recovery rule |
+|---|---|---|
+| Lists mutations and operation replay | Lists SQLite tables | Receipts/tickets are content-bounded projections only. |
+| Simulated Home state and action log | Home tables in Core SQLite | Verifier reports simulated truth, never physical-device truth. |
+| Document processing jobs | existing durable job ledger | Payload carries only opaque document ref, tier, and argument hash. |
+| Document proposals/field decisions/tool operations | encrypted Documents SQLite | Core HumanReview stores content-free decisions; operation-linked decision rows recover post-commit review marking. |
+| Email local state/provider children | existing Email tables in Core SQLite | P7 stores redacted manifests/outcomes; private recovery data stays Email-owned and clears after reconciliation. |
+| Calendar provider event/revision | configured Calendar provider | Core stores only bounded receipts/tickets; local fallback is explicitly `not_synced`. |
+
+Necessary allowed-file scope corrections: P8A also required the established Lists typed-tool descriptor
+module; P8C required the existing Document Gateway client/API schemas/routes, correction service, enqueue
+IPC, and worker extension points; P8D required the Email operation canonicalizer plus the shared P7 tool
+envelope/executor extension points; P8E required runtime composition injection. These are narrow extensions
+of the named authorities, not new subsystems. The existing large storage modules were touched only where a
+single SQLite connection/transaction must own mutation plus operation completion; extracting them before
+the phase would have split atomic authority.
+
+Local verification evidence: skill artifact compilation synchronized 10 skills with zero diagnostics;
+the staged P8 target batch reached 206 passing tests before two shared fixture corrections; the final
+full-suite batch reached 1,000 passes and 2 skips with one obsolete P5F-only Email catalog expectation,
+and that exact corrected test then passed. `compileall` passed before the full batch, scoped
+`git diff --check` reported no whitespace errors, and the clean-export verifier copied 582 public files
+successfully. The P8 functional changes were not followed by another redundant full-suite invocation;
+the post-batch catalog correction passed its exact test, and the final Documents recovery-result guard
+passed its two exact atomic/replay and coordinator tests. The final P8D readiness correction passed two
+exact tests proving provider-free inspection and byte-for-byte read-only database access.
+
+Rollback remains configuration-first: keep all P8 write IDs absent from
+`MAIN_TOOL_ENABLED_OPERATIONS`. Code/image rollback must follow the detailed domain rules above; never
+down-migrate Core 14 or Documents 15, discard terminal audit rows, or claim provider compensation occurred.
+
 ## P9 - Cross-domain composition and truthful partial completion
 
-Status: `not_started`
+Status: `implementation_complete_batch_gate_pending`
 Depends on: `P8E`; each scenario also requires independently certified tools
 Runtime default after phase: ordinary bounded composition is available whenever every exact operation is
 independently active; there is no separate workflow/composition allowlist
@@ -3158,21 +3440,21 @@ concurrent effects; unbounded plans.
 
 Tasks:
 
-- [ ] `P9-01` Generalize the P5A same-domain observation primitive to the exact tagged
+- [x] `P9-01` Generalize the P5A same-domain observation primitive to the exact tagged
   `provenance_claims`, root-local `observation_ref`, cross-domain transfer-field scope, sensitivity matrix,
   conservative `request_derived` exposure, untrusted propagation, and
   most-restrictive persistence rules in this plan. The server binds subtree hashes and validates the next
   closed schema; it never passes a provider object, credential, authority snapshot, unrestricted blob,
   or highly restricted value across domains. Do not add a phrase parser or composition allowlist.
-- [ ] `P9-02` Re-resolve and reauthorize every call independently. Assign a new stable operation ID and
+- [x] `P9-02` Re-resolve and reauthorize every call independently. Assign a new stable operation ID and
   receipt/ticket to each effect, including every child of an independent batch. A read authorization
   never grants a write; approval of one call never approves another.
-- [ ] `P9-03` Execute sequentially within the global eight-step/deadline limits. After a denial, approval
+- [x] `P9-03` Execute sequentially within the global eight-step/deadline limits. After a denial, approval
   pause, failure, or exhausted limit, preserve committed results and produce truthful `completed`,
   `pending`, `denied`, and `failed` portions.
-- [ ] `P9-04` Do not auto-compensate. A request to undo a committed effect is a new call with current
+- [x] `P9-04` Do not auto-compensate. A request to undo a committed effect is a new call with current
   policy and approval. No distributed transaction or feature-private saga table is added.
-- [ ] `P9-05` Add model-free scenarios with exact expected policy: Email summarize-derived List text
+- [x] `P9-05` Add model-free scenarios with exact expected policy: Email summarize-derived List text
   waits for formal transfer approval, binds the manifest, survives restart once, clears proposal payload
   at terminal state, and writes nothing on reject/expiry; an Email read followed by List text already
   verbatim in the trusted request needs no declassification approval; Research-derived List text is
@@ -3181,7 +3463,7 @@ Tasks:
   Document-to-List transfer is denied; forged/stale observation refs, missing/overlapping claims, revoked
   authorization between calls, first-effect-success/second-failure, approval pause, malicious
   observation instructions, repeat, and timeout all stop truthfully without duplicate effects.
-- [ ] `P9-06` Add held-out natural-language cases with paraphrases and new valid filter compositions.
+- [x] `P9-06` Add held-out natural-language cases with paraphrases and new valid filter compositions.
   Prove none requires a new `Intent`, router phrase, or workflow handler branch.
 
 Verification:
@@ -3202,16 +3484,58 @@ zero unauthorized/unapproved/duplicate effects. Rollback: remove all write IDs f
 operations and does not restore legacy execution; set mode `off` only for full legacy rollback. Preserve
 committed effects and pending records for inspection.
 
+### P9 local implementation record
+
+Implementation state: the generic cross-domain composition boundary and its model-free/held-out cases are
+implemented locally. No operation allowlist, deployment image, domain handler, provider adapter, or database
+schema was changed. The requested batch verification, three authoritative Ubuntu acceptance runs, and 48-hour
+canary remain open; P9 is not live-certified.
+
+Reuse map:
+
+| Decision | Existing authority retained | P9 use |
+|---|---|---|
+| adapt | `MainToolLoop` and closed `ModelStep`/`ToolObservation` types | Sequential composition, exact provenance classification, root-local observation lookup, per-call portions, and bounded stop behavior. |
+| adapt | `ToolDescriptor` compiler and registry-owned tool resolution | Reviewed source-field scopes plus fresh source/destination contract and authorization checks; no workflow allowlist. |
+| reuse | `ToolCallEnvelope`, domain operation ledgers, and independent-batch child identities | Every accepted effect retains its own stable operation identity and owning receipt/ticket path. |
+| adapt | P7 Human Review proposal and approved-action executor | No-store cross-domain effects bind a content-free manifest, reauthorize after restart, and clear the purpose-bound destination payload at terminal state. |
+| reuse | turn persistence policy/finalizer | The whole turn uses the most restrictive accepted source/destination policy; observations never enter generic history. |
+
+Data ownership impact:
+
+| Datum/effect | Authoritative owner | Projection/recovery rule |
+|---|---|---|
+| Source observations | live `MainToolLoop` root request only | Model receives only closed-schema payloads and opaque observation refs; operation identity stays server-owned. |
+| Cross-tool transfer binding | live loop; Human Review only while approval is pending | Stores hashes, descriptors, opaque refs, policy labels, and destination arguments only; never source values/provider objects/authority. |
+| Destination effect and replay | independently authorized destination domain | Earlier reads/effects grant no authority; destination operation and each independent child keep their existing owner and idempotency ledger. |
+| Partial-completion projection | response/finalizer | Content-free `completed`, `pending`, `denied`, and `failed` portions reference operation/receipt/review/job IDs without raw observation data. |
+
+`app/core/main_tool_loop.py` remains over the size ratchet because P9 changes only its existing orchestration,
+provenance, approval-pause, and outcome responsibilities; moving this logic during the cross-domain gate would
+split one fail-closed decision boundary. A later behavior-preserving extraction may move pointer/provenance
+validation into a core-owned policy module after the P9 canary, but it must not create a second executor or state
+authority.
+
+Authored verification covers Email-to-List formal transfer approval, trusted-request values that do not inherit
+observation taint, untrusted Research data propagation, same-domain Documents metadata, denied
+Documents-to-Lists transfer, Calendar request-derived normalization, stale/forged/missing/overlapping provenance,
+revoked source authorization, approval restart, terminal payload clearing, repeat/timeout, and committed-first
+partial failure without compensation. These checks are intentionally queued for the user's consolidated batch.
+
+Rollback is configuration-first: remove destination write IDs, then affected read IDs, from
+`MAIN_TOOL_ENABLED_OPERATIONS`. Preserve committed effects, approval proposals, operation ledgers, and receipts;
+there is no automatic compensation or P9-specific durable store to unwind.
+
 ## P10A - Main-only semantic cutover with dormant Micro rollback
 
-Status: `not_started`
+Status: `implementation_complete_batch_gate_pending`
 Depends on: every retained interactive domain has passed its own gate and `P9`
-Runtime default after phase: Main handles all accepted semantic Discord turns; Micro code remains dormant
+Runtime default after phase: Main handles all accepted semantic Discord turns
 
-Objective: make the P3 active-mode Micro bypass permanent across `off|shadow` as well by disabling the
-temporary legacy Micro flag, while retaining one flag-controlled code rollback during the observation
-window. This phase does not introduce the first active-mode bypass; it removes the remaining dormant
-legacy branch from every mode.
+Objective: make Main semantic ownership permanent across `off|shadow|active`. During implementation the
+user explicitly authorized proceeding directly through P10B because Hardybot is inactive and the work is
+still in build phase, so no dormant classifier rollback remains in source. The retained-image rollback and
+the 72-hour production observation move to P11.
 
 Allowed production/configuration files:
 
@@ -3250,22 +3574,22 @@ new `!` privileges; rewriting historical route/intent/session records.
 
 Tasks:
 
-- [ ] `P10A-01` Preserve the already-certified P3 rule that active mode routes every accepted Discord
+- [x] `P10A-01` Preserve the already-certified P3 rule that active mode routes every accepted Discord
   semantic message to Main, including retained leading `!` syntax, and extend Main ownership to
   `off|shadow` when the temporary legacy Micro flag is false. Strip the UI prefix only after the trusted
   adapter envelope is created; the prefix grants no capability or authorization. In active mode, the
   path uses generic `MainActionCommitment`; no request may fall back to `MAIN_ACTION_INTENTS` before
   discovery.
-- [ ] `P10A-02` Stop constructing/calling Micro for new turns, new clarifications, and failed commands
+- [x] `P10A-02` Stop constructing/calling Micro for new turns, new clarifications, and failed commands
   when `LEGACY_MICRO_ROUTING_ENABLED=false`. Direct API/command-pack callers enter the same typed Main
   boundary or fail closed with a documented compatibility response.
-- [ ] `P10A-03` Stop writing new Micro-specific handoff/classification fields except fields required for
+- [x] `P10A-03` Stop writing new Micro-specific handoff/classification fields except fields required for
   backward-compatible schemas. Preserve old rows and operator display as historical labels.
-- [ ] `P10A-04` Remove Micro instructions from the live Main/Discord prompt path and capability
+- [x] `P10A-04` Remove Micro instructions from the live Main/Discord prompt path and capability
   narration. Do not delete prompt artifacts yet.
-- [ ] `P10A-05` Preserve scheduler, adapter, operator, attachment, wake/session, and conversation routes.
+- [x] `P10A-05` Preserve scheduler, adapter, operator, attachment, wake/session, and conversation routes.
   A scheduler-owned operation must not become interactive as a side effect of cutover.
-- [ ] `P10A-06` Rewrite boundary tests so prefixed/unprefixed wording, pending replies, unknown asks,
+- [x] `P10A-06` Rewrite boundary tests so prefixed/unprefixed wording, pending replies, unknown asks,
   action clarifications, unauthorized skills, and child profiles all exercise Main with identical
   deterministic policy. Include an authorized semantic operation with no legacy `Intent` and prove it is
   reachable, plus the inverse case where a known legacy intent cannot bypass an unavailable tool. Prove
@@ -3275,6 +3599,11 @@ Tasks:
   old Main/Micro-capable image and configuration snapshot, recreate only affected services with the
   required Compose env file, and observe for 72 hours.
 
+Implementation record (`2026-09-07`): source routing, direct API behavior, Discord prefix provenance,
+runtime composition, prompt projection, configuration defaults, and boundary tests are Main-only. No
+Hardybot configuration, image, data, service, or deployment state was touched. `P10A-07` is intentionally
+unexecuted and is absorbed by P11's retained-image checkpoint and longest-wins 72-hour observation.
+
 Cutover gate: three consecutive full acceptance runs; 100% mandatory/safety cases; at least 95% overall;
 zero failed token loops, Micro model requests, unauthorized/unapproved/duplicate effects, invalid
 dispatches, or scheduler regressions; Main p95 no more than 25% above its recorded baseline and no more
@@ -3283,8 +3612,8 @@ the retained configuration/image, and verify the legacy route suite. Do not chan
 
 ## P10B - Micro implementation retirement
 
-Status: `review_required`
-Depends on: successful `P10A` observation and explicit user approval for this destructive cleanup
+Status: `implementation_complete_batch_gate_pending`
+Depends on: P10A source cutover; production certification remains in P11
 Runtime default after phase: Main only; no Micro executable path
 
 Objective: remove dormant Micro implementation/configuration while retaining backward-readable history
@@ -3292,15 +3621,20 @@ and an image/database rollback boundary.
 
 Entry gate:
 
-- [ ] `P10B-ENTRY-01` Present P10A telemetry, all remaining Micro references, retained image/config/DB
+- [x] `P10B-ENTRY-01` Present P10A telemetry, all remaining Micro references, retained image/config/DB
   compatibility evidence, and proposed exact diff to the user; obtain explicit approval.
-- [ ] `P10B-ENTRY-02` Run
+- [x] `P10B-ENTRY-02` Run
   `rg -n -i "micro|FAST_COMMAND_INTENTS" app tests deploy scripts .env.example benchmarks`
   and classify every result as remove, rename to neutral compatibility history, or preserve as historical
   schema reader. This deliberately includes `SessionOwner.MICRO`, `micro_tool`, generated metadata,
   dashboard/API labels, bootstrap scripts, and tests. Add the resulting exact full-path allowlist and
   per-file disposition to this plan, obtain review, and only then change status from `review_required`.
   No P10B implementation edit is authorized by the current baseline list alone.
+
+Entry disposition (`2026-09-07`): the user explicitly waived the inactive-runtime observation/review
+gate and authorized all of P10B while Hardybot remains out of active use. That waiver authorizes local
+source cleanup only; it does not waive clean-export tests, retained-image/database compatibility, deploy,
+canaries, or the 72-hour observation in P11.
 
 Expected deletions:
 
@@ -3322,18 +3656,66 @@ is authoritative because P1-P10A may change the file set before retirement.
 
 Tasks:
 
-- [ ] `P10B-01` Remove construction, inference, routing, repair-handoff, generated-artifact, model-load,
+- [x] `P10B-01` Remove construction, inference, routing, repair-handoff, generated-artifact, model-load,
   Compose, and configuration paths that can call or require Micro.
-- [ ] `P10B-02` Replace user-facing/runtime names with Main/tool-loop-neutral names only where current
+- [x] `P10B-02` Replace user-facing/runtime names with Main/tool-loop-neutral names only where current
   behavior needs them. Preserve historical enum/column/event values as read-only compatibility; stop
   writing them. Do not drop or rewrite schema/history in this phase.
-- [ ] `P10B-03` Replace deleted Micro tests with Main boundary/compatibility assertions. Preserve coverage
+- [x] `P10B-03` Replace deleted Micro tests with Main boundary/compatibility assertions. Preserve coverage
   for prefix envelopes, clarification, session continuity, authorization failure, offline startup, and
   historical record reading.
-- [ ] `P10B-04` Regenerate skill artifacts and fail if any executable Micro contract remains. A plain
+- [x] `P10B-04` Regenerate skill artifacts and fail if any executable Micro contract remains. A plain
   historical documentation mention is allowed only when clearly marked non-runtime.
-- [ ] `P10B-05` Run the inventory command again. Runtime/configuration results must be zero except the
+- [x] `P10B-05` Run the inventory command again. Runtime/configuration results must be zero except the
   named backward-read compatibility constants and migration comments listed in the evidence record.
+
+### P10B reviewed inventory and exact disposition
+
+The local source inventory was run before and after removal. These are the exact P10 retirement paths;
+files carrying earlier phase changes remain subject to their own phase evidence.
+
+| Disposition | Exact paths |
+| --- | --- |
+| Delete executable classifier and its failure-handoff coordinator | `app/core/micro_jarvis.py`; `app/core/micro_backend.py`; `app/core/main_repair_flow.py` |
+| Delete classifier prompt/generated artifacts | `app/prompts/microjarvis_identity.md`; `app/prompts/microjarvis_capabilities.md`; `app/prompts/micro_jarvis_skills.md`; `app/prompts/micro_jarvis_skills.md.meta.json`; `app/prompts/skills/micro_jarvis_skills.md`; `app/prompts/skills/micro_jarvis_skills.md.meta.json` |
+| Delete classifier-specific tests | `tests/unit/test_micro_jarvis.py`; `tests/unit/test_micro_backend.py`; `tests/unit/test_router_context_contracts.py`; `tests/unit/test_router_discord_micro_gate.py`; `tests/unit/test_router_handoff.py`; `tests/unit/test_router_micro_skill_gate.py`; `tests/unit/test_router_working_context_packet.py` |
+| Adapt routing, state, and compatibility action names to Main | `app/core/types.py`; `app/core/router.py`; `app/core/request_flow.py`; `app/core/request_pipeline.py`; `app/core/agent_routing.py`; `app/core/state_machine.py`; `app/core/session_transitions.py`; `app/core/action_execution.py`; `app/core/turn_finalizer.py`; `app/core/conversation_routing.py`; `app/core/context_flow.py`; `app/core/conversation_flow.py`; `app/core/clarification_coordinator.py`; `app/core/main_turn_commitment.py`; `app/core/main_backend.py`; `app/core/main_jarvis.py`; `app/core/main_plan_flow.py`; `app/core/executor.py`; `app/skills/domains/documents/context.py` |
+| Remove model/config/runtime construction | `app/config.py`; `app/runtime.py`; `app/accelerator/service.py`; `app/services/offline_runtime_policy.py`; `app/api/routes/dashboard.py`; `app/ui/dashboard.html`; `.env.example`; `deploy/docker/compose.yaml`; `deploy/docker/README.md`; `deploy/ubuntu/bootstrap.sh`; `scripts/verify_install.py` |
+| Adapt Discord prefix envelope to audit-only Main provenance | `app/services/discord/bot.py`; `app/api/principals.py`; `docs/discord-command-envelope.md`; delete `docs/discord-micro-command-envelope.md` |
+| Remove live skill contracts and regenerate the only retained artifact | `app/skills/registry_service.py`; `app/skills/authorized_executor.py`; `app/services/scheduled_jobs_service.py`; `scripts/compile_skill_artifacts.py`; `app/prompts/skills/README.md`; `app/prompts/skills/SKILL_TEMPLATE.md`; `app/prompts/skills/calendar_inbox_skill.md`; `app/prompts/skills/calendar_skill.md`; `app/prompts/skills/conversation_skill.md`; `app/prompts/skills/documents_skill.md`; `app/prompts/skills/email_agent_skill.md`; `app/prompts/skills/lights_skill.md`; `app/prompts/skills/lists_skill.md`; `app/prompts/skills/memory_skill.md`; `app/prompts/skills/private_notes_skill.md`; `app/prompts/skills/research_skill.md`; `app/prompts/skills/critical_skills.md`; `app/prompts/skills/critical_skills.md.meta.json` |
+| Adapt Main prompts, acceptance input, tickets, and current documentation | `app/prompts/agent_registry.md`; `app/prompts/jarvis_capabilities.md`; `app/prompts/jarvis_system.md`; `app/tickets/service.py`; `benchmarks/models/main_acceptance_cases.json`; `README.md`; `docs/main-turn-commitment.md`; `docs/adaptive-model-compute.md`; `docs/web-research.md`; `docs/QWEN38-MAIN-MIGRATION-PLAN.md`; `docs/Discord-Attachment-Latency-Audit.md`; `docs/monolith-breakup.md` |
+| Replace/retarget boundary coverage | `tests/router_support.py`; `tests/integration/test_command_pack_api.py`; `tests/integration/test_context_continuity_api.py`; `tests/unit/test_router_main_only_gate.py`; `tests/unit/test_agent_loop.py`; `tests/unit/test_agent_routing_policy.py`; `tests/unit/test_discord_adapter.py`; `tests/unit/test_main_backend.py`; `tests/unit/test_main_jarvis_planner.py`; `tests/unit/test_main_model_acceptance.py`; `tests/unit/test_offline_runtime_policy.py`; `tests/unit/test_persistence_memory.py`; `tests/unit/test_router_agent_alias.py`; `tests/unit/test_router_entity_registry.py`; `tests/unit/test_router_pending_interaction.py`; `tests/unit/test_router_recent_turns.py`; `tests/unit/test_router_session_summary.py`; `tests/unit/test_router_wake_sleep.py`; `tests/unit/test_runtime_model_window.py`; `tests/unit/test_scheduled_jobs_service.py`; `tests/unit/test_skill_context_contracts.py`; `tests/unit/test_skill_registry_service.py`; `tests/unit/test_authorized_skill_executor.py`; `tests/unit/test_config.py`; `tests/unit/test_install_verifier.py`; `tests/unit/test_accelerator_admission.py`; `tests/unit/test_accelerator_composition.py`; `tests/unit/test_ollama_observability.py` |
+| Preserve only as backward-read compatibility | `app/core/types.py` (`SessionOwner.MICRO`, `SessionState.FAST_COMMAND`); `app/tickets/types.py` (`MICRO_DECISION`); `app/db/core_schema.py`; `app/db/sqlite_store.py`; `app/skills/registry_service.py` (disabled legacy columns and old boot-row filtering); `app/skills/authorized_executor.py` (strip old projection keys); `app/ui/dashboard.html` (render old owner/route values as `historical`) |
+| Preserve as explicitly historical evidence/fixtures | `docs/Jarvis_High_level_AI_gen_from_repo_2026_08_25.md`; `docs/OCR/OCR-Plan.md`; `docs/OCR/OCR-Phase2-3-Checkpoint.md`; `docs/OCR/OCR-Phase5-Checkpoint.md`; legacy-route fixtures in `tests/unit/test_action_ticket_repository.py`, `tests/unit/test_action_ticket_service.py`, `tests/unit/test_assistant_response.py`, `tests/unit/test_context_builder.py`, `tests/unit/test_discord_adapter.py`, `tests/unit/test_plane_sync.py`, `tests/unit/test_session_context_manager.py`, `tests/unit/test_session_summarizer.py`, `tests/unit/test_skill_registry_service.py`, and `tests/integration/test_action_ticket_review_flow.py` |
+
+Post-removal search classification:
+
+- no classifier model, prompt, constructor, router call, Compose variable, environment flag, generated
+  executable skill contract, or current acceptance payload remains;
+- `microsecond` and `microseconds` are unrelated timestamp precision calls;
+- retained schema columns, enum values, dashboard labels, registry filters, and legacy test rows are
+  backward-read compatibility only and produce no new classifier decisions;
+- dated architecture/OCR documents are historical records, not runtime contracts.
+
+### P10 reuse map and data ownership
+
+| Concern | Decision | Authority/result |
+| --- | --- | --- |
+| Semantic interpretation and planning | reuse | Existing Main turn commitment, capability discovery, typed tool loop, clarification state, and safe-stop boundaries now receive every accepted semantic turn. |
+| Discord command handling | adapt | Existing trusted Discord envelope still strips the optional prefix, but records only `command_prefix_explicit`; it grants no route or authority. |
+| Domain execution, approvals, and receipts | reuse | Existing authorized executor, domain services, approval ledger, action tickets, event log, and durable jobs are unchanged as authorities. |
+| Historical compatibility | adapt | Existing SQLite schema readers, owner/ticket enums, and dashboard projection remain; no replacement store or migration is introduced. |
+| Classifier subsystem | remove | It had no remaining compatible role after Main-only routing; keeping it would retain a second semantic authority and model lifecycle. |
+
+No durable datum changes owner. Core SQLite remains authoritative for sessions/events/skill rows and
+ticket history; each domain remains authoritative for its own state; protected configuration remains
+authoritative on Hardybot. No schema column or historical row is dropped or rewritten. Current turns write
+Main routing decisions and neutral prefix provenance; old classifier-labelled rows remain readable until a
+separately designed archival migration exists.
+
+Local rollback is source-only: restore the deleted P10 files and pre-P10 configuration from the retained
+revision. Production rollback remains the exact pre-P10 image plus protected configuration snapshot; P11
+must prove that image can read the additive database before any activation.
 
 Verification: all affected targeted tests, common exit commands, three Main acceptance passes, clean
 Compose configuration, cold restart, and 72-hour authoritative Ubuntu observation. The Main model must be the only
@@ -3345,8 +3727,8 @@ configuration against the compatibility-tested additive database. Do not reverse
 
 ## P11 - Authoritative Ubuntu certification, promotion, and release observation
 
-Status: `not_started`
-Depends on: the intended final runtime phase (`P10A`, or `P10B` only if separately approved)
+Status: `runbook_ready_batch_pending`
+Depends on: the P10B source candidate and completion of the consolidated authoritative batch
 Runtime after phase: certified release or complete rollback
 
 Objective: prove the clean public tree, authoritative Ubuntu runtime, protected configuration, GPU Main,
@@ -3372,7 +3754,7 @@ Pre-promotion tasks:
   standalone Core backup is verification evidence and must never be restored by itself. Run both retained-
   image reader checks against those two same-generation standalone artifacts, then run the existing
   isolated Documents restore drill against that exact generation. Retain the prior image/configuration and
-  do not run a restore over production. Record Core `user_version=13`, required tables and additive
+  do not run a restore over production. Record Core `user_version=14`, required tables and additive
   compatibility rows 8 through 14. When Documents migration 15 exists, record Documents version 15 and
   prove the retained compatibility-aware version-14 image can open it; a pre-bridge Documents image is not
   a valid rollback image.
@@ -3409,6 +3791,35 @@ Pre-promotion tasks:
 - [ ] `P11-08` Observe for the duration required by the latest activated boundary: at least 24 hours for
   reads, 48 hours for writes/composition, and 72 hours for Main-only/Micro retirement. The longest
   applicable duration wins.
+
+### P11 preparation record and consolidated morning checkpoint
+
+Prepared locally on `2026-09-07`. No P11 task is marked complete: Hardybot was not contacted, no protected
+configuration or durable data was read or changed, no image was built or deployed, and no production
+canary or observation was claimed. The sequence below is the minimal consolidated run requested by the
+user; a failure stops before the next mutating checkpoint.
+
+1. Capture P11-01 facts and the pre-change dead-letter/heartbeat/image baselines without printing secrets.
+2. Create one clean export under the approved staging root. In that export run one static gate
+   (public-tree, fatal Ruff, compile, architecture/diff checks) and one full pytest invocation. Do not run
+   separate domain suites unless that full run fails and diagnosis requires a focused rerun.
+3. Validate the acceptance fixture once without inference, then run the mandated three consecutive Main
+   model passes as one secured batch. Reuse the same candidate/export/model digest for all three.
+4. Before service mutation, create and verify the Core backup plus the coordinated Documents backup when
+   required; prove both retained-image readers and the isolated restore drill against that same generation.
+5. Build the clean-export candidate exactly once. Generate the runtime-requirements manifest, retain the
+   previous image/config reference, stop only the required consumer, then perform one bounded recreate of
+   the required service set with `--env-file .env`, `--no-build`, and health waits.
+6. Run one synthetic canary matrix covering enabled reads, each write effect class, authorization denial,
+   approval/restart, idempotency, scheduler-only denial, partial completion, historical-row reading, and
+   all required consumers. Compare dead letters and heartbeat freshness once before and once after.
+7. If every checkpoint is green, begin the single 72-hour longest-wins observation. Any safety, data,
+   compatibility-reader, model-residency, health, or unexplained ledger failure triggers the documented
+   retained-image/config rollback rather than additional release experimentation.
+
+Evidence should be written once per checkpoint with commit/export hash, exact command, exit status,
+artifact/image IDs, content-free counters, and rollback reference. This avoids repeated builds, repeated
+full suites, and piecemeal deploys while preserving every P11 release gate.
 
 Reference command sequence on the authoritative Ubuntu runtime; replace only shell variables with
 protected operator values:
@@ -4094,16 +4505,17 @@ if expected_version >= 10:
         "gmail_message_id", "action", "managed_label_refs_json",
         "arguments_hash", "idempotency_key", "status", "lease_fencing_token",
     }
-if expected_version >= 11:
+if expected_version >= 12:
     required_tables.add("action_proposals")
     required_columns["action_proposals"] = {
         "batch_manifest_json", "batch_manifest_hash",
         "transfer_manifest_json", "transfer_binding_hash",
+        "outcome_guild_id", "outcome_channel_id", "outcome_message_id",
     }
-if expected_version >= 12:
+if expected_version >= 13:
     required_tables.add("switch_actions_log")
     required_columns["switch_actions_log"] = {"operation_id", "arguments_hash"}
-if expected_version >= 13:
+if expected_version >= 14:
     required_tables.update({"email_label_operations", "email_mailbox_operations"})
     required_columns["email_tool_operations"].update({
         "idempotency_key", "operation_identity_hash", "parent_manifest_hash",
@@ -4240,20 +4652,20 @@ reviewed plan revision.
 | P5A | four typed Lists operations, migration 009 operation ledger, accelerator typed-step route, active Main routing, closed selector/provenance contracts, and development-headroom configuration; live image `a57688bd42e0` | focused 46; local full 809 passed/2 skipped; Ubuntu full 811 passed; Ruff, Compose parse, and clean public export passed | three accepted model runs; copied-production operation/operator/full-route canaries passed; live disposable create/add/respond committed exactly two effects and state matched | exact operation/domain kill switches plus global mode `off`; retained pre-headroom image `b05741dc`; verified DB/config/source backups; committed data retained | P7 ticket attachment and destructive/update/remove tools remain deferred; Email remains inactive; dormant Micro rollback retained | complete |
 | P5F | typed Email catalogs/query v2, additive-label and reversible mailbox-state tools on one durable parent/child ledger/worker; exact live image `5f67581ac4b0` | E3: 876 tests and three 34/34 model runs; E4: local 884/2 and exact Ubuntu 889, Ruff/compile/architecture/Compose/export/public-tree; copied-database state canary passed; E5 model gate remains open at one 47/47 and exact rc23 46/47 | 9/9 scripted live reads; add/remove canary passed; four-operation provider canary restored exact labels; real Discord exposed a channel-scope miss, now corrected and awaiting user retest | per-operation/domain/worker kill switches; retained pre-E4 API/worker tags; verified schema-11 predeploy database/config/source backup; protected-config backup; legacy worker disabled | corrected real-Discord canary, three consecutive E5 model certifications, and expanded 24-hour observation; P3/P4 observation debt; original source accounts read-only | mailbox_state_discord_canary_pending |
 | P5B | typed Calendar query path, provider projection, runtime registration, model cases, and live image `89a0c54cbd25` | focused 73; full 892; three consecutive 6/6 model runs; clean-export public-tree/compile/architecture/Ruff/full-suite gates passed | default-calendar-only live matrix passed today, exact-date, and rolling text-filtered reads; one observation, zero failures/effects, and no-store per case; 24-hour observation began `2026-09-01T17:52:55Z` | remove exact operation/domain allowlist additions and restore retained image `p5b-rollback-20260901`; protected pre-activation env and verified Core backup retained | two inaccessible non-default bindings remain untested and unreconciled; personal-calendar access explicitly deferred | default_calendar_observation_in_progress |
-| P5C | pending | pending | pending | pending | pending | not_started |
-| P5D | pending | pending | pending | pending | pending | not_started |
-| P5E | pending | pending | pending | pending | pending | not_started |
-| P6 | pending | pending | pending | pending | pending | not_started |
-| P7 | pending | pending | n/a | pending | pending | not_started |
-| P8A | pending | pending | pending | pending | pending | not_started |
-| P8B | pending | pending | pending | pending | pending | not_started |
-| P8C | pending | pending | pending | pending | pending | not_started |
-| P8D | pending | pending | pending | pending | pending | not_started |
-| P8E | pending | pending | pending | pending | pending | not_started |
-| P9 | pending | pending | pending | pending | pending | not_started |
-| P10A | pending | pending | pending | pending | pending | not_started |
-| P10B | pending | pending | pending | pending | pending | review_required |
-| P11 | pending | pending | pending | pending | pending | not_started |
+| P5C | 8 phase-attributable source/test/plan files at baseline `c8c3a95` | focused Home 11 passed; targeted Ruff and diff check passed; full/architecture/export batch pending | not activated; 24-hour read canary pending batch promotion | remove exact Home operation IDs; no runtime/config change made | full/model/Ubuntu/canary gates intentionally batched | implementation_complete_batch_gate_pending |
+| P5D | six restricted read contracts, typed handler/projections, shared request policy, query bounds, and composition registration at baseline `c8c3a95` | three focused Documents files: 22 passed; targeted Ruff passed; full/architecture/export batch pending | not activated; scoped read canary pending batch promotion | remove the six exact Documents operation IDs; no runtime/config change made | full/model/Ubuntu/canary gates intentionally batched; write tools remain deferred | implementation_complete_batch_gate_pending |
+| P5E | one bounded no-store Research tool, existing service/cache adapter, child-context propagation, safe URL projection, generic untrusted-answer link gate, and conditional composition registration at baseline `c8c3a95` | focused Research/loop/ownership 13 passed plus observation-budget 1 passed; targeted Ruff passed; full/architecture/export batch pending | not activated; default-off policy retained; read canary pending batch promotion | disable existing research flag or remove exact `research.search_web` operation ID; no data migration | full/model/Ubuntu/canary gates intentionally batched; typed Research remains unavailable to child contexts | implementation_complete_batch_gate_pending |
+| P6 | migration 012, exact-call proposal/decision ledger, transfer/batch reauthorization, protected Discord delivery, fenced executor/worker, and operator CLIs at baseline `c8c3a95`; live image `6e289896975c` | focused 131; clean-export Ubuntu full 958; Ruff, compile, architecture/size, CLI, diff, export, and public-tree gates pass | sender attribution and wrong-destination gate pass; immutable approval recorded; production denied the inert tool with zero effect; all three jobs completed once; terminal outcome delivered; readiness/dead-letter gates pass | retained prior image plus protected config/source/schema-11 Core backup and approver-correction backup; operation/mode kill switches; proposal audit and fenced cancellation retained | at-least-once provider-send crash window; repository extraction and runtime composition debt | complete |
+| P7 | six production files plus two new/three updated tests at baseline `c8c3a95`; no schema/config/runtime changes | focused recovery matrices corrected only two test assertions; final full 972/2; Ruff, compile, architecture, diff, export, and public-tree pass | n/a; no activation or deployment | prior image/code plus existing tool kill switches; no schema downgrade | repository extraction after P8D; production remediation gateway and domain wiring remain phase-owned | complete |
+| P8A | remaining Lists write contracts and existing operation ledger integration | authored coverage; consolidated batch pending | not activated | operation/domain kill switches; no schema downgrade | authoritative full/model/canary gates | implementation_complete_activation_gates_pending |
+| P8B | Home/Lights typed writes, durable simulated-state receipts, and ticket verification | authored coverage; consolidated batch pending | not activated | operation/domain kill switches; committed simulated state retained | authoritative full/model/canary gates | implementation_complete_activation_gates_pending |
+| P8C | Documents controlled writes, review corrections, reprocessing, and durable bridge | authored coverage; consolidated batch pending | live bridge not activated | Documents operation gates plus coordinated database/spool rollback pair | clean-export, restore, worker, and live bridge gates | implementation_complete_live_bridge_gate_pending |
+| P8D | Email provider-write tools, operation ledger, worker completion, and receipts | authored coverage; consolidated batch pending | new operations not activated | per-operation/worker kill switches; committed provider effects retained | authoritative provider/canary gates | implementation_complete_activation_gates_pending |
+| P8E | Calendar create/update/delete paths with provider receipts and ticket verification | authored coverage; consolidated batch pending | new writes not activated | per-operation/domain kill switches; committed events retained | authoritative model/provider/canary gates | implementation_complete_activation_gates_pending |
+| P9 | generic provenance/transfer/partial-result boundary plus model-free and held-out cases; no domain/schema/config changes | authored targeted integration, restart, unit, acceptance, and architecture checks; consolidated batch intentionally pending | not activated; Ubuntu acceptance runs and 48-hour canary pending | exact operation/domain kill switches; committed effects and pending audit retained; no compensation/store migration | large loop extraction deferred until after canary; live gates pending | implementation_complete_batch_gate_pending |
+| P10A | Main-only routing/config/prompt cutover; exact inventory in P10B addendum | Main boundary tests authored; local AST parse included with P10B; consolidated batch pending | no Hardybot activation | retained pre-P10 image/config required by P11; no data migration | clean-export/full/model/deploy/72-hour gates | implementation_complete_batch_gate_pending |
+| P10B | executable classifier/backend/failure-flow/prompts/artifacts/tests removed; compatibility readers retained | inventory rerun; critical artifact regenerated from temporary registry; 470 Python files parsed; core imports and JSON passed; scoped `git diff --check` exited 0; no pytest run | no Hardybot activation | restore source or retained pre-P10 image/config; additive DB remains readable by design | full suite, compatibility-reader image proof, Main benchmarks, canaries, 72-hour observation | implementation_complete_batch_gate_pending |
+| P11 | consolidated certification sequence and stop/rollback checkpoints prepared | not run by user request; scheduled as one morning batch | none | runbook requires verified backups and retained image before recreate | every P11-01 through P11-08 gate remains open | runbook_ready_batch_pending |
 
 ## Definition of complete
 

@@ -1,5 +1,4 @@
 from app.core.main_jarvis import MainJarvis
-from app.core.micro_jarvis import MicroJarvis
 from tests.router_support import RegistryBackedTestRouter as JarvisRouter
 from app.core.session_store import SessionStore
 from app.core.state_machine import RuntimePowerController
@@ -13,7 +12,6 @@ from app.tools.lists_service import ListsService
 def test_router_records_list_entity_and_resolves_deictic_followup_from_registry():
     session_store = SessionStore()
     router = JarvisRouter(
-        micro_jarvis=MicroJarvis(),
         main_jarvis=MainJarvis(),
         session_store=session_store,
         runtime_power=RuntimePowerController(),

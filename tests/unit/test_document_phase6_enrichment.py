@@ -236,6 +236,103 @@ def test_business_card_extracts_name_organization_title_and_contact_channels(tmp
     repository.close()
 
 
+def test_confirm_fields_commits_atomically_and_replays_from_parent_operation(tmp_path) -> None:
+    repository, record, run = _ready_run(tmp_path)
+    _service(repository).enrich(
+        _artifact(
+            record,
+            run,
+            [
+                "Field Works LLC",
+                "Jordan Lee",
+                "Operations Manager",
+                "jordan@example.test",
+                "www.example.test",
+            ],
+        )
+    )
+    current_record = repository.get(record.document_id)
+    assert current_record is not None
+    corrections = DocumentFieldCorrectionService(repository)
+    fields = corrections.list_fields(record=current_record, user_id="operator")
+    website = next(row for row in fields if row["field_name"] == "website")
+    repository.record_field_decision(
+        document_id=record.document_id,
+        source_version_id=str(record.source_version_id),
+        field_name="website",
+        review_decision_id="review-decision-already-used",
+        decision_kind="reject",
+        selected_observation_id=str(website["observation_id"]),
+    )
+    fields = corrections.list_fields(record=current_record, user_id="operator")
+    candidates = [row for row in fields if row["field_name"] in {"full_name", "organization"}]
+
+    def confirmation_rows(*, reuse_second_id: bool) -> list[dict[str, str]]:
+        values = []
+        for index, row in enumerate(sorted(candidates, key=lambda item: item["field_name"])):
+            values.append(
+                {
+                    "field_name": str(row["field_name"]),
+                    "observation_id": str(row["observation_id"]),
+                    "review_binding_hash": str(row["review_binding_hash"]),
+                    "review_decision_id": (
+                        "review-decision-already-used"
+                        if reuse_second_id and index == 1
+                        else f"review-decision-confirm-{index}"
+                    ),
+                }
+            )
+        return values
+
+    failed_operation = "toolop_v1_" + "1" * 64
+    with pytest.raises(ValueError, match="field_confirmation_payload_changed"):
+        repository.record_field_confirmations(
+            document_id=record.document_id,
+            source_version_id=str(record.source_version_id),
+            confirmations=confirmation_rows(reuse_second_id=True),
+            operation_id=failed_operation,
+            tool_id="documents.confirm_fields",
+            arguments_hash="2" * 64,
+        )
+    assert repository.get_tool_operation(failed_operation) is None
+    assert {
+        row["field_name"]: row.get("decision_kind")
+        for row in repository.effective_fields(document_id=record.document_id)
+    }["full_name"] is None
+
+    operation_id = "toolop_v1_" + "3" * 64
+    arguments_hash = "4" * 64
+    committed = repository.record_field_confirmations(
+        document_id=record.document_id,
+        source_version_id=str(record.source_version_id),
+        confirmations=confirmation_rows(reuse_second_id=False),
+        operation_id=operation_id,
+        tool_id="documents.confirm_fields",
+        arguments_hash=arguments_hash,
+    )
+    replay = repository.record_field_confirmations(
+        document_id=record.document_id,
+        source_version_id=str(record.source_version_id),
+        confirmations=confirmation_rows(reuse_second_id=False),
+        operation_id=operation_id,
+        tool_id="documents.confirm_fields",
+        arguments_hash=arguments_hash,
+    )
+    recovered = repository.get_field_confirmation_result(operation_id=operation_id)
+
+    assert committed["idempotent_replay"] is False
+    assert replay["idempotent_replay"] is True
+    assert recovered is not None and recovered["result_ref"] == committed["result_ref"]
+    assert len(committed["decisions"]) == len(replay["decisions"]) == 2
+    final_decisions = {
+        row["field_name"]: row.get("decision_kind")
+        for row in repository.effective_fields(document_id=record.document_id)
+    }
+    assert final_decisions["full_name"] == "confirm"
+    assert final_decisions["organization"] == "confirm"
+    repository.close()
+
+
 def test_schema_rejects_unknown_fields_missing_evidence_and_exact_restricted_values() -> None:
     base = dict(
         contract_version="document-extraction-v1",

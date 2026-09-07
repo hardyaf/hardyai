@@ -16,6 +16,17 @@ defaults:
   # in the matching guild override below.
   document_response_channel_ids: []
 
+# Symbolic proactive destinations. Runtime code resolves these protected IDs
+# only while sending or accepting a decision; model/tool payloads use purpose keys.
+protected_destinations:
+  human_reviews:
+    guild_id: 111111111111111111
+    channel_id: 777777777777777777
+    approver_user_id: 888888888888888888
+  operator_notices:
+    guild_id: 111111111111111111
+    channel_id: 999999999999999999
+
 guilds:
   - guild_id: 111111111111111111
     guild_name: replace-with-test-server-name
@@ -42,8 +53,6 @@ guilds:
     private_notes_channels:
       - channel_id: 333333333333333333
         delivery_channel_id: 333333333333333333
-        # Deliver content-free adaptive model-budget notices to this private channel.
-        compute_budget_notices: true
         allowed_user_ids:
           - 444444444444444444
         owner_user_id: example_user

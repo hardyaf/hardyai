@@ -178,7 +178,7 @@ class ListsContextContract:
         confidence_floor = 0.89 if intent_value == "lists.get_items" else 0.85
         decision.confidence = max(float(getattr(decision, "confidence", 0.0)), confidence_floor)
         if not missing and not has_blocking_ambiguity(decision):
-            decision.recommended_owner = SessionOwner.MICRO
+            decision.recommended_owner = SessionOwner.MAIN
         return decision
 
     def refine_missing_fields(

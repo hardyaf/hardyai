@@ -14,6 +14,8 @@ class DocumentCorrectionRepository(Protocol):
 
     def record_field_decision(self, **kwargs: Any) -> dict[str, Any]: ...
 
+    def record_field_confirmations(self, **kwargs: Any) -> dict[str, Any]: ...
+
 
 def field_review_binding_hash(
     *,
@@ -121,6 +123,9 @@ class DocumentFieldCorrectionService:
         review_decision_id: str,
         decision_kind: str,
         corrected_value: str | None = None,
+        operation_id: str | None = None,
+        tool_id: str | None = None,
+        arguments_hash: str | None = None,
     ) -> dict[str, Any]:
         if not DocumentAccessPolicy.can_read_fields(record=record, user_id=user_id):
             raise PermissionError("protected_fields_unavailable")
@@ -184,6 +189,9 @@ class DocumentFieldCorrectionService:
             decision_kind=normalized_kind,
             selected_observation_id=expected_observation_id,
             applied_value=applied_value,
+            operation_id=operation_id,
+            tool_id=tool_id,
+            arguments_hash=arguments_hash,
         )
         return {
             "field_decision_id": str(decision["field_decision_id"]),
@@ -197,4 +205,69 @@ class DocumentFieldCorrectionService:
                 else None
             ),
             "decision_kind": str(decision["decision_kind"]),
+            "idempotent_replay": bool(decision.get("idempotent_replay")),
         }
+
+    def confirm_many(
+        self,
+        *,
+        record: DocumentRecord,
+        user_id: str,
+        source_version_id: str,
+        confirmations: list[dict[str, str]],
+        operation_id: str,
+        tool_id: str,
+        arguments_hash: str,
+    ) -> dict[str, Any]:
+        """Validate one bounded confirmation set before its atomic repository commit."""
+
+        if not DocumentAccessPolicy.can_read_fields(record=record, user_id=user_id):
+            raise PermissionError("protected_fields_unavailable")
+        active_source_version = str(record.source_version_id or "")
+        if not active_source_version or str(source_version_id) != active_source_version:
+            raise ValueError("field_source_version_changed")
+        if record.document_class is None:
+            raise ValueError("document_class_unavailable")
+        if not confirmations or len(confirmations) > 64:
+            raise ValueError("field_confirmation_batch_invalid")
+
+        current_by_name = {
+            str(row.get("field_name") or "").strip().casefold(): row
+            for row in self.list_fields(record=record, user_id=user_id)
+        }
+        normalized: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for raw in confirmations:
+            field_name = str(raw.get("field_name") or "").strip().casefold()
+            if not field_name or field_name in seen:
+                raise ValueError("field_confirmation_batch_invalid")
+            seen.add(field_name)
+            field_spec_for(record.document_class, field_name)
+            current = current_by_name.get(field_name)
+            if current is None or str(current.get("decision_kind") or "").strip().casefold() in {
+                "confirm",
+                "correct",
+            }:
+                raise ValueError("field_confirmation_target_changed")
+            observation_id = str(raw.get("observation_id") or "").strip()
+            binding_hash = str(raw.get("review_binding_hash") or "").strip().casefold()
+            if observation_id != str(current.get("observation_id") or ""):
+                raise ValueError("field_observation_changed")
+            if binding_hash != str(current.get("review_binding_hash") or "").strip().casefold():
+                raise ValueError("field_review_binding_changed")
+            normalized.append(
+                {
+                    "field_name": field_name,
+                    "observation_id": observation_id,
+                    "review_binding_hash": binding_hash,
+                    "review_decision_id": str(raw.get("review_decision_id") or "").strip(),
+                }
+            )
+        return self.repository.record_field_confirmations(
+            document_id=record.document_id,
+            source_version_id=active_source_version,
+            confirmations=normalized,
+            operation_id=operation_id,
+            tool_id=tool_id,
+            arguments_hash=arguments_hash,
+        )

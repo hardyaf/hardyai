@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from enum import Enum
+from typing import Any
 
 
 class SessionState(str, Enum):
@@ -71,7 +73,7 @@ class Intent(str, Enum):
     UNKNOWN = "unknown"
 
 
-FAST_COMMAND_INTENTS = {
+LEGACY_ACTION_INTENTS = {
     Intent.LIST_CREATE_LIST,
     Intent.LIST_ADD_ITEM,
     Intent.LIST_GET_ITEMS,
@@ -124,7 +126,33 @@ DOCUMENT_INTENTS = {
 }
 
 
-# Main may semantically repair both the low-latency household commands and
-# Main-owned domain actions.  Keep this separate from FAST_COMMAND_INTENTS so
-# adding a Main-owned skill does not accidentally authorize Micro execution.
-MAIN_ACTION_INTENTS = FAST_COMMAND_INTENTS | EMAIL_AGENT_INTENTS | DOCUMENT_INTENTS
+# Backward-compatible intent names remain readable while Main's runtime tool
+# catalog is the only authority that can make an operation executable.
+MAIN_ACTION_INTENTS = LEGACY_ACTION_INTENTS | EMAIL_AGENT_INTENTS | DOCUMENT_INTENTS
+
+
+@dataclass
+class RoutingDecision:
+    """Neutral compatibility envelope for pre-tool-loop routing state.
+
+    New semantic interpretation belongs to Main.  This type keeps older
+    session, clarification, and response plumbing readable without preserving
+    a second classifier or execution authority.
+    """
+
+    intent: Intent
+    confidence: float
+    entities: dict[str, Any] = field(default_factory=dict)
+    ambiguity_flags: list[str] = field(default_factory=list)
+    recommended_owner: SessionOwner = SessionOwner.MAIN
+    reasoning: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "intent": self.intent.value,
+            "confidence": self.confidence,
+            "entities": self.entities,
+            "ambiguity_flags": self.ambiguity_flags,
+            "recommended_owner": self.recommended_owner.value,
+            "reasoning": self.reasoning,
+        }

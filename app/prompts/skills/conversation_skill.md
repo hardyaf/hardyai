@@ -14,8 +14,6 @@ storage_ref: app.skills.domains.conversation.storage:ConversationSQLiteStorage(c
 critical_level: 2
 active: true
 version: 1
-micro_enabled: false
-micro_functions: []
 research_policy:
   web_lookup_enabled: true
   knowledge_confidence_threshold: 0.70
@@ -30,13 +28,6 @@ research_policy:
     - include_links
     - include_date_context
     - no_fabricated_sources
-micro_failure_handoff:
-  baseline_context_keys:
-    - micro_intent
-    - micro_confidence
-    - micro_entities
-    - micro_ambiguity_flags
-  capability_context_keys: []
 main_handoff_context:
   always_pass_from_session:
     - main_agent_token_session
@@ -59,7 +50,7 @@ Handle non-tool turns: explanation, planning, brainstorming, and guidance.
 ## Input Schema
 
 - Free-form natural language request.
-- Optional contextual hints from micro classification.
+- Optional bounded contextual hints from the current Main routing decision.
 - Optional handoff context from prior turns (`main_agent_token_session`, pending clarifications).
 
 ## Output Schema
@@ -125,19 +116,9 @@ Handle non-tool turns: explanation, planning, brainstorming, and guidance.
   - what is still unknown,
   - one next-step question for the user.
 
-## MicroJarvis Contract
+## Execution Ownership
 
-### Micro functions that are allowed
-
-- None.
-
-### Escalation triggers to Main Jarvis
-
-- All conversation requests route to Main Jarvis.
-
-### Failure handoff payload to Main Jarvis
-
-- Include baseline micro decision context for interpretability.
+Main owns all conversation.
 
 ## Main Handoff Context Contract
 
@@ -146,8 +127,8 @@ Handle non-tool turns: explanation, planning, brainstorming, and guidance.
 
 ## Learnability Checklist
 
-- [x] Micro contract completed.
-- [x] Failure handoff contract completed.
+- [x] Main conversation contract completed.
+- [x] Typed failure behavior completed.
 - [x] Main handoff context contract completed.
 - [x] Deictic/pronoun follow-up behavior documented.
-- [x] Micro failure -> main handoff continuity documented.
+- [x] Main continuity across safe-stop and follow-up paths documented.

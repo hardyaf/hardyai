@@ -64,6 +64,16 @@ _PERSISTENCE_POLICIES = frozenset({"standard", "redacted", "no_store"})
 _IDEMPOTENCY_POLICIES = frozenset({"not_applicable", "required"})
 _EFFECT_CARDINALITIES = frozenset({"single", "atomic_batch", "independent_batch"})
 _TRANSFER_SCOPES = frozenset({"same_domain", "cross_domain"})
+_ALL_TOP_LEVEL_TRANSFER_KEYS = "*"
+_INITIAL_CROSS_DOMAIN_TRANSFER_KEYS: dict[str, frozenset[str] | str] = {
+    "email.summarize": frozenset({"summary", "message_refs"}),
+    "lists.list_collections": _ALL_TOP_LEVEL_TRANSFER_KEYS,
+    "lists.get_collection": _ALL_TOP_LEVEL_TRANSFER_KEYS,
+    "calendar.query_events": frozenset({"events"}),
+    "home.list_devices": frozenset({"devices"}),
+    "home.get_device_state": frozenset({"device", "state", "truth_scope"}),
+    "research.search_web": frozenset({"results"}),
+}
 _RUNTIME_DEPENDENCIES = frozenset(
     {"action_approval", "ticket_review", "document_processing", "email_operations"}
 )
@@ -594,6 +604,30 @@ class ToolDescriptor:
         if len(transfer_fields) > _MAX_TRANSFER_FIELDS:
             raise ToolContractError("transfer_field_count_exceeded")
 
+        # P9's initial transfer surface is compiled, reviewed contract policy.
+        # For these exact tools, emit one non-overlapping descriptor per
+        # top-level observation key and replace only the explicitly reviewed
+        # keys with cross-domain scope. This is source-data policy, not a
+        # destination/workflow allowlist; every destination is still resolved
+        # and authorized independently.
+        cross_domain_keys = _INITIAL_CROSS_DOMAIN_TRANSFER_KEYS.get(tool_id)
+        if cross_domain_keys is not None:
+            properties = observation_schema.get("properties")
+            if not isinstance(properties, Mapping):
+                raise ToolContractError("transfer_pattern_schema_mismatch")
+            transfer_fields = [
+                TransferableObservationField(
+                    pattern="/" + str(name).replace("~", "~0").replace("/", "~1"),
+                    scope=(
+                        "cross_domain"
+                        if cross_domain_keys == _ALL_TOP_LEVEL_TRANSFER_KEYS
+                        or name in cross_domain_keys
+                        else "same_domain"
+                    ),
+                )
+                for name in properties
+            ]
+
         dependencies = tuple(str(item or "").strip().casefold() for item in self.runtime_dependencies)
         if (
             len(dependencies) > _MAX_RUNTIME_DEPENDENCIES
@@ -899,6 +933,8 @@ class ToolCallEnvelope:
     authorization_snapshot_ref: str
     arguments_hash: str
     arguments: FrozenDict
+    descriptor_hash: str = ""
+    resource_version: str = ""
 
     def __post_init__(self) -> None:
         for name in (
@@ -931,6 +967,14 @@ class ToolCallEnvelope:
             raise ToolContractError("envelope_operation_identity_mismatch")
         object.__setattr__(self, "tool_id", str(self.tool_id).strip().casefold())
         object.__setattr__(self, "arguments", normalized)
+        descriptor_hash = str(self.descriptor_hash or "").strip().casefold()
+        if descriptor_hash and not re.fullmatch(r"[0-9a-f]{64}", descriptor_hash):
+            raise ToolContractError("envelope_descriptor_hash_invalid")
+        resource_version = str(self.resource_version or self.contract_version).strip()
+        if not resource_version or len(resource_version) > 255 or "\n" in resource_version:
+            raise ToolContractError("envelope_resource_version_invalid")
+        object.__setattr__(self, "descriptor_hash", descriptor_hash)
+        object.__setattr__(self, "resource_version", resource_version)
 
     @classmethod
     def create(
@@ -950,6 +994,7 @@ class ToolCallEnvelope:
         authorization_snapshot_ref: str,
         validated_arguments: Mapping[str, Any],
         external_user_id: str | None = None,
+        resource_version: str | None = None,
     ) -> ToolCallEnvelope:
         operation_id, arguments_hash, normalized = tool_operation_id(
             root_request_id=root_request_id,
@@ -976,6 +1021,10 @@ class ToolCallEnvelope:
             authorization_snapshot_ref=authorization_snapshot_ref,
             arguments_hash=arguments_hash,
             arguments=normalized,
+            descriptor_hash=hashlib.sha256(
+                canonical_json(descriptor.to_storage_dict()).encode("utf-8")
+            ).hexdigest(),
+            resource_version=str(resource_version or descriptor.contract_version),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -997,4 +1046,6 @@ class ToolCallEnvelope:
             "authorization_snapshot_ref": self.authorization_snapshot_ref,
             "arguments_hash": self.arguments_hash,
             "arguments": thaw_json(self.arguments),
+            "descriptor_hash": self.descriptor_hash,
+            "resource_version": self.resource_version,
         }

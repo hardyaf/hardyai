@@ -359,6 +359,10 @@ class ToolObservation:
     review_refs: tuple[str, ...]
     job_refs: tuple[str, ...]
     untrusted: bool
+    # Server-owned correlation only. This is deliberately omitted from the
+    # model projection so an observation cannot manufacture operation
+    # identity or reuse it as authority in a later call.
+    operation_id: str = ""
 
     def to_model_dict(self) -> dict[str, Any]:
         return {
@@ -374,6 +378,62 @@ class ToolObservation:
             "job_refs": list(self.job_refs),
             "untrusted": self.untrusted,
         }
+
+
+@dataclass(frozen=True)
+class CrossToolTransferBinding:
+    """Content-free binding for one source observation used by a later call."""
+
+    observation_ref: str
+    operation_id: str
+    skill_id: str
+    domain: str
+    tool_id: str
+    contract_version: int
+    descriptor_hash: str
+    resource_version: str
+    transfer_pattern: str
+    transfer_scope: str
+    source_pointer: str
+    subtree_hash: str
+    sensitivity: str
+    persistence: str
+    untrusted: bool
+
+    def to_manifest_dict(self) -> dict[str, Any]:
+        return {
+            "observation_ref": self.observation_ref,
+            "operation_id": self.operation_id,
+            "skill_id": self.skill_id,
+            "domain": self.domain,
+            "tool_id": self.tool_id,
+            "contract_version": self.contract_version,
+            "descriptor_hash": self.descriptor_hash,
+            "resource_version": self.resource_version,
+            "transfer_pattern": self.transfer_pattern,
+            "transfer_scope": self.transfer_scope,
+            "source_pointer": self.source_pointer,
+            "subtree_hash": self.subtree_hash,
+            "sensitivity": self.sensitivity,
+            "persistence": self.persistence,
+            "untrusted": self.untrusted,
+        }
+
+
+@dataclass(frozen=True)
+class ProvenanceEvaluation:
+    """Server result for exact argument provenance and ambient exposure."""
+
+    destination_values: tuple[tuple[str, str], ...] = ()
+    sources: tuple[CrossToolTransferBinding, ...] = ()
+    effective_persistence: str = "standard"
+    untrusted: bool = False
+    cross_domain: bool = False
+    requires_formal_approval: bool = False
+
+    @property
+    def has_transfer(self) -> bool:
+        return self.cross_domain and bool(self.destination_values and self.sources)
 
 
 @dataclass(frozen=True)

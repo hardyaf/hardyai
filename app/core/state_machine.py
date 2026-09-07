@@ -4,18 +4,18 @@ from collections import deque
 from time import monotonic
 from typing import Callable
 
-from app.core.types import FAST_COMMAND_INTENTS, Intent, PowerState, SessionOwner, SessionState
+from app.core.types import LEGACY_ACTION_INTENTS, Intent, PowerState, SessionOwner, SessionState
 
 
 class RuntimePowerController:
     def __init__(
         self,
-        larger_model_micro_only_window_seconds: float = 180.0,
+        larger_model_active_window_seconds: float = 180.0,
         time_fn: Callable[[], float] | None = None,
         transition_hook: Callable[[bool, bool], None] | None = None,
     ) -> None:
         self._state = PowerState.AWAKE
-        self._larger_model_window_seconds = max(float(larger_model_micro_only_window_seconds), 1.0)
+        self._larger_model_window_seconds = max(float(larger_model_active_window_seconds), 1.0)
         self._time_fn = time_fn or monotonic
         self._task_labels: deque[tuple[float, SessionOwner]] = deque()
         self._larger_models_active = False
@@ -48,7 +48,7 @@ class RuntimePowerController:
 
     def record_task_label(self, owner: SessionOwner | str) -> bool:
         normalized_owner = self._coerce_owner(owner)
-        if normalized_owner not in {SessionOwner.MICRO, SessionOwner.MAIN}:
+        if normalized_owner != SessionOwner.MAIN:
             return False
         now = self._time_fn()
         self._task_labels.append((now, normalized_owner))
@@ -62,13 +62,13 @@ class RuntimePowerController:
     def model_runtime_status(self) -> dict[str, object]:
         now = self._time_fn()
         self._recompute_larger_models_active(now)
-        micro_labeled_count = sum(1 for _, owner in self._task_labels if owner == SessionOwner.MICRO)
+        historical_labeled_count = sum(1 for _, owner in self._task_labels if owner == SessionOwner.MICRO)
         main_labeled_count = sum(1 for _, owner in self._task_labels if owner == SessionOwner.MAIN)
         return {
             "larger_models_active": self._larger_models_active,
             "window_seconds": self._larger_model_window_seconds,
             "task_count": len(self._task_labels),
-            "micro_labeled_count": micro_labeled_count,
+            "historical_labeled_count": historical_labeled_count,
             "main_labeled_count": main_labeled_count,
         }
 
@@ -106,16 +106,12 @@ def choose_owner_for_intent(intent: Intent, recommended_owner: SessionOwner) -> 
     if intent in {Intent.CONVERSATIONAL, Intent.UNKNOWN}:
         # Non-tool conversational turns are always main-owned.
         return SessionOwner.MAIN
-    if intent in FAST_COMMAND_INTENTS:
-        if recommended_owner in {SessionOwner.MAIN, SessionOwner.MICRO}:
-            return recommended_owner
-        return SessionOwner.MICRO
-    return recommended_owner
+    if intent in LEGACY_ACTION_INTENTS:
+        return SessionOwner.MAIN
+    return SessionOwner.MAIN if recommended_owner == SessionOwner.MICRO else recommended_owner
 
 
 def next_state_for_owner_intent(owner: SessionOwner, intent: Intent) -> SessionState:
-    if owner == SessionOwner.MICRO and intent in FAST_COMMAND_INTENTS:
-        return SessionState.FAST_COMMAND
     if owner == SessionOwner.MAIN:
         return SessionState.CONVERSATIONAL
     return SessionState.IDLE

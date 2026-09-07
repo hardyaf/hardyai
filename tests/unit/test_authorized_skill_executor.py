@@ -55,7 +55,7 @@ class FakeRegistry:
             {
                 "skill_id": "skill.lists.core",
                 "intents": ["lists.create_list", "stale.intent"],
-                "micro_intents": ["lists.get_items", "stale.intent"],
+                "legacy_classifier_intents": ["lists.get_items", "stale.intent"],
             }
         ]
 
@@ -125,7 +125,8 @@ def test_capability_projection_filters_stale_intents_and_contract_fields():
     )
 
     assert catalog[0]["main_intents"] == ["lists.create_list"]
-    assert catalog[0]["micro_intents"] == ["lists.get_items"]
+    assert "micro_intents" not in catalog[0]
+    assert "legacy_classifier_intents" not in catalog[0]
     assert catalog[0]["intent_contracts"] == [
         {
             "intent": "lists.create_list",

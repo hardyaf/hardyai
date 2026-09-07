@@ -5,7 +5,7 @@ import json
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from threading import RLock
-from typing import Any, ContextManager
+from typing import Any, Callable, ContextManager, Mapping
 
 from app.db.connection import open_sqlite_connection
 from app.db.migrations import initialize_schema
@@ -75,6 +75,13 @@ class TicketRepository:
             TicketStatus.UNVERIFIABLE.value,
             TicketStatus.RECONCILIATION_REQUIRED.value,
             TicketStatus.ESCALATED.value,
+        },
+        TicketStatus.RECONCILIATION_REQUIRED.value: {
+            TicketStatus.EXECUTING.value,
+            TicketStatus.VERIFICATION_PENDING.value,
+            TicketStatus.RECONCILIATION_REQUIRED.value,
+            TicketStatus.ESCALATED.value,
+            TicketStatus.CANCELLED.value,
         },
     }
     _TERMINAL_REOPEN_TARGETS = {
@@ -322,47 +329,233 @@ class TicketRepository:
         payload = structured_payload if structured_payload is not None else {}
         entry_hash = content_hash({"text": verbatim_text, "payload": payload})
         stable_dedupe = dedupe_key or content_hash(
-            {"ticket_id": ticket_id, "request_id": request_id, "entry_type": entry_type, "hash": entry_hash}
+            {
+                "ticket_id": ticket_id,
+                "request_id": request_id,
+                "entry_type": entry_type,
+                "hash": entry_hash,
+            }
         )
         with self._transaction(immediate=True) as cur:
-            existing = cur.execute(
-                "SELECT * FROM ticket_entries WHERE dedupe_key = ?",
-                (stable_dedupe,),
-            ).fetchone()
-            if existing is not None:
-                return self._entry_row(existing)
-            sequence = int(
-                cur.execute(
-                    "SELECT COALESCE(MAX(sequence_number), 0) + 1 FROM ticket_entries WHERE ticket_id = ?",
-                    (ticket_id,),
-                ).fetchone()[0]
+            return self._append_entry_cursor(
+                cur,
+                ticket_id=ticket_id,
+                request_id=request_id,
+                entry_type=entry_type,
+                actor_type=actor_type,
+                actor_id=actor_id,
+                verbatim_text=verbatim_text,
+                structured_payload=payload,
+                dedupe_key=stable_dedupe,
+                created_at=created_at,
+                conflict_code=None,
             )
-            entry_id = new_id()
-            cur.execute(
-                """
-                INSERT INTO ticket_entries (
-                    entry_id, ticket_id, sequence_number, request_id, entry_type,
-                    actor_type, actor_id, created_at, verbatim_text,
-                    structured_payload_json, content_hash, dedupe_key
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    entry_id,
-                    ticket_id,
-                    sequence,
-                    request_id,
-                    entry_type,
-                    actor_type,
-                    actor_id,
-                    created_at or iso_utc(),
-                    verbatim_text,
-                    _json_dump(payload),
-                    entry_hash,
-                    stable_dedupe,
-                ),
-            )
-            row = cur.execute("SELECT * FROM ticket_entries WHERE entry_id = ?", (entry_id,)).fetchone()
+
+    def _append_entry_cursor(
+        self,
+        cursor: sqlite3.Cursor,
+        *,
+        ticket_id: str,
+        request_id: str,
+        entry_type: str,
+        actor_type: str,
+        actor_id: str | None,
+        verbatim_text: str | None,
+        structured_payload: dict[str, Any] | list[Any],
+        dedupe_key: str,
+        created_at: str | None,
+        conflict_code: str | None,
+    ) -> dict[str, Any]:
+        payload_json = _json_dump(structured_payload)
+        entry_hash = content_hash({"text": verbatim_text, "payload": structured_payload})
+        existing = cursor.execute(
+            "SELECT * FROM ticket_entries WHERE dedupe_key = ?",
+            (dedupe_key,),
+        ).fetchone()
+        if existing is not None:
+            if conflict_code and (
+                str(existing["ticket_id"]) != ticket_id
+                or str(existing["request_id"]) != request_id
+                or str(existing["entry_type"]) != entry_type
+                or str(existing["actor_type"]) != actor_type
+                or (str(existing["actor_id"]) if existing["actor_id"] is not None else None)
+                != actor_id
+                or (
+                    str(existing["verbatim_text"])
+                    if existing["verbatim_text"] is not None
+                    else None
+                )
+                != verbatim_text
+                or str(existing["structured_payload_json"]) != payload_json
+                or str(existing["content_hash"]) != entry_hash
+            ):
+                raise ValueError(conflict_code)
+            return self._entry_row(existing)
+        sequence = int(
+            cursor.execute(
+                "SELECT COALESCE(MAX(sequence_number), 0) + 1 FROM ticket_entries WHERE ticket_id = ?",
+                (ticket_id,),
+            ).fetchone()[0]
+        )
+        entry_id = new_id()
+        cursor.execute(
+            """
+            INSERT INTO ticket_entries (
+                entry_id, ticket_id, sequence_number, request_id, entry_type,
+                actor_type, actor_id, created_at, verbatim_text,
+                structured_payload_json, content_hash, dedupe_key
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                entry_id,
+                ticket_id,
+                sequence,
+                request_id,
+                entry_type,
+                actor_type,
+                actor_id,
+                created_at or iso_utc(),
+                verbatim_text,
+                payload_json,
+                entry_hash,
+                dedupe_key,
+            ),
+        )
+        row = cursor.execute(
+            "SELECT * FROM ticket_entries WHERE entry_id = ?",
+            (entry_id,),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("ticket entry insert did not produce a row")
         return self._entry_row(row)
+
+    def append_entry_exact(
+        self,
+        *,
+        ticket_id: str,
+        request_id: str,
+        entry_type: str,
+        actor_type: str,
+        actor_id: str | None = None,
+        structured_payload: dict[str, Any] | list[Any] | None = None,
+        dedupe_key: str,
+        conflict_code: str,
+    ) -> dict[str, Any]:
+        """Append an immutable control entry or reject changed dedupe content."""
+
+        payload = structured_payload if structured_payload is not None else {}
+        with self._transaction(immediate=True) as cur:
+            return self._append_entry_cursor(
+                cur,
+                ticket_id=ticket_id,
+                request_id=request_id,
+                entry_type=entry_type,
+                actor_type=actor_type,
+                actor_id=actor_id,
+                verbatim_text=None,
+                structured_payload=payload,
+                dedupe_key=dedupe_key,
+                created_at=None,
+                conflict_code=conflict_code,
+            )
+
+    def get_entry_by_dedupe(self, dedupe_key: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM ticket_entries WHERE dedupe_key = ?",
+                (dedupe_key,),
+            ).fetchone()
+        return self._entry_row(row) if row is not None else None
+
+    def list_execution_manifests(self, ticket_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT * FROM ticket_entries
+                WHERE ticket_id = ? AND entry_type = 'execution_manifest'
+                ORDER BY sequence_number
+                """,
+                (ticket_id,),
+            ).fetchall()
+        return [self._entry_row(row) for row in rows]
+
+    def reserve_execution_manifest_atomic(
+        self,
+        *,
+        ticket_id: str,
+        request_id: str,
+        manifest: dict[str, Any],
+        manifest_hash: str,
+        domain_reservation: Callable[
+            [sqlite3.Cursor, Mapping[str, Any], str, str | None], Mapping[str, Any]
+        ]
+        | None = None,
+    ) -> dict[str, Any]:
+        """Persist a redacted ticket manifest with an optional domain row in one transaction."""
+
+        if content_hash(manifest) != manifest_hash:
+            raise ValueError("tool_execution_manifest_hash_mismatch")
+        parent_operation_id = str(manifest.get("parent_operation_id") or "")
+        recovery_hash = manifest.get("recovery_manifest_hash")
+        dedupe_key = f"tool-execution-manifest:v1:{parent_operation_id}"
+        with self._transaction(immediate=True) as cur:
+            ticket = cur.execute(
+                "SELECT * FROM work_tickets WHERE ticket_id = ?",
+                (ticket_id,),
+            ).fetchone()
+            if ticket is None:
+                raise KeyError(ticket_id)
+            projection = {
+                key: ticket[key]
+                for key in (
+                    "ticket_id",
+                    "origin_request_id",
+                    "user_id",
+                    "agent_id",
+                    "source",
+                    "intent",
+                    "skill_id",
+                    "route",
+                )
+            }
+            entry = self._append_entry_cursor(
+                cur,
+                ticket_id=ticket_id,
+                request_id=request_id,
+                entry_type="execution_manifest",
+                actor_type="jarvis",
+                actor_id=str(ticket["agent_id"]),
+                verbatim_text=None,
+                structured_payload=manifest,
+                dedupe_key=dedupe_key,
+                created_at=None,
+                conflict_code="tool_execution_manifest_conflict",
+            )
+            domain_result: Mapping[str, Any] | None = None
+            if domain_reservation is not None:
+                if not isinstance(recovery_hash, str) or not recovery_hash:
+                    raise ValueError("domain_recovery_manifest_hash_required")
+                domain_result = domain_reservation(
+                    cur,
+                    projection,
+                    manifest_hash,
+                    recovery_hash,
+                )
+                if not isinstance(domain_result, Mapping) or set(domain_result) != {
+                    "status",
+                    "recovery_manifest_hash",
+                }:
+                    raise ValueError("domain_manifest_reservation_result_invalid")
+                if str(domain_result.get("status") or "") not in {"created", "existing"}:
+                    raise ValueError("domain_manifest_reservation_status_invalid")
+                if str(domain_result.get("recovery_manifest_hash") or "") != recovery_hash:
+                    raise ValueError("domain_manifest_reservation_hash_conflict")
+        return {
+            "entry": entry,
+            "manifest_hash": manifest_hash,
+            "ticket_projection": projection,
+            "domain_reservation": dict(domain_result) if domain_result is not None else None,
+        }
 
     def list_entries(self, ticket_id: str) -> list[dict[str, Any]]:
         with self._lock:
@@ -374,39 +567,85 @@ class TicketRepository:
 
     def record_operation_receipt(self, *, ticket_id: str, receipt: dict[str, Any]) -> dict[str, Any]:
         with self._transaction(immediate=True) as cur:
-            cur.execute(
-                """
-                INSERT INTO operation_receipts (
-                    operation_id, ticket_id, capability, action, idempotency_key,
-                    provider_resource_id, provider_revision, resource_key, outcome,
-                    committed_at, expected_effect_json, validator_name, validator_version,
-                    resource_locator_json, execution_observation_json, result_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(idempotency_key) DO NOTHING
-                """,
-                (
-                    receipt["operation_id"],
-                    ticket_id,
-                    receipt["capability"],
-                    receipt["action"],
-                    receipt["idempotency_key"],
-                    receipt.get("provider_resource_id"),
-                    receipt.get("provider_revision"),
-                    receipt["resource_key"],
-                    receipt["status"],
-                    receipt.get("committed_at"),
-                    _json_dump(receipt.get("expected_effect") or {}),
-                    receipt["validator_name"],
-                    receipt["validator_version"],
-                    _json_dump(receipt.get("resource_locator") or {}),
-                    _json_dump(receipt.get("execution_observation") or {}),
-                    _json_dump(receipt.get("result") or {}),
-                ),
+            return self._record_operation_receipt_cursor(
+                cur,
+                ticket_id=ticket_id,
+                receipt=receipt,
             )
-            row = cur.execute(
-                "SELECT * FROM operation_receipts WHERE idempotency_key = ?",
-                (receipt["idempotency_key"],),
-            ).fetchone()
+
+    def _record_operation_receipt_cursor(
+        self,
+        cursor: sqlite3.Cursor,
+        *,
+        ticket_id: str,
+        receipt: dict[str, Any],
+    ) -> dict[str, Any]:
+        values = (
+            receipt["operation_id"],
+            ticket_id,
+            receipt["capability"],
+            receipt["action"],
+            receipt["idempotency_key"],
+            receipt.get("provider_resource_id"),
+            receipt.get("provider_revision"),
+            receipt["resource_key"],
+            receipt["status"],
+            receipt.get("committed_at"),
+            _json_dump(receipt.get("expected_effect") or {}),
+            receipt["validator_name"],
+            receipt["validator_version"],
+            _json_dump(receipt.get("resource_locator") or {}),
+            _json_dump(receipt.get("execution_observation") or {}),
+            _json_dump(receipt.get("result") or {}),
+        )
+        existing = cursor.execute(
+            """
+            SELECT * FROM operation_receipts
+            WHERE idempotency_key = ? OR operation_id = ?
+            """,
+            (receipt["idempotency_key"], receipt["operation_id"]),
+        ).fetchall()
+        if existing:
+            expected = {
+                "operation_id": values[0],
+                "ticket_id": values[1],
+                "capability": values[2],
+                "action": values[3],
+                "idempotency_key": values[4],
+                "provider_resource_id": values[5],
+                "provider_revision": values[6],
+                "resource_key": values[7],
+                "outcome": values[8],
+                "committed_at": values[9],
+                "expected_effect_json": values[10],
+                "validator_name": values[11],
+                "validator_version": values[12],
+                "resource_locator_json": values[13],
+                "execution_observation_json": values[14],
+                "result_json": values[15],
+            }
+            if len(existing) != 1 or any(
+                existing[0][key] != expected_value
+                for key, expected_value in expected.items()
+            ):
+                raise ValueError("operation_receipt_idempotency_conflict")
+            return self._receipt_row(existing[0]) or {}
+
+        cursor.execute(
+            """
+            INSERT INTO operation_receipts (
+                operation_id, ticket_id, capability, action, idempotency_key,
+                provider_resource_id, provider_revision, resource_key, outcome,
+                committed_at, expected_effect_json, validator_name, validator_version,
+                resource_locator_json, execution_observation_json, result_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            values,
+        )
+        row = cursor.execute(
+            "SELECT * FROM operation_receipts WHERE idempotency_key = ?",
+            (receipt["idempotency_key"],),
+        ).fetchone()
         return self._receipt_row(row) or {}
 
     def get_latest_receipt(self, ticket_id: str) -> dict[str, Any] | None:
@@ -437,38 +676,210 @@ class TicketRepository:
         expected_state: dict[str, Any],
         source_revision_at_execution: str | None,
     ) -> dict[str, Any]:
-        expectation_id = new_id()
-        expected_hash = content_hash(expected_state)
         with self._transaction(immediate=True) as cur:
-            cur.execute(
-                """
-                INSERT INTO ticket_expectations (
-                    expectation_id, ticket_id, operation_id, capability,
-                    validator_name, validator_version, resource_locator_json,
-                    expected_state_json, expected_state_hash,
-                    source_revision_at_execution, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(operation_id) DO NOTHING
-                """,
-                (
-                    expectation_id,
-                    ticket_id,
-                    operation_id,
-                    capability,
-                    validator_name,
-                    validator_version,
-                    _json_dump(resource_locator),
-                    _json_dump(expected_state),
-                    expected_hash,
-                    source_revision_at_execution,
-                    iso_utc(),
+            return self._create_expectation_cursor(
+                cur,
+                ticket_id=ticket_id,
+                operation_id=operation_id,
+                capability=capability,
+                validator_name=validator_name,
+                validator_version=validator_version,
+                resource_locator=resource_locator,
+                expected_state=expected_state,
+                source_revision_at_execution=source_revision_at_execution,
+            )
+
+    def _create_expectation_cursor(
+        self,
+        cursor: sqlite3.Cursor,
+        *,
+        ticket_id: str,
+        operation_id: str,
+        capability: str,
+        validator_name: str,
+        validator_version: str,
+        resource_locator: dict[str, Any],
+        expected_state: dict[str, Any],
+        source_revision_at_execution: str | None,
+    ) -> dict[str, Any]:
+        expected_hash = content_hash(expected_state)
+        expected = {
+            "ticket_id": ticket_id,
+            "operation_id": operation_id,
+            "capability": capability,
+            "validator_name": validator_name,
+            "validator_version": validator_version,
+            "resource_locator_json": _json_dump(resource_locator),
+            "expected_state_json": _json_dump(expected_state),
+            "expected_state_hash": expected_hash,
+            "source_revision_at_execution": source_revision_at_execution,
+        }
+        existing = cursor.execute(
+            "SELECT * FROM ticket_expectations WHERE operation_id = ?",
+            (operation_id,),
+        ).fetchone()
+        if existing is not None:
+            if any(existing[key] != value for key, value in expected.items()):
+                raise ValueError("ticket_expectation_idempotency_conflict")
+            return self._expectation_row(existing) or {}
+
+        expectation_id = new_id()
+        cursor.execute(
+            """
+            INSERT INTO ticket_expectations (
+                expectation_id, ticket_id, operation_id, capability,
+                validator_name, validator_version, resource_locator_json,
+                expected_state_json, expected_state_hash,
+                source_revision_at_execution, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                expectation_id,
+                ticket_id,
+                operation_id,
+                capability,
+                validator_name,
+                validator_version,
+                _json_dump(resource_locator),
+                _json_dump(expected_state),
+                expected_hash,
+                source_revision_at_execution,
+                iso_utc(),
+            ),
+        )
+        row = cursor.execute(
+            "SELECT * FROM ticket_expectations WHERE operation_id = ?",
+            (operation_id,),
+        ).fetchone()
+        return self._expectation_row(row) or {}
+
+    def record_child_outcome_atomic(
+        self,
+        *,
+        ticket_id: str,
+        request_id: str,
+        outcome: dict[str, Any],
+        receipt: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Atomically persist a strict child outcome and its optional effect receipt."""
+
+        child_operation_id = str(outcome["child_operation_id"])
+        with self._transaction(immediate=True) as cur:
+            recorded_receipt: dict[str, Any] | None = None
+            expectation: dict[str, Any] | None = None
+            if receipt is not None:
+                recorded_receipt = self._record_operation_receipt_cursor(
+                    cur,
+                    ticket_id=ticket_id,
+                    receipt=receipt,
+                )
+                expectation = self._create_expectation_cursor(
+                    cur,
+                    ticket_id=ticket_id,
+                    operation_id=child_operation_id,
+                    capability=str(recorded_receipt["capability"]),
+                    validator_name=str(recorded_receipt["validator_name"]),
+                    validator_version=str(recorded_receipt["validator_version"]),
+                    resource_locator=dict(recorded_receipt.get("resource_locator") or {}),
+                    expected_state=dict(recorded_receipt.get("expected_effect") or {}),
+                    source_revision_at_execution=(
+                        str(recorded_receipt["provider_revision"])
+                        if recorded_receipt.get("provider_revision") is not None
+                        else None
+                    ),
+                )
+                self._append_entry_cursor(
+                    cur,
+                    ticket_id=ticket_id,
+                    request_id=request_id,
+                    entry_type="operation_receipt",
+                    actor_type="domain",
+                    actor_id=None,
+                    verbatim_text=None,
+                    structured_payload=recorded_receipt,
+                    dedupe_key=f"ticket-effect-receipt:v1:{child_operation_id}",
+                    created_at=None,
+                    conflict_code="operation_receipt_entry_conflict",
+                )
+            entry = self._append_entry_cursor(
+                cur,
+                ticket_id=ticket_id,
+                request_id=request_id,
+                entry_type="child_outcome",
+                actor_type="domain",
+                actor_id=None,
+                verbatim_text=None,
+                structured_payload=outcome,
+                dedupe_key=f"ticket-child-outcome:v1:{child_operation_id}",
+                created_at=None,
+                conflict_code="child_outcome_idempotency_conflict",
+            )
+            watchdog = self.enqueue_job(
+                job_type="ticket_watchdog",
+                aggregate_id=ticket_id,
+                idempotency_key=f"ticket-child-watchdog:v1:{child_operation_id}",
+                payload={
+                    "ticket_id": ticket_id,
+                    "child_operation_id": child_operation_id,
+                },
+                max_attempts=1,
+                cursor=cur,
+            )
+        return {
+            "entry": entry,
+            "receipt": recorded_receipt,
+            "expectation": expectation,
+            "watchdog": watchdog,
+        }
+
+    def record_operation_completion_atomic(
+        self,
+        *,
+        ticket_id: str,
+        request_id: str,
+        receipt: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Persist one legacy receipt, expectation, and reference as one unit."""
+
+        with self._transaction(immediate=True) as cur:
+            recorded = self._record_operation_receipt_cursor(
+                cur,
+                ticket_id=ticket_id,
+                receipt=receipt,
+            )
+            expectation = self._create_expectation_cursor(
+                cur,
+                ticket_id=ticket_id,
+                operation_id=str(recorded["operation_id"]),
+                capability=str(recorded["capability"]),
+                validator_name=str(recorded["validator_name"]),
+                validator_version=str(recorded["validator_version"]),
+                resource_locator=dict(recorded.get("resource_locator") or {}),
+                expected_state=dict(recorded.get("expected_effect") or {}),
+                source_revision_at_execution=(
+                    str(recorded["provider_revision"])
+                    if recorded.get("provider_revision") is not None
+                    else None
                 ),
             )
-            row = cur.execute(
-                "SELECT * FROM ticket_expectations WHERE operation_id = ?",
-                (operation_id,),
-            ).fetchone()
-        return self._expectation_row(row) or {}
+            entry = self._append_entry_cursor(
+                cur,
+                ticket_id=ticket_id,
+                request_id=request_id,
+                entry_type="operation_receipt",
+                actor_type="domain",
+                actor_id=None,
+                verbatim_text=None,
+                structured_payload=recorded,
+                dedupe_key=f"ticket:{ticket_id}:operation:{recorded['operation_id']}",
+                created_at=None,
+                conflict_code="operation_receipt_entry_conflict",
+            )
+        return {
+            "receipt": recorded,
+            "expectation": expectation,
+            "entry": entry,
+        }
 
     def get_latest_expectation(self, ticket_id: str) -> dict[str, Any] | None:
         with self._lock:

@@ -23,22 +23,21 @@ from app.core.domain_context import DomainContextService
 from app.core.evaluator import MainAgentEvaluator
 from app.core.main_jarvis import MainJarvis
 from app.core.main_plan_flow import MainPlanFlow
-from app.core.main_repair_flow import MainRepairFlow
 from app.core.main_tool_loop import MainToolLoop, MainToolLoopLimits
 from app.core.main_turn_commitment import MainTurnCommitmentCoordinator
-from app.core.micro_jarvis import MicroDecision, MicroJarvis
 from app.core.pending_interaction import PendingInteractionCoordinator
 from app.core.planner import MainAgentPlanner
 from app.core.request_pipeline import JarvisRequestPipeline, PipelineDecision
 from app.core.request_flow import RequestFlowCoordinator
+from app.core.router_defaults import RouterDefaults
 from app.core.session_store import SessionRecord, SessionStore
 from app.core.session_transitions import SessionTransitionService
 from app.core.state_machine import RuntimePowerController
 from app.core.turn_finalizer import TurnFinalizer
 from app.core.types import (
-    FAST_COMMAND_INTENTS,
     MAIN_ACTION_INTENTS,
     Intent,
+    RoutingDecision,
     SessionOwner,
     SessionState,
 )
@@ -60,24 +59,6 @@ if TYPE_CHECKING:
     from app.services.identity_service import ExternalIdentityService
 
 
-MAIN_CONVERSATIONAL_CONFIDENCE_THRESHOLD = 0.70
-MAIN_LOW_CONFIDENCE_FLOOR = 0.55
-MAIN_HIGH_RISK_CONFIDENCE_THRESHOLD = 0.80
-MAIN_STICKY_FOLLOWUP_TURNS = 2
-PENDING_INTERACTION_TTL_SECONDS = 1800.0
-RECENT_TURNS_MAX_ENTRIES = 24
-RECENT_TURNS_MAX_CHARS = 6000
-SESSION_SUMMARY_UPDATE_EVERY_TURNS = 6
-SESSION_SUMMARY_BUDGET_CHAR_THRESHOLD = 5200
-SESSION_SUMMARY_MAX_CHARS = 900
-
-NON_BLOCKING_AMBIGUITY_FLAGS = {
-    "short",
-    "resolved_via_main_repair",
-    "list_reference_resolved_from_context",
-    "switch_reference_resolved_from_context",
-    "main_sticky_followup",
-}
 class JarvisRouter:
     _CHILD_ACTION_DENIAL_MESSAGE = (
         "I can't control things in the house for you. You can ask me a question or talk with me instead."
@@ -85,7 +66,6 @@ class JarvisRouter:
 
     def __init__(
         self,
-        micro_jarvis: MicroJarvis,
         main_jarvis: MainJarvis,
         session_store: SessionStore,
         runtime_power: RuntimePowerController,
@@ -105,17 +85,17 @@ class JarvisRouter:
         main_agent_content_policy_blocked_patterns: list[str] | None = None,
         main_agent_token_session_enabled: bool = True,
         main_agent_token_session_max_turns: int = 12,
-        main_conversational_confidence_threshold: float = MAIN_CONVERSATIONAL_CONFIDENCE_THRESHOLD,
-        main_low_confidence_floor: float = MAIN_LOW_CONFIDENCE_FLOOR,
-        main_high_risk_confidence_threshold: float = MAIN_HIGH_RISK_CONFIDENCE_THRESHOLD,
-        main_sticky_followup_turns: int = MAIN_STICKY_FOLLOWUP_TURNS,
+        main_conversational_confidence_threshold: float = RouterDefaults.CONVERSATIONAL_CONFIDENCE,
+        main_low_confidence_floor: float = RouterDefaults.LOW_CONFIDENCE_FLOOR,
+        main_high_risk_confidence_threshold: float = RouterDefaults.HIGH_RISK_CONFIDENCE,
+        main_sticky_followup_turns: int = RouterDefaults.STICKY_FOLLOWUP_TURNS,
         main_pending_clarification_heuristic_fallback_enabled: bool = False,
-        pending_interaction_ttl_seconds: float = PENDING_INTERACTION_TTL_SECONDS,
-        recent_turns_max_entries: int = RECENT_TURNS_MAX_ENTRIES,
-        recent_turns_max_chars: int = RECENT_TURNS_MAX_CHARS,
-        session_summary_update_every_turns: int = SESSION_SUMMARY_UPDATE_EVERY_TURNS,
-        session_summary_budget_char_threshold: int = SESSION_SUMMARY_BUDGET_CHAR_THRESHOLD,
-        session_summary_max_chars: int = SESSION_SUMMARY_MAX_CHARS,
+        pending_interaction_ttl_seconds: float = RouterDefaults.PENDING_INTERACTION_TTL_SECONDS,
+        recent_turns_max_entries: int = RouterDefaults.RECENT_TURNS_MAX_ENTRIES,
+        recent_turns_max_chars: int = RouterDefaults.RECENT_TURNS_MAX_CHARS,
+        session_summary_update_every_turns: int = RouterDefaults.SUMMARY_UPDATE_EVERY_TURNS,
+        session_summary_budget_char_threshold: int = RouterDefaults.SUMMARY_BUDGET_CHAR_THRESHOLD,
+        session_summary_max_chars: int = RouterDefaults.SUMMARY_MAX_CHARS,
         action_ticket_service: "ActionTicketService | None" = None,
         identity_service: "ExternalIdentityService | None" = None,
         email_agent_service: Any | None = None,
@@ -136,14 +116,14 @@ class JarvisRouter:
         main_tool_max_observation_chars: int = 8_000,
         main_tool_max_total_observation_chars: int = 24_000,
         main_tool_timeout_seconds: int = 120,
-        legacy_micro_routing_enabled: bool = True,
         email_timezone: str | None = None,
         calendar_timezone_resolver: Any | None = None,
         utc_clock: Any | None = None,
         monotonic_clock: Any | None = None,
         shadow_observation_provider: Any | None = None,
+        action_approval_service: Any | None = None,
+        approval_binding_provider: Any | None = None,
     ) -> None:
-        self._micro_jarvis = micro_jarvis
         self._main_jarvis = main_jarvis
         self._session_store = session_store
         self._runtime_power = runtime_power
@@ -161,7 +141,6 @@ class JarvisRouter:
         if self._main_tool_execution_mode not in {"off", "shadow", "active"}:
             raise ValueError("main_tool_execution_mode_invalid")
         self._available_runtime_dependencies = tuple(dict.fromkeys(available_runtime_dependencies))
-        self._legacy_micro_routing_enabled = bool(legacy_micro_routing_enabled)
         self._request_id_var: ContextVar[str | None] = ContextVar(
             "jarvis_request_id",
             default=None,
@@ -276,6 +255,8 @@ class JarvisRouter:
             utc_clock=utc_clock,
             monotonic_clock=monotonic_clock,
             shadow_observation_provider=shadow_observation_provider,
+            action_approval_service=action_approval_service,
+            approval_binding_provider=approval_binding_provider,
         )
         self._session_context_manager = SessionContextManager(
             max_recent_turns=max(2, int(recent_turns_max_entries)),
@@ -334,7 +315,6 @@ class JarvisRouter:
             action_ticket_service=action_ticket_service,
         )
         self._request_flow = RequestFlowCoordinator(self)
-        self._main_repair_flow = MainRepairFlow(self)
         self._conversation_flow = ConversationFlow(self)
         self._context_flow = ContextFlow(self)
         self._main_plan_flow = MainPlanFlow(self)
@@ -350,6 +330,10 @@ class JarvisRouter:
     @property
     def action_execution_service(self) -> ActionExecutionService:
         return self._action_execution_service
+
+    @property
+    def available_runtime_dependencies(self) -> tuple[str, ...]:
+        return self._available_runtime_dependencies
 
     def _skill_execution_context(
         self,
@@ -505,7 +489,7 @@ class JarvisRouter:
         self,
         *,
         session: SessionRecord,
-        decision: MicroDecision,
+        decision: RoutingDecision,
         classification: dict[str, Any],
         response: dict[str, Any],
         request_text: str,
@@ -603,17 +587,6 @@ class JarvisRouter:
             return channel
         return f"{user_id}:{channel}"
 
-    def _micro_command_enabled(self, payload: AskRequest) -> bool:
-        """Discord enters Micro only through an explicit adapter-recorded prefix."""
-
-        if self._main_tool_execution_mode == "active":
-            return False
-        if not self._legacy_micro_routing_enabled:
-            return False
-        if str(payload.source or "").strip().lower() != "discord":
-            return True
-        return payload.context.get("micro_command_explicit") is True
-
     def _resolve_skill_for_intent(
         self,
         *,
@@ -643,57 +616,10 @@ class JarvisRouter:
             enriched["routing_reasons"] = [str(item) for item in routing_reasons if str(item).strip()]
         return enriched
 
-    @staticmethod
-    def _should_attempt_main_repair(decision: MicroDecision) -> bool:
-        return MainRepairFlow._should_attempt_main_repair(decision=decision)
-
-    def _attempt_main_repair(
-        self,
-        payload: AskRequest,
-        session: SessionRecord,
-        micro_decision: MicroDecision,
-        required_missing_fields: list[str] | None = None,
-        working_context_payload: dict[str, Any] | None = None,
-        contextual_followup: dict[str, Any] | None = None,
-    ) -> dict[str, Any] | None:
-        return self._main_repair_flow._attempt_main_repair(
-            payload=payload,
-            session=session,
-            micro_decision=micro_decision,
-            required_missing_fields=required_missing_fields,
-            working_context_payload=working_context_payload,
-            contextual_followup=contextual_followup,
-        )
-
-    def _fallback_repair_to_missing_fields_clarification(
-        self,
-        *,
-        payload: AskRequest,
-        session: SessionRecord,
-        micro_decision: MicroDecision,
-        preferred_missing_fields: list[str] | None,
-        fallback_reason: str,
-    ) -> dict[str, Any] | None:
-        return self._main_repair_flow._fallback_repair_to_missing_fields_clarification(
-            payload=payload,
-            session=session,
-            micro_decision=micro_decision,
-            preferred_missing_fields=preferred_missing_fields,
-            fallback_reason=fallback_reason,
-        )
-
-    @staticmethod
-    def _should_surface_not_actionable(
-        *,
-        repair: dict[str, Any],
-        micro_decision: MicroDecision,
-    ) -> bool:
-        return MainRepairFlow._should_surface_not_actionable(repair=repair, micro_decision=micro_decision)
-
     def _maybe_open_tool_followup(
         self,
         session: SessionRecord,
-        decision: MicroDecision,
+        decision: RoutingDecision,
         tool_result: dict[str, Any],
         request_text: str,
         user_id: str,
@@ -706,18 +632,18 @@ class JarvisRouter:
             user_id=user_id,
         )
 
-    def _resolve_followup_entities(self, session: SessionRecord, decision: MicroDecision) -> MicroDecision:
+    def _resolve_followup_entities(self, session: SessionRecord, decision: RoutingDecision) -> RoutingDecision:
         return self._context_flow._resolve_followup_entities(
             session=session,
             decision=decision,
         )
 
-    def _normalize_decision_entities(self, decision: MicroDecision) -> MicroDecision:
+    def _normalize_decision_entities(self, decision: RoutingDecision) -> RoutingDecision:
         decision.entities = self._normalize_entities_for_intent(intent=decision.intent, entities=decision.entities)
         return decision
 
     @staticmethod
-    def _has_blocking_ambiguity(decision: MicroDecision) -> bool:
+    def _has_blocking_ambiguity(decision: RoutingDecision) -> bool:
         blocking_flags = {
             "unknown_intent",
             "model_only",
@@ -748,11 +674,11 @@ class JarvisRouter:
         self,
         *,
         session: SessionRecord,
-        decision: MicroDecision,
+        decision: RoutingDecision,
         request_context: dict[str, Any],
         working_context: dict[str, Any],
         text: str,
-    ) -> MicroDecision:
+    ) -> RoutingDecision:
         return self._context_flow._bind_request_decision(
             session=session,
             decision=decision,
@@ -760,85 +686,6 @@ class JarvisRouter:
             working_context=working_context,
             text=text,
         )
-
-    def _apply_text_constraints(
-        self,
-        *,
-        intent: Intent,
-        text: str,
-        entities: dict[str, Any],
-    ) -> dict[str, Any]:
-        self._domain_context.set_contracts(self._skill_context_contracts)
-        return self._domain_context.apply_text_constraints(intent=intent, text=text, entities=entities)
-
-    def _clarification_supplemental_fields(self, *, intent: Intent) -> list[str]:
-        self._domain_context.set_contracts(self._skill_context_contracts)
-        return self._domain_context.clarification_supplemental_fields(intent=intent)
-
-    def _repair_decision_from_main(
-        self,
-        repair: dict[str, Any],
-        micro_decision: MicroDecision,
-    ) -> MicroDecision | None:
-        return self._main_repair_flow._repair_decision_from_main(repair=repair, micro_decision=micro_decision)
-
-    def _maybe_require_confidence_clarification(
-        self,
-        *,
-        payload: AskRequest,
-        session: SessionRecord,
-        micro_decision: MicroDecision,
-        repaired_decision: MicroDecision,
-        repair: dict[str, Any],
-    ) -> dict[str, Any] | None:
-        return self._main_repair_flow._maybe_require_confidence_clarification(
-            payload=payload,
-            session=session,
-            micro_decision=micro_decision,
-            repaired_decision=repaired_decision,
-            repair=repair,
-        )
-
-    def _confidence_gate_reason(
-        self,
-        *,
-        micro_decision: MicroDecision,
-        repaired_decision: MicroDecision,
-    ) -> str | None:
-        return self._main_repair_flow._confidence_gate_reason(
-            micro_decision=micro_decision,
-            repaired_decision=repaired_decision,
-        )
-
-    @staticmethod
-    def _meaningful_ambiguity_flags(*, micro_flags: list[str], repaired_flags: list[str]) -> list[str]:
-        combined: list[str] = []
-        seen: set[str] = set()
-        for raw in [*micro_flags, *repaired_flags]:
-            flag = str(raw).strip().lower()
-            if not flag:
-                continue
-            if flag.startswith("original_"):
-                continue
-            if flag in NON_BLOCKING_AMBIGUITY_FLAGS:
-                continue
-            if flag in seen:
-                continue
-            seen.add(flag)
-            combined.append(flag)
-        return combined
-
-    @staticmethod
-    def _is_high_risk_bulk_write(decision: MicroDecision) -> bool:
-        if decision.intent != Intent.HOME_SET_SWITCH:
-            return False
-        scope = str(decision.entities.get("scope") or "").strip().lower()
-        switch_name = str(decision.entities.get("switch_name") or "").strip().lower()
-        return scope == "all" or switch_name == "all lights"
-
-    @staticmethod
-    def _default_clarification_field_for_intent(intent: Intent) -> str | None:
-        return MainRepairFlow._default_clarification_field_for_intent(intent=intent)
 
     @staticmethod
     def _coerce_intent(raw_intent: str) -> Intent | None:
@@ -882,6 +729,21 @@ class JarvisRouter:
                 flags=re.IGNORECASE,
             )
         )
+
+    @staticmethod
+    def _looks_like_wake_command(text: str) -> bool:
+        normalized = str(text or "").strip().casefold()
+        return bool(
+            re.search(
+                r"\b(wake up|wake jarvis|jarvis wake|jarvis i'm here|jarvis im here)\b",
+                normalized,
+            )
+        )
+
+    @staticmethod
+    def _looks_like_sleep_command(text: str) -> bool:
+        normalized = str(text or "").strip().casefold()
+        return bool(re.search(r"\b(go to sleep|sleep mode|jarvis sleep|sleep now)\b", normalized))
 
     @staticmethod
     def _looks_like_calendar_add_phrase(text: str) -> bool:
@@ -940,7 +802,7 @@ class JarvisRouter:
             session=session,
             request_id=self._request_id_var.get(),
             should_interrupt=self._should_interrupt_pending_clarification,
-            extract_model_updates=self._extract_clarification_updates_with_main_repair,
+            extract_model_updates=self._extract_safe_contextual_clarification_updates,
             complete_conversation=self._complete_pending_conversation_followup,
             open_tool_followup=self._maybe_open_tool_followup,
         )
@@ -984,34 +846,8 @@ class JarvisRouter:
         session: SessionRecord,
         pending_intent: Intent,
     ) -> bool:
-        if not self._micro_command_enabled(payload):
-            return self._looks_like_general_topic_shift(payload.text)
-
-        candidate = self._micro_jarvis.interpret(
-            text=payload.text,
-            context={
-                "session_state": session.state.value,
-                "session_owner": session.owner.value,
-                "pending_intent": pending_intent.value,
-                "execution_origin": "pending_clarification_probe",
-            },
-        )
-        candidate = self._resolve_followup_entities(session=session, decision=candidate)
-        candidate = self._normalize_decision_entities(candidate)
-
-        if candidate.intent in {Intent.SYSTEM_SLEEP, Intent.SYSTEM_WAKE}:
-            return True
-        if candidate.intent in {Intent.UNKNOWN, Intent.CONVERSATIONAL}:
-            return self._looks_like_general_topic_shift(payload.text)
-        if candidate.intent == pending_intent:
-            return False
-        if candidate.confidence < 0.72:
-            return False
-        if candidate.intent in FAST_COMMAND_INTENTS:
-            missing = self._required_fields_for_intent(intent=candidate.intent, entities=candidate.entities)
-            if missing:
-                return False
-        return True
+        del session, pending_intent
+        return self._looks_like_general_topic_shift(payload.text)
 
     def _required_fields_for_intent(self, intent: Intent, entities: dict[str, Any]) -> list[str]:
         self._domain_context.set_contracts(self._skill_context_contracts)
@@ -1039,23 +875,6 @@ class JarvisRouter:
             session=session,
             intent=intent,
             text=text,
-            missing_fields=missing_fields,
-            current_entities=current_entities,
-        )
-
-    def _extract_clarification_updates_with_main_repair(
-        self,
-        *,
-        session: SessionRecord,
-        payload: AskRequest,
-        intent: Intent,
-        missing_fields: list[str],
-        current_entities: dict[str, Any],
-    ) -> dict[str, Any]:
-        return self._main_repair_flow._extract_clarification_updates_with_main_repair(
-            session=session,
-            payload=payload,
-            intent=intent,
             missing_fields=missing_fields,
             current_entities=current_entities,
         )
@@ -1113,7 +932,7 @@ class JarvisRouter:
     def _clear_main_sticky_followup(self, session: SessionRecord) -> None:
         self._session_transitions.clear_main_followup(session=session)
 
-    def _apply_main_sticky_followup(self, *, session: SessionRecord, decision: MicroDecision) -> MicroDecision:
+    def _apply_main_sticky_followup(self, *, session: SessionRecord, decision: RoutingDecision) -> RoutingDecision:
         remaining = self._main_sticky_followup_turns_remaining(session)
         if remaining <= 0:
             return decision
@@ -1226,9 +1045,9 @@ class JarvisRouter:
     def _pending_clarification(self, session: SessionRecord) -> dict[str, Any] | None:
         return self._pending_interaction_coordinator.get(session=session)
 
-    def _execute_fast_command(
+    def _execute_compatibility_action(
         self,
-        decision: MicroDecision,
+        decision: RoutingDecision,
         source_interface: str,
         requested_by_user_id: str,
         *,
@@ -1333,9 +1152,9 @@ class JarvisRouter:
         self,
         *,
         session: SessionRecord,
-        decision: MicroDecision,
+        decision: RoutingDecision,
         working_context: dict[str, Any],
-    ) -> MicroDecision:
+    ) -> RoutingDecision:
         return self._context_flow._resolve_handoff_followup_entities(
             session=session,
             decision=decision,

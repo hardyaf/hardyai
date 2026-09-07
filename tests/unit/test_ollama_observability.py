@@ -117,7 +117,7 @@ def test_adaptive_budget_only_fails_after_bounded_repeated_exhaustion():
 
 def test_provider_stop_reason_wins_when_eval_count_exactly_matches_budget():
     observer = OllamaCallObserver(
-        lane="micro",
+        lane="main",
         model="local-model",
         num_ctx=4096,
         num_predict=128,

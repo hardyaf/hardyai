@@ -1,5 +1,9 @@
 # HardyAI Document Intelligence Implementation Plan
 
+> **Classifier retirement note (2026-09-07):** References below to Micro, its model, or its handoff
+> contract describe the pre-P10 baseline and historical phase evidence. The current runtime is Main-only;
+> those references are not executable requirements.
+
 ## 2026-08-26 runtime-quality update
 
 - Asynchronous Discord OCR completions now project a bounded, content-free result anchor containing only document ID, document class, processing state, and available field names. The next turn can therefore relate feedback such as a wrong website to the presented business-card result without router phrase branches or OCR values in session context.
@@ -97,7 +101,7 @@ The monolith breakup recorded in `docs/monolith-breakup.md` is a sound foundatio
 
 - no concrete Paperless, Docling, or Paddle imports under `app/skills/domains/documents`;
 - no provider DTOs in public domain types;
-- document intents absent from `FAST_COMMAND_INTENTS` and Micro execution;
+- document intents absent from any compatibility direct-action catalog; Documents execution is Main-only;
 - no raw text or sensitive field names in event, session, memory, ticket, or Plane payload builders;
 - no DDL in domain storage implementations;
 - no document processing call from `/ask` or `TurnService`;

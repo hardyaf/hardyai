@@ -696,6 +696,9 @@ class DocumentRepository:
         resource_lane: str = "cpu",
         fallback_from_run_id: str | None = None,
         request_key: str | None = None,
+        operation_id: str | None = None,
+        tool_id: str | None = None,
+        arguments_hash: str | None = None,
     ) -> dict[str, Any]:
         record = self.get(document_id)
         if record is None or not record.source_version_id:
@@ -707,6 +710,22 @@ class DocumentRepository:
             f"automatic:{record.source_version_id}:{route_value}:{configuration_sha256}"
         )
         with self._transaction(immediate=True) as cur:
+            replay_ref = self._reserve_tool_operation(
+                cur,
+                operation_id=operation_id,
+                tool_id=tool_id,
+                arguments_hash=arguments_hash,
+                target_ref=document_id,
+                created_at=observed_at,
+            )
+            if replay_ref is not None:
+                replay = cur.execute(
+                    "SELECT * FROM document_processing_runs WHERE run_id = ? AND document_id = ?",
+                    (replay_ref, document_id),
+                ).fetchone()
+                if replay is None:
+                    raise ValueError("document_tool_operation_replay_target_missing")
+                return {**dict(replay), "idempotent_replay": True}
             cur.execute(
                 """
                 INSERT INTO document_processing_runs (
@@ -755,7 +774,13 @@ class DocumentRepository:
                     ProcessingState.COMPLETE.value,
                 ),
             )
-        return dict(row)
+            self._complete_tool_operation(
+                cur,
+                operation_id=operation_id,
+                result_ref=str(row["run_id"]),
+                completed_at=observed_at,
+            )
+        return {**dict(row), "idempotent_replay": False}
 
     def pending_processing_runs(self, *, limit: int = 100) -> list[dict[str, Any]]:
         with self._lock:
@@ -1421,6 +1446,9 @@ class DocumentRepository:
         decision_kind: str,
         selected_observation_id: str | None = None,
         applied_value: Any | None = None,
+        operation_id: str | None = None,
+        tool_id: str | None = None,
+        arguments_hash: str | None = None,
     ) -> dict[str, Any]:
         normalized_kind = str(decision_kind or "").strip().casefold()
         if normalized_kind not in {"correct", "confirm", "reject", "revoke"}:
@@ -1435,14 +1463,31 @@ class DocumentRepository:
             if contains_unmasked_restricted_value(encoded):
                 raise ValueError("field decision contains an exact restricted value")
         decision_id = str(uuid4())
+        observed_at = _now()
         with self._transaction(immediate=True) as cur:
+            replay_ref = self._reserve_tool_operation(
+                cur,
+                operation_id=operation_id,
+                tool_id=tool_id,
+                arguments_hash=arguments_hash,
+                target_ref=document_id,
+                created_at=observed_at,
+            )
+            if replay_ref is not None:
+                replay = cur.execute(
+                    "SELECT * FROM document_field_decisions WHERE field_decision_id = ?",
+                    (replay_ref,),
+                ).fetchone()
+                if replay is None:
+                    raise ValueError("document_tool_operation_replay_target_missing")
+                return {**dict(replay), "idempotent_replay": True}
             cur.execute(
                 """
                 INSERT INTO document_field_decisions (
                     field_decision_id, document_id, source_version_id, field_name,
-                    review_decision_id, selected_observation_id, applied_value_json,
+                    review_decision_id, operation_id, selected_observation_id, applied_value_json,
                     decision_kind, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(review_decision_id) DO NOTHING
                 """,
                 (
@@ -1451,16 +1496,24 @@ class DocumentRepository:
                     source_version_id,
                     str(field_name)[:120],
                     str(review_decision_id)[:160],
+                    str(operation_id).strip() if operation_id else None,
                     selected_observation_id,
                     encoded,
                     normalized_kind,
-                    _now(),
+                    observed_at,
                 ),
             )
             row = cur.execute(
                 "SELECT * FROM document_field_decisions WHERE review_decision_id = ?",
                 (review_decision_id,),
             ).fetchone()
+            if row is not None:
+                self._complete_tool_operation(
+                    cur,
+                    operation_id=operation_id,
+                    result_ref=str(row["field_decision_id"]),
+                    completed_at=observed_at,
+                )
         if row is None:
             raise RuntimeError("field decision did not produce a row")
         persisted = dict(row)
@@ -1477,6 +1530,214 @@ class DocumentRepository:
         ):
             raise ValueError("field_decision_payload_changed")
         return persisted
+
+    def record_field_confirmations(
+        self,
+        *,
+        document_id: str,
+        source_version_id: str,
+        confirmations: list[dict[str, str]],
+        operation_id: str,
+        tool_id: str,
+        arguments_hash: str,
+    ) -> dict[str, Any]:
+        """Commit every confirmed field and the parent operation in one transaction."""
+
+        operation = str(operation_id or "").strip()
+        normalized_tool = str(tool_id or "").strip().casefold()
+        normalized_hash = str(arguments_hash or "").strip().casefold()
+        if normalized_tool != "documents.confirm_fields":
+            raise ValueError("document_tool_operation_identity_invalid")
+        if not operation or len(normalized_hash) != 64:
+            raise ValueError("document_tool_operation_identity_invalid")
+        if not confirmations or len(confirmations) > 64:
+            raise ValueError("field_confirmation_batch_invalid")
+
+        normalized = sorted(
+            [
+                {
+                    "field_name": str(item.get("field_name") or "").strip().casefold(),
+                    "observation_id": str(item.get("observation_id") or "").strip(),
+                    "review_binding_hash": str(item.get("review_binding_hash") or "").strip().casefold(),
+                    "review_decision_id": str(item.get("review_decision_id") or "").strip(),
+                }
+                for item in confirmations
+            ],
+            key=lambda item: item["field_name"],
+        )
+        fields = [item["field_name"] for item in normalized]
+        review_ids = [item["review_decision_id"] for item in normalized]
+        if (
+            any(
+                not item["field_name"]
+                or not item["observation_id"]
+                or len(item["review_binding_hash"]) != 64
+                or not item["review_decision_id"]
+                for item in normalized
+            )
+            or len(set(fields)) != len(fields)
+            or len(set(review_ids)) != len(review_ids)
+        ):
+            raise ValueError("field_confirmation_batch_invalid")
+        result_ref = "confirmation_v1:" + str(len(fields)) + ":" + hashlib.sha256(
+            "\n".join(fields).encode("utf-8")
+        ).hexdigest()
+        observed_at = _now()
+        rows: list[sqlite3.Row] = []
+        replay = False
+        with self._transaction(immediate=True) as cur:
+            replay_ref = self._reserve_tool_operation(
+                cur,
+                operation_id=operation,
+                tool_id=normalized_tool,
+                arguments_hash=normalized_hash,
+                target_ref=document_id,
+                created_at=observed_at,
+            )
+            if replay_ref is not None:
+                if replay_ref != result_ref:
+                    raise ValueError("document_tool_operation_result_conflict")
+                rows = cur.execute(
+                    "SELECT * FROM document_field_decisions WHERE operation_id = ? ORDER BY field_name",
+                    (operation,),
+                ).fetchall()
+                replay = True
+            else:
+                document = cur.execute(
+                    "SELECT active_source_version_id FROM documents WHERE document_id = ?",
+                    (document_id,),
+                ).fetchone()
+                if document is None:
+                    raise KeyError(document_id)
+                if str(document["active_source_version_id"] or "") != str(source_version_id):
+                    raise ValueError("field_source_version_changed")
+
+                from app.skills.domains.documents.corrections import field_review_binding_hash
+
+                for item in normalized:
+                    observation = cur.execute(
+                        """
+                        SELECT observation_id, item_hash, value_json
+                        FROM document_field_observations
+                        WHERE document_id = ? AND source_version_id = ? AND field_name = ?
+                        ORDER BY created_at DESC LIMIT 1
+                        """,
+                        (document_id, source_version_id, item["field_name"]),
+                    ).fetchone()
+                    if observation is None or str(observation["observation_id"]) != item["observation_id"]:
+                        raise ValueError("field_observation_changed")
+                    previous = cur.execute(
+                        """
+                        SELECT review_decision_id, decision_kind
+                        FROM document_field_decisions
+                        WHERE document_id = ? AND source_version_id = ? AND field_name = ?
+                        ORDER BY created_at DESC LIMIT 1
+                        """,
+                        (document_id, source_version_id, item["field_name"]),
+                    ).fetchone()
+                    if previous is not None and str(previous["decision_kind"]).casefold() in {
+                        "confirm",
+                        "correct",
+                    }:
+                        raise ValueError("field_confirmation_target_changed")
+                    expected_binding = field_review_binding_hash(
+                        document_id=document_id,
+                        source_version_id=source_version_id,
+                        field_name=item["field_name"],
+                        observation_id=str(observation["observation_id"]),
+                        observation_item_hash=str(observation["item_hash"]),
+                        review_decision_id=(
+                            str(previous["review_decision_id"]) if previous is not None else None
+                        ),
+                        effective_value=json.loads(str(observation["value_json"])),
+                    )
+                    if expected_binding != item["review_binding_hash"]:
+                        raise ValueError("field_review_binding_changed")
+
+                for item in normalized:
+                    decision_id = str(uuid4())
+                    try:
+                        cur.execute(
+                            """
+                            INSERT INTO document_field_decisions (
+                                field_decision_id, document_id, source_version_id, field_name,
+                                review_decision_id, operation_id, selected_observation_id,
+                                applied_value_json, decision_kind, created_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 'confirm', ?)
+                            """,
+                            (
+                                decision_id,
+                                document_id,
+                                source_version_id,
+                                item["field_name"],
+                                item["review_decision_id"],
+                                operation,
+                                item["observation_id"],
+                                observed_at,
+                            ),
+                        )
+                    except sqlite3.IntegrityError as exc:
+                        raise ValueError("field_confirmation_payload_changed") from exc
+                self._complete_tool_operation(
+                    cur,
+                    operation_id=operation,
+                    result_ref=result_ref,
+                    completed_at=observed_at,
+                )
+                rows = cur.execute(
+                    "SELECT * FROM document_field_decisions WHERE operation_id = ? ORDER BY field_name",
+                    (operation,),
+                ).fetchall()
+
+            if len(rows) != len(normalized):
+                raise ValueError("document_tool_operation_replay_target_missing")
+            for row, item in zip(rows, normalized, strict=True):
+                if (
+                    str(row["document_id"]) != document_id
+                    or str(row["source_version_id"]) != source_version_id
+                    or str(row["field_name"]) != item["field_name"]
+                    or str(row["review_decision_id"]) != item["review_decision_id"]
+                    or str(row["selected_observation_id"]) != item["observation_id"]
+                    or str(row["decision_kind"]) != "confirm"
+                ):
+                    raise ValueError("field_confirmation_payload_changed")
+        return {
+            "document_id": document_id,
+            "source_version_id": source_version_id,
+            "decisions": [{**dict(row), "idempotent_replay": replay} for row in rows],
+            "result_ref": result_ref,
+            "idempotent_replay": replay,
+        }
+
+    def get_field_confirmation_result(self, *, operation_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            operation = self._conn.execute(
+                "SELECT * FROM document_tool_operations WHERE operation_id = ?",
+                (str(operation_id),),
+            ).fetchone()
+            if operation is None:
+                return None
+            if (
+                str(operation["tool_id"]) != "documents.confirm_fields"
+                or str(operation["status"]) != "completed"
+            ):
+                raise ValueError("document_tool_operation_incomplete")
+            rows = self._conn.execute(
+                "SELECT * FROM document_field_decisions WHERE operation_id = ? ORDER BY field_name",
+                (str(operation_id),),
+            ).fetchall()
+            fields = [str(row["field_name"]) for row in rows]
+            expected_ref = "confirmation_v1:" + str(len(fields)) + ":" + hashlib.sha256(
+                "\n".join(fields).encode("utf-8")
+            ).hexdigest()
+            if str(operation["result_ref"] or "") != expected_ref:
+                raise ValueError("document_tool_operation_replay_target_missing")
+        return {
+            "document_id": str(operation["target_ref"]),
+            "decisions": [dict(row) for row in rows],
+            "result_ref": str(operation["result_ref"] or ""),
+            "idempotent_replay": True,
+        }
 
     def create_action_proposal(
         self,
@@ -2281,6 +2542,9 @@ class DocumentRepository:
         field_name: str,
         proposed_value: Any,
         sensitivity: Sensitivity | str,
+        operation_id: str | None = None,
+        tool_id: str | None = None,
+        arguments_hash: str | None = None,
     ) -> dict[str, Any]:
         record = self.get(document_id)
         if record is None or not record.source_version_id:
@@ -2296,6 +2560,25 @@ class DocumentRepository:
         proposal_id = str(uuid4())
         observed_at = _now()
         with self._transaction(immediate=True) as cur:
+            replay_ref = self._reserve_tool_operation(
+                cur,
+                operation_id=operation_id,
+                tool_id=tool_id,
+                arguments_hash=arguments_hash,
+                target_ref=document_id,
+                created_at=observed_at,
+            )
+            if replay_ref is not None:
+                replay = cur.execute(
+                    "SELECT * FROM document_metadata_proposals WHERE proposal_id = ?",
+                    (replay_ref,),
+                ).fetchone()
+                if replay is None:
+                    raise ValueError("document_tool_operation_replay_target_missing")
+                value = dict(replay)
+                value.pop("proposed_value_json", None)
+                value["idempotent_replay"] = True
+                return value
             cur.execute(
                 """
                 INSERT INTO document_metadata_proposals (
@@ -2325,11 +2608,140 @@ class DocumentRepository:
                 """,
                 (document_id, record.source_version_id, normalized_field, value_hash),
             ).fetchone()
+            if row is not None:
+                self._complete_tool_operation(
+                    cur,
+                    operation_id=operation_id,
+                    result_ref=str(row["proposal_id"]),
+                    completed_at=observed_at,
+                )
         if row is None:
             raise RuntimeError("metadata proposal did not produce a row")
         value = dict(row)
         value.pop("proposed_value_json", None)
+        value["idempotent_replay"] = False
         return value
+
+    @staticmethod
+    def _reserve_tool_operation(
+        cur: sqlite3.Cursor,
+        *,
+        operation_id: str | None,
+        tool_id: str | None,
+        arguments_hash: str | None,
+        target_ref: str,
+        created_at: str,
+    ) -> str | None:
+        operation = str(operation_id or "").strip()
+        if not operation:
+            if tool_id or arguments_hash:
+                raise ValueError("document_tool_operation_identity_incomplete")
+            return None
+        normalized_tool = str(tool_id or "").strip().casefold()
+        normalized_hash = str(arguments_hash or "").strip().casefold()
+        if not normalized_tool or len(normalized_hash) != 64:
+            raise ValueError("document_tool_operation_identity_invalid")
+        existing = cur.execute(
+            "SELECT * FROM document_tool_operations WHERE operation_id = ?",
+            (operation,),
+        ).fetchone()
+        if existing is not None:
+            if (
+                str(existing["tool_id"]) != normalized_tool
+                or str(existing["arguments_hash"]) != normalized_hash
+                or str(existing["target_ref"]) != str(target_ref)
+            ):
+                raise ValueError("document_tool_operation_id_conflict")
+            if str(existing["status"]) != "completed" or not existing["result_ref"]:
+                raise ValueError("document_tool_operation_incomplete")
+            return str(existing["result_ref"])
+        cur.execute(
+            """
+            INSERT INTO document_tool_operations (
+                operation_id, tool_id, arguments_hash, status, target_ref,
+                result_ref, created_at, completed_at
+            ) VALUES (?, ?, ?, 'reserved', ?, NULL, ?, NULL)
+            """,
+            (operation, normalized_tool, normalized_hash, str(target_ref), created_at),
+        )
+        return None
+
+    @staticmethod
+    def _complete_tool_operation(
+        cur: sqlite3.Cursor,
+        *,
+        operation_id: str | None,
+        result_ref: str,
+        completed_at: str,
+    ) -> None:
+        operation = str(operation_id or "").strip()
+        if not operation:
+            return
+        cur.execute(
+            """
+            UPDATE document_tool_operations
+            SET status = 'completed', result_ref = ?, completed_at = ?
+            WHERE operation_id = ? AND status = 'reserved'
+            """,
+            (str(result_ref), completed_at, operation),
+        )
+        if int(cur.rowcount or 0) != 1:
+            raise ValueError("document_tool_operation_completion_conflict")
+
+    def get_tool_operation(self, operation_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM document_tool_operations WHERE operation_id = ?",
+                (str(operation_id),),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def tool_operation_for_result(self, result_ref: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM document_tool_operations WHERE result_ref = ? ORDER BY created_at LIMIT 1",
+                (str(result_ref),),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def complete_tool_operation(
+        self,
+        *,
+        operation_id: str,
+        tool_id: str,
+        arguments_hash: str,
+        target_ref: str,
+        result_ref: str,
+    ) -> dict[str, Any]:
+        observed_at = _now()
+        with self._transaction(immediate=True) as cur:
+            replay_ref = self._reserve_tool_operation(
+                cur,
+                operation_id=operation_id,
+                tool_id=tool_id,
+                arguments_hash=arguments_hash,
+                target_ref=target_ref,
+                created_at=observed_at,
+            )
+            if replay_ref is None:
+                self._complete_tool_operation(
+                    cur,
+                    operation_id=operation_id,
+                    result_ref=result_ref,
+                    completed_at=observed_at,
+                )
+                replay = False
+            else:
+                if replay_ref != result_ref:
+                    raise ValueError("document_tool_operation_result_conflict")
+                replay = True
+            row = cur.execute(
+                "SELECT * FROM document_tool_operations WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("document tool operation did not produce a row")
+        return {**dict(row), "idempotent_replay": replay}
 
     def bind_metadata_review(
         self,

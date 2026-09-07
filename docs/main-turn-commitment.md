@@ -39,11 +39,10 @@ post-classification on-demand loading because intent selection itself needs the 
 bounded to the projected skills and 64 candidate intents; restricted skills are not loaded as action
 candidates.
 
-An unprefixed Discord turn enters this commitment boundary directly after the deterministic Micro
-bypass. The legacy action-repair pass must not answer or terminate that turn first. This preserves one
+Every accepted Discord turn enters this commitment boundary directly, whether or not the retained UI
+prefix was used. No legacy action-repair pass may answer or terminate that turn first. This preserves one
 semantic owner for relating the current message to recent turns and trusted entity context, including
-a recent document attachment. Explicit Micro commands that fail classification may still use the
-Micro-to-Main repair handoff before this boundary.
+a recent document attachment.
 
 The decision prompt requires a scope/cardinality audit before choosing among similar intents. Main
 must compare semantic purposes, reject a lexical intent-name match that narrows or broadens the user's
@@ -61,7 +60,7 @@ clarification is reserved for a user who supplies or explicitly chooses to provi
 
 `clarify_action` creates a durable pending interaction with the intended skill, intent, partial
 entities, missing fields, question, confidence, and short operational rationale. A later reply is
-resolved against that pending action before Micro or the general conversation lane runs.
+resolved against that pending action before the general conversation lane runs.
 
 For example, a request to summarize email may be bound to `email.list_recent` while Main asks which
 messages to include. A reply such as `all unread` supplies the stored `query`; it is not treated as a

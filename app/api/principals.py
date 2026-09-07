@@ -65,7 +65,7 @@ _DISCORD_CONTEXT_KEYS = {
     "external_message_id",
     "external_user_id",
     "force_main_owner",
-    "micro_command_explicit",
+    "command_prefix_explicit",
     "request_id",
     "session_channel",
     "wake_on_message",

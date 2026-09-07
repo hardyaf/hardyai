@@ -5,9 +5,8 @@ from typing import Any
 from uuid import uuid4
 
 from app.core.assistant_response import build_assistant_payload
-from app.core.micro_jarvis import MicroDecision
 from app.core.state_machine import next_state_for_owner_intent
-from app.core.types import EMAIL_AGENT_INTENTS, FAST_COMMAND_INTENTS, Intent, SessionOwner, SessionState
+from app.core.types import EMAIL_AGENT_INTENTS, Intent, RoutingDecision, SessionOwner, SessionState
 from app.schemas.api import AskRequest
 
 
@@ -28,7 +27,7 @@ class PreparedTurn:
 class InterpretedTurn:
     working_context_payload: dict[str, Any]
     contextual_followup: dict[str, Any] | None
-    decision: MicroDecision
+    decision: RoutingDecision
     resolved_skill: dict[str, Any] | None
 
 
@@ -138,17 +137,12 @@ class RequestFlowCoordinator:
             context=effective_context,
         )
         source_channel = str(effective_payload.source or "").strip().lower()
-        force_main_channel = router._main_tool_execution_mode == "active" or bool(
-            effective_payload.context.get("force_main_owner")
-        ) or (
-            source_channel == "discord"
-            and effective_payload.context.get("micro_command_explicit") is not True
-        )
+        force_main_channel = True
         wake_on_message = bool(effective_payload.context.get("wake_on_message")) or source_channel == "discord"
 
         channel_key = router._channel_key_for_payload(effective_payload)
         force_new_for_channel = bool(
-            channel_key and router._micro_jarvis.looks_like_wake_command(effective_payload.text)
+            channel_key and router._looks_like_wake_command(effective_payload.text)
         )
         session = router._session_store.get_or_create(
             session_id=effective_payload.session_id,
@@ -295,7 +289,7 @@ class RequestFlowCoordinator:
             )
 
         if not router._runtime_power.is_awake():
-            if router._micro_jarvis.looks_like_wake_command(effective_payload.text):
+            if router._looks_like_wake_command(effective_payload.text):
                 router._runtime_power.wake()
                 router._event_log.record("runtime.wake", session.session_id, {"reason": "wake_phrase"})
                 router._set_owner(session, SessionOwner.SYSTEM)
@@ -473,7 +467,7 @@ class RequestFlowCoordinator:
             session=session,
             user_id=effective_payload.user_id,
             request_text=effective_payload.text,
-            route_hint="micro_interpret",
+            route_hint="main_semantic_entry",
             intent_hint=None,
         )
         working_context_payload = working_context_packet.to_dict()
@@ -504,50 +498,35 @@ class RequestFlowCoordinator:
             text=effective_payload.text,
             working_context=working_context_payload,
         )
-        micro_context = {
-            "session_state": session.state.value,
-            "session_owner": session.owner.value,
-            "working_context": working_context_payload,
-            **effective_payload.context,
-        }
-        if isinstance(contextual_followup, dict):
-            micro_context["contextual_followup"] = contextual_followup
-
-        micro_command_enabled = router._micro_command_enabled(effective_payload)
-        if micro_command_enabled:
-            decision = router._micro_jarvis.interpret(
-                text=effective_payload.text,
-                context=micro_context,
+        if router._looks_like_sleep_command(effective_payload.text):
+            decision = RoutingDecision(
+                intent=Intent.SYSTEM_SLEEP,
+                confidence=0.99,
+                recommended_owner=SessionOwner.SYSTEM,
+                reasoning="system_sleep_phrase",
+            )
+        elif router._looks_like_wake_command(effective_payload.text):
+            decision = RoutingDecision(
+                intent=Intent.SYSTEM_WAKE,
+                confidence=0.99,
+                recommended_owner=SessionOwner.SYSTEM,
+                reasoning="system_wake_phrase",
             )
         else:
-            active_mode = router._main_tool_execution_mode == "active"
-            decision = MicroDecision(
+            decision = RoutingDecision(
                 intent=Intent.UNKNOWN,
                 confidence=0.0,
                 entities={},
-                ambiguity_flags=[
-                    "micro_bypassed_active_mode"
-                    if active_mode
-                    else "micro_bypassed_unprefixed_discord"
-                ],
+                ambiguity_flags=["main_only_semantic_routing"],
                 recommended_owner=SessionOwner.MAIN,
-                reasoning=(
-                    "active_mode_main_ownership"
-                    if active_mode
-                    else "discord_unprefixed_main_handoff"
-                ),
+                reasoning="main_semantic_authority",
             )
             router._event_log.record(
-                event_type="pipeline.micro.bypassed",
+                event_type="pipeline.main.semantic_route",
                 session_id=session.session_id,
                 payload={
-                    "reason": (
-                        "active_mode_main_ownership"
-                        if active_mode
-                        else "discord_prefix_not_present"
-                    ),
+                    "reason": "main_only_semantic_routing",
                     "source": effective_payload.source,
-                    "micro_command_explicit": False,
                     "target_owner": SessionOwner.MAIN.value,
                 },
             )
@@ -565,7 +544,6 @@ class RequestFlowCoordinator:
             working_context=working_context_payload,
         )
         decision = router._normalize_decision_entities(decision)
-        decision = router._micro_jarvis.apply_owner_policy(decision)
         decision = router._apply_main_sticky_followup(session=session, decision=decision)
         conversation_lane = router._conversation_lane_policy.decide(
             text=effective_payload.text,
@@ -579,7 +557,7 @@ class RequestFlowCoordinator:
                 if str(flag).strip().lower() not in {"unknown_intent", "model_only"}
             ]
             ambiguity_flags.append("conversation_lane_resolved")
-            decision = MicroDecision(
+            decision = RoutingDecision(
                 intent=Intent.CONVERSATIONAL,
                 confidence=max(decision.confidence, conversation_lane.confidence),
                 entities=dict(decision.entities),
@@ -603,7 +581,7 @@ class RequestFlowCoordinator:
             agent_id=active_agent_id,
         )
         router._event_log.record(
-            event_type="micro.decision",
+            event_type="routing.compatibility_decision",
             session_id=session.session_id,
             payload={
                 "intent": decision.intent.value,
@@ -715,7 +693,7 @@ class RequestFlowCoordinator:
                 source=effective_payload.source,
                 intent=decision.intent.value,
                 skill_id=str((resolved_skill or {}).get("skill_id") or "").strip() or None,
-                route="micro_interpret",
+                route="main_semantic_entry",
                 request_text=raw_text,
                 classification=decision.to_dict(),
             )
@@ -724,40 +702,23 @@ class RequestFlowCoordinator:
                 session.touch()
                 router._session_store.save(session)
 
-        unprefixed_discord_main_handoff = (
-            str(effective_payload.source or "").strip().casefold() == "discord"
-            and decision.recommended_owner == SessionOwner.MAIN
-            and "micro_bypassed_unprefixed_discord" in decision.ambiguity_flags
-        )
-        active_tool_main_handoff = router._main_tool_execution_mode == "active"
-        if active_tool_main_handoff or unprefixed_discord_main_handoff:
-            # Main's typed commitment boundary owns every active-mode turn.
-            # Legacy repair must not preempt capability discovery for a phrase
-            # that happens to resemble an older fixed intent.
+        main_only_route = "main_only_semantic_routing" in decision.ambiguity_flags
+        active_tool_route = router._main_tool_execution_mode == "active"
+        if active_tool_route or main_only_route:
+            # Main's typed commitment boundary owns semantic interpretation;
+            # fixed compatibility intents never preempt capability discovery.
             router._event_log.record(
-                event_type="pipeline.main_repair.bypassed",
+                event_type="pipeline.main.commitment_selected",
                 session_id=session.session_id,
                 payload={
                     "reason": (
                         "active_mode_main_tool_commitment"
-                        if active_tool_main_handoff
-                        else "unprefixed_discord_main_commitment"
+                        if active_tool_route
+                        else "main_only_semantic_commitment"
                     ),
                     "target_owner": SessionOwner.MAIN.value,
                 },
             )
-        else:
-            repair_response = router._attempt_main_repair(
-                payload=effective_payload,
-                session=session,
-                micro_decision=decision,
-                required_missing_fields=required_missing_fields,
-                working_context_payload=working_context_payload,
-                contextual_followup=contextual_followup if isinstance(contextual_followup, dict) else None,
-            )
-            if repair_response is not None:
-                return None, repair_response
-
         routing_decision = router._agent_routing_policy.decide(
             intent=decision.intent,
             recommended_owner=decision.recommended_owner,
@@ -770,16 +731,16 @@ class RequestFlowCoordinator:
         decision.recommended_owner = target_owner
         if routing_decision.channel_forced_main and "channel_force_main_owner" not in decision.ambiguity_flags:
             decision.ambiguity_flags.append("channel_force_main_owner")
-        if routing_decision.micro_contract_escalation:
-            if "micro_contract_escalation" not in decision.ambiguity_flags:
-                decision.ambiguity_flags.append("micro_contract_escalation")
+        if routing_decision.legacy_contract_escalation:
+            if "legacy_contract_escalation" not in decision.ambiguity_flags:
+                decision.ambiguity_flags.append("legacy_contract_escalation")
             router._event_log.record(
-                event_type="micro.execution.blocked_by_skill_contract",
+                event_type="legacy.execution.blocked_by_skill_contract",
                 session_id=session.session_id,
                 payload={
                     "intent": decision.intent.value,
                     "skill_id": str((resolved_skill or {}).get("skill_id") or ""),
-                    "reason": "micro_not_allowed_for_intent",
+                    "reason": "legacy_route_not_available",
                 },
             )
         router._event_log.record(
@@ -827,44 +788,6 @@ class RequestFlowCoordinator:
         classification_with_pipeline = routed.classification_with_pipeline
         if router._main_tool_execution_mode == "active":
             return None
-        if target_owner == SessionOwner.MICRO and decision.intent in FAST_COMMAND_INTENTS:
-            tool_result = router._execute_fast_command(
-                decision=decision,
-                source_interface=effective_payload.source,
-                requested_by_user_id=effective_payload.user_id,
-                resolved_skill=resolved_skill,
-                agent_id=active_agent_id,
-                request_context=effective_payload.context,
-            )
-            router._event_log.record(
-                event_type="tool.executed",
-                session_id=session.session_id,
-                payload={
-                    "intent": decision.intent.value,
-                    "result_status": tool_result.get("status"),
-                },
-            )
-            followup_response = router._maybe_open_tool_followup(
-                session=session,
-                decision=decision,
-                tool_result=tool_result,
-                request_text=raw_text,
-                user_id=effective_payload.user_id,
-            )
-            if followup_response is not None:
-                return followup_response
-            router._clear_pending_clarification(session)
-            router._set_state(session, SessionState.IDLE)
-            return router._build_response(
-                session=session,
-                intent=decision.intent,
-                classification=classification_with_pipeline,
-                route="micro_tool",
-                result=tool_result,
-                request_text=raw_text,
-                user_id=effective_payload.user_id,
-            )
-
         trusted_document_binding = (
             decision.intent in {Intent.DOCUMENTS_GET, Intent.DOCUMENTS_STATUS}
             and "trusted_discord_attachment_binding" in decision.ambiguity_flags
@@ -872,7 +795,7 @@ class RequestFlowCoordinator:
         if target_owner == SessionOwner.MAIN and (
             decision.intent in EMAIL_AGENT_INTENTS or trusted_document_binding
         ):
-            tool_result = router._execute_fast_command(
+            tool_result = router._execute_compatibility_action(
                 decision=decision,
                 source_interface=effective_payload.source,
                 requested_by_user_id=effective_payload.user_id,
@@ -979,10 +902,10 @@ class RequestFlowCoordinator:
             agent_id=active_agent_id,
         )
         main_context = {
-            "micro_intent": decision.intent.value,
-            "micro_confidence": decision.confidence,
-            "micro_entities": decision.entities,
-            "micro_ambiguity_flags": decision.ambiguity_flags,
+            "initial_intent": decision.intent.value,
+            "initial_confidence": decision.confidence,
+            "initial_entities": decision.entities,
+            "initial_ambiguity_flags": decision.ambiguity_flags,
             "required_missing_fields": required_missing_fields,
             "runtime_skill_intents": [decision.intent.value],
             "runtime_capability_catalog": runtime_capability_catalog,
@@ -1087,28 +1010,6 @@ class RequestFlowCoordinator:
                     response["message"] = success_message
                 router._clear_pending_clarification(session)
             router._set_state(session, SessionState.IDLE)
-        elif decision.intent in FAST_COMMAND_INTENTS:
-            missing_fields = router._required_fields_for_intent(intent=decision.intent, entities=decision.entities)
-            if not missing_fields:
-                tool_result = router._execute_fast_command(
-                    decision=decision,
-                    source_interface=effective_payload.source,
-                    requested_by_user_id=effective_payload.user_id,
-                    resolved_skill=resolved_skill,
-                    agent_id=active_agent_id,
-                )
-                router._event_log.record(
-                    event_type="main.fast_fallback.executed",
-                    session_id=session.session_id,
-                    payload={
-                        "intent": decision.intent.value,
-                        "result_status": tool_result.get("status"),
-                    },
-                )
-                response = dict(tool_result)
-                response["executed_by"] = "main_fast_fallback"
-                router._clear_pending_clarification(session)
-                router._set_state(session, SessionState.IDLE)
         classification_with_pipeline, response = router._maybe_open_conversation_followup(
             session=session,
             decision=decision,

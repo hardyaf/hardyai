@@ -109,8 +109,7 @@ class MainPlanFlow:
             ),
         )
         executor = MainAgentExecutor(
-            micro_jarvis=router._micro_jarvis,
-            run_fast_command=lambda decision, planner_decision: router._execute_fast_command(
+            run_compatibility_action=lambda decision, planner_decision: router._execute_compatibility_action(
                 decision=decision,
                 source_interface=source_interface,
                 requested_by_user_id=requested_by_user_id,

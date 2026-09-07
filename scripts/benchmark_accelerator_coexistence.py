@@ -55,7 +55,7 @@ def _route_discord_turn(*, text: str, iteration: int) -> tuple[dict, float]:
         channel_id=200,
         user_id=300,
         message_id=f"phase5-coexistence-{uuid4()}-{iteration}",
-        micro_command_explicit=False,
+        command_prefix_explicit=False,
     )
 
     async def _route() -> dict:

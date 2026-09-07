@@ -19,7 +19,6 @@ def test_main_idle_transition_runs_critical_skills_compile_job():
     try:
         db_path = scratch / "scheduled.db"
         output_path = scratch / "critical_skills.md"
-        micro_output_path = scratch / "micro_jarvis_skills.md"
         store = SQLiteStore(database_path=str(db_path))
         registry = SkillRegistryService(sqlite_store=store, repo_root=str(Path.cwd()))
         registry.seed_defaults()
@@ -31,7 +30,6 @@ def test_main_idle_transition_runs_critical_skills_compile_job():
             event_log=event_log,
             critical_skills_output_path=str(output_path),
             critical_skills_min_level=1,
-            micro_skills_output_path=str(micro_output_path),
         )
         service.seed_defaults()
 
@@ -45,7 +43,6 @@ def test_main_idle_transition_runs_critical_skills_compile_job():
         assert results
         assert results[0]["status"] in {"ok", "skipped"}
         assert output_path.exists()
-        assert micro_output_path.exists()
 
         jobs_after = store.list_scheduled_jobs(
             enabled_only=False,
@@ -74,13 +71,11 @@ def test_seed_defaults_can_skip_missing_artifact_compilation():
             sqlite_store=store,
             skill_registry=registry,
             critical_skills_output_path=str(scratch / "missing-critical.md"),
-            micro_skills_output_path=str(scratch / "missing-micro.md"),
         )
 
         service.seed_defaults(ensure_compiled_artifacts=False)
 
         assert not (scratch / "missing-critical.md").exists()
-        assert not (scratch / "missing-micro.md").exists()
         assert store.list_scheduled_jobs(
             enabled_only=True,
             cron_expr=ScheduledJobsService.MAIN_IDLE_TRIGGER,

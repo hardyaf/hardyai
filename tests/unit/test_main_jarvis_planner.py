@@ -6,7 +6,7 @@ def test_main_jarvis_builds_bulk_light_plan():
     response = main.respond(
         text="Can you turn all lights on",
         context={
-            "micro_intent": "home.set_switch",
+            "initial_intent": "home.set_switch",
             "available_switches": [
                 {"name": "office test light"},
                 {"name": "kitchen light"},
@@ -78,7 +78,7 @@ def test_main_jarvis_respond_builds_plan_for_list_create_and_add():
     main = MainJarvis()
     response = main.respond(
         text="Jarvis lets create a grocery list and add bananas to it",
-        context={"micro_intent": "conversation.general"},
+        context={"initial_intent": "conversation.general"},
     )
 
     assert response["status"] == "planned"
@@ -100,7 +100,7 @@ def test_main_jarvis_builds_six_step_plan_for_numbered_five_item_list_request():
             "1) Rocket Fundraiser (Jordan), 2) location testing (Jordan), "
             "food prep (Taylor), yard layout (Taylor), Get tables from kelly (Taylor)"
         ),
-        context={"micro_intent": "conversation.general"},
+        context={"initial_intent": "conversation.general"},
     )
 
     assert response["status"] == "planned"
@@ -121,7 +121,7 @@ def test_main_jarvis_respond_builds_plan_for_lets_make_list_phrase():
     main = MainJarvis()
     response = main.respond(
         text="lets make a costco list",
-        context={"micro_intent": "unknown"},
+        context={"initial_intent": "unknown"},
     )
 
     assert response["status"] == "planned"
@@ -136,7 +136,7 @@ def test_main_jarvis_respond_builds_plan_for_put_items_on_it_with_last_list_cont
     response = main.respond(
         text="please put apples, tofu, jelly, and granola on it",
         context={
-            "micro_intent": "unknown",
+            "initial_intent": "unknown",
             "entity_hints": [
                 {
                     "domain": "lists",
@@ -158,7 +158,7 @@ def test_main_jarvis_respond_builds_plan_for_delete_list_phrase():
     main = MainJarvis()
     response = main.respond(
         text="delete the costco list",
-        context={"micro_intent": "unknown"},
+        context={"initial_intent": "unknown"},
     )
 
     assert response["status"] == "planned"
@@ -172,7 +172,7 @@ def test_main_jarvis_respond_builds_plan_for_remove_item_phrase():
     main = MainJarvis()
     response = main.respond(
         text="remove apples from the costco list",
-        context={"micro_intent": "unknown"},
+        context={"initial_intent": "unknown"},
     )
 
     assert response["status"] == "planned"
@@ -190,7 +190,7 @@ def test_main_jarvis_respond_uses_conversation_backend_for_non_task_chat():
     main = MainJarvis(conversation_backend=ConversationBackend())
     response = main.respond(
         text="how should I organize my household priorities this week",
-        context={"micro_intent": "unknown"},
+        context={"initial_intent": "unknown"},
     )
 
     assert response["status"] == "conversation"
@@ -217,7 +217,7 @@ def test_main_jarvis_returns_typed_action_commitment_instead_of_future_tense_pro
 
     response = MainJarvis(conversation_backend=ConversationBackend()).respond(
         text="all unread",
-        context={"micro_intent": "conversation.general"},
+        context={"initial_intent": "conversation.general"},
     )
 
     assert response["status"] == "main_turn_decision"
@@ -234,7 +234,7 @@ def test_main_jarvis_fails_closed_when_typed_decision_is_invalid():
 
     response = MainJarvis(conversation_backend=ConversationBackend()).respond(
         text="summarize my emails",
-        context={"micro_intent": "conversation.general"},
+        context={"initial_intent": "conversation.general"},
     )
 
     assert response["status"] == "conversation"
@@ -250,7 +250,7 @@ def test_main_jarvis_respond_falls_back_to_heuristic_conversation_when_backend_u
     main = MainJarvis(conversation_backend=ConversationBackend())
     response = main.respond(
         text="can you help me with a quick dinner recipe",
-        context={"micro_intent": "conversation.general"},
+        context={"initial_intent": "conversation.general"},
     )
 
     assert response["status"] == "conversation"
@@ -266,7 +266,7 @@ def test_main_jarvis_heuristic_conversation_handles_identity_question():
     main = MainJarvis(conversation_backend=ConversationBackend())
     response = main.respond(
         text="Who are you?",
-        context={"micro_intent": "conversation.general", "agent_display_name": "Jarvis"},
+        context={"initial_intent": "conversation.general", "agent_display_name": "Jarvis"},
     )
 
     assert response["status"] == "conversation"
@@ -282,7 +282,7 @@ def test_main_jarvis_does_not_fallback_to_heuristic_conversation_when_disabled()
     main = MainJarvis(conversation_backend=ConversationBackend())
     response = main.respond(
         text="who are you",
-        context={"micro_intent": "conversation.general"},
+        context={"initial_intent": "conversation.general"},
     )
 
     assert response["status"] == "conversation"

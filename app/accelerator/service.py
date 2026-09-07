@@ -12,7 +12,6 @@ from app.accelerator.types import AcceleratorAdmissionError, AcceleratorLease
 LANE_PRIORITIES: dict[str, int] = {
     "main_conversation": 100,
     "main_repair": 95,
-    "micro": 90,
     "runtime_health": 85,
     "research_decision": 60,
     "action_ticket_review": 50,

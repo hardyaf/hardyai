@@ -45,9 +45,9 @@ class ConversationLaneDecision:
 class ConversationLanePolicy:
     """Separates informational conversation from semantic action repair.
 
-    Micro remains authoritative for known tool intents. This policy only promotes an
-    ``unknown`` result when the user text has an informational shape or the session
-    resolver has already established that it is a conversational follow-up.
+    Main remains authoritative for semantic interpretation. This policy only promotes
+    an ``unknown`` compatibility envelope when the user text has an informational
+    shape or the session resolver already established a conversational follow-up.
     """
 
     def decide(
@@ -58,7 +58,7 @@ class ConversationLanePolicy:
         contextual_followup: dict[str, Any] | None = None,
     ) -> ConversationLaneDecision:
         if intent == Intent.CONVERSATIONAL:
-            return ConversationLaneDecision(True, "micro_conversation_intent", 0.98)
+            return ConversationLaneDecision(True, "conversation_intent", 0.98)
         if intent != Intent.UNKNOWN:
             return ConversationLaneDecision(False, "known_non_conversation_intent", 0.99)
 

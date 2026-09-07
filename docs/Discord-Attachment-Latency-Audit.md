@@ -1,15 +1,16 @@
 # Discord Attachment And Latency Audit
 
-Status: deployed and verified on `hardybot`
+Status: historical deployment evidence; routing details were superseded by the Main-only cutover
 
 Date: 2026-08-25
 
 ## Latency finding
 
-Discord authorization and routing remained correct. Explicit `!` commands enter Micro;
-unprefixed messages intentionally bypass Micro and enter Main. Across 147 completed Discord
-turns, explicit Micro turns had a 3.36 second median. Before the incident, ordinary Main
-turns were typically 5-8 seconds.
+At the time of this audit, Discord authorization and routing remained correct. Explicit `!`
+commands entered the retired classifier while unprefixed messages entered Main. Across 147
+completed Discord turns, those prefixed turns had a 3.36 second median. Before the incident,
+ordinary Main turns were typically 5-8 seconds. This paragraph records the 2026-08-25 baseline;
+it does not describe the current Main-only routing contract.
 
 The regression was caused by a stale NVIDIA/NVML binding in the long-running Ollama
 container. `gpt-oss:20b` reported `100% CPU`, the RTX 3090 was idle, and recent Main turns

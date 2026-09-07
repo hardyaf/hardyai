@@ -1,5 +1,4 @@
 from app.core.main_jarvis import MainJarvis
-from app.core.micro_jarvis import MicroJarvis
 from tests.router_support import RegistryBackedTestRouter as JarvisRouter
 from app.core.session_store import SessionStore
 from app.core.state_machine import RuntimePowerController
@@ -13,7 +12,6 @@ from app.tools.lists_service import ListsService
 def test_router_captures_recent_turns_in_single_post_turn_pipeline_point():
     session_store = SessionStore()
     router = JarvisRouter(
-        micro_jarvis=MicroJarvis(),
         main_jarvis=MainJarvis(),
         session_store=session_store,
         runtime_power=RuntimePowerController(),
@@ -51,7 +49,7 @@ def test_router_captures_recent_turns_in_single_post_turn_pipeline_point():
     assert assistant_turn["role"] == "assistant"
     assert user_turn["intent"] == "lists.add_item"
     assert assistant_turn["intent"] == "lists.add_item"
-    assert user_turn["references"]["route"] == "micro_tool"
-    assert assistant_turn["references"]["route"] == "micro_tool"
+    assert user_turn["references"]["route"] == "main_jarvis"
+    assert assistant_turn["references"]["route"] == "main_jarvis"
     assert assistant_turn["references"]["status"] == "ok"
     assert isinstance(user_turn["normalized_text"], str) and user_turn["normalized_text"]

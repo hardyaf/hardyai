@@ -80,6 +80,13 @@ P5F_REASONING_TOOL_IDS = {
     "p5f_email_unsupported_send_fails_closed",
 }
 
+P9_REASONING_TOOL_IDS = {
+    "tool_partial_completion",
+    "p9_email_summary_to_list_paraphrase",
+    "p9_research_to_list_new_filter_composition",
+    "p9_calendar_query_then_create_paraphrase",
+}
+
 REASONING_TOOL_IDS = {
     "p3_select_fixture_skill",
     "p3_no_match_empty_catalog",
@@ -92,8 +99,7 @@ REASONING_TOOL_IDS = {
     "tool_unauthorized_refusal",
     "tool_approval_pause_resume",
     "tool_repeat_detection",
-    "tool_partial_completion",
-} | P4_REASONING_TOOL_IDS | P5A_REASONING_TOOL_IDS | P5B_REASONING_TOOL_IDS | P5F_REASONING_TOOL_IDS
+} | P4_REASONING_TOOL_IDS | P5A_REASONING_TOOL_IDS | P5B_REASONING_TOOL_IDS | P5F_REASONING_TOOL_IDS | P9_REASONING_TOOL_IDS
 
 
 def test_main_acceptance_manifest_is_valid_and_has_safety_case() -> None:
@@ -131,6 +137,7 @@ def test_main_acceptance_manifest_has_locked_legacy_and_deferred_reasoning_group
     p5a_cases = [case for case in reasoning if str(case.get("owning_phase") or "") == "P5A"]
     p5b_cases = [case for case in reasoning if str(case.get("owning_phase") or "") == "P5B"]
     p5f_cases = [case for case in reasoning if str(case.get("owning_phase") or "") == "P5F"]
+    p9_cases = [case for case in reasoning if str(case.get("owning_phase") or "") == "P9"]
     deferred = [
         case
         for case in reasoning
@@ -139,6 +146,7 @@ def test_main_acceptance_manifest_has_locked_legacy_and_deferred_reasoning_group
         and case not in p5a_cases
         and case not in p5b_cases
         and case not in p5f_cases
+        and case not in p9_cases
     ]
     assert p3_cases and all(case.get("execution_enabled") is True for case in p3_cases)
     assert all(case.get("mandatory") is False for case in p3_cases)
@@ -154,6 +162,8 @@ def test_main_acceptance_manifest_has_locked_legacy_and_deferred_reasoning_group
     assert p5f_cases and {str(case["id"]) for case in p5f_cases} == P5F_REASONING_TOOL_IDS
     assert all(case.get("execution_enabled") is True for case in p5f_cases)
     assert all(case.get("mandatory") is True for case in p5f_cases)
+    assert p9_cases and {str(case["id"]) for case in p9_cases} == P9_REASONING_TOOL_IDS
+    assert all(case.get("execution_enabled") is False for case in p9_cases)
     assert all(case.get("execution_enabled") is False for case in deferred)
     assert all(str(case.get("owning_phase") or "").startswith("P") for case in reasoning)
 
@@ -167,6 +177,21 @@ def test_main_acceptance_runtime_loader_excludes_deferred_cases() -> None:
         "p3_emit_bounded_tool_call",
         "p3_respond_after_observation",
     } | P5A_REASONING_TOOL_IDS | P5B_REASONING_TOOL_IDS | P5F_REASONING_TOOL_IDS
+
+
+def test_p9_held_out_compositions_need_no_intent_or_workflow_contract() -> None:
+    cases = load_cases(
+        Path("benchmarks/models/main_acceptance_cases.json"),
+        include_disabled=True,
+    )
+    p9_cases = [case for case in cases if case.get("owning_phase") == "P9"]
+
+    assert {str(case["id"]) for case in p9_cases} == P9_REASONING_TOOL_IDS
+    for case in p9_cases:
+        expected = case.get("expect") or {}
+        assert "intent" not in expected
+        assert "workflow" not in expected
+        assert "workflow_id" not in case.get("context", {})
 
 
 def test_p5b_acceptance_cases_hydrate_current_calendar_markdown_contract() -> None:

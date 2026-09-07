@@ -5,7 +5,6 @@ from pathlib import Path
 from uuid import uuid4
 
 from app.core.main_jarvis import MainJarvis
-from app.core.micro_jarvis import MicroJarvis
 from tests.router_support import RegistryBackedTestRouter as JarvisRouter
 from app.core.session_store import SessionStore
 from app.core.state_machine import RuntimePowerController
@@ -31,7 +30,6 @@ def test_router_resolves_agent_alias_and_records_skill_run():
         registry.seed_defaults()
 
         router = JarvisRouter(
-            micro_jarvis=MicroJarvis(),
             main_jarvis=MainJarvis(),
             session_store=SessionStore(persistence=store),
             runtime_power=RuntimePowerController(),
@@ -78,7 +76,6 @@ def test_router_prefers_execution_dispatcher_for_skill_execution():
         registry.seed_defaults()
 
         router = JarvisRouter(
-            micro_jarvis=MicroJarvis(),
             main_jarvis=MainJarvis(),
             session_store=SessionStore(persistence=store),
             runtime_power=RuntimePowerController(),

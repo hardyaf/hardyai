@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.core.micro_jarvis import MicroDecision
+from app.core.types import RoutingDecision
 from app.core.session_store import SessionRecord
 
 
@@ -16,12 +16,12 @@ class ContextFlow:
         self,
         *,
         session: SessionRecord,
-        decision: MicroDecision,
+        decision: RoutingDecision,
         request_context: dict[str, Any],
         working_context: dict[str, Any],
         text: str,
-    ) -> MicroDecision:
-        """Apply trusted transport context after either Micro or Main chose an intent."""
+    ) -> RoutingDecision:
+        """Apply trusted transport context after Main chose an intent."""
 
         router = self._router
         for contract in router._skill_context_contracts:
@@ -45,11 +45,11 @@ class ContextFlow:
                     },
                 )
                 continue
-            if isinstance(bound, MicroDecision):
+            if isinstance(bound, RoutingDecision):
                 decision = bound
         return decision
 
-    def _resolve_followup_entities(self, session: SessionRecord, decision: MicroDecision) -> MicroDecision:
+    def _resolve_followup_entities(self, session: SessionRecord, decision: RoutingDecision) -> RoutingDecision:
         router = self._router
         registry = router._entity_registry_manager.get_registry(session=session)
         intent_value = decision.intent.value
@@ -241,9 +241,9 @@ class ContextFlow:
         self,
         *,
         session: SessionRecord,
-        decision: MicroDecision,
+        decision: RoutingDecision,
         working_context: dict[str, Any],
-    ) -> MicroDecision:
+    ) -> RoutingDecision:
         router = self._router
         active_skill_context = working_context.get("active_skill_context")
         if not isinstance(active_skill_context, dict):

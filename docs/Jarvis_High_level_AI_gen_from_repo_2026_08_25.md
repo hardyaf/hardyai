@@ -1,5 +1,8 @@
 # What Is Jarvis?
 
+> **Historical snapshot:** This document was generated from the repository on 2026-08-25. Its descriptions
+> of MicroJarvis and two-model routing are retained as design history; the current runtime is Main-only.
+
 > **Jarvis is an attempt to build a private, persistent AI operating layer for a real household — not just a chatbot that happens to have tools.**
 
 This document explains the larger vision behind HardyAI/Jarvis, how the current implementation fits that vision, and where the project is ultimately intended to go.

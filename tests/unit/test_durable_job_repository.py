@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from app.jobs.repository import DurableJobRepository
+from app.jobs.types import REVIEW_NOTIFICATION_DISCORD_JOB
 
 
 def test_generic_job_repository_is_idempotent_and_leased(tmp_path) -> None:
@@ -78,4 +81,46 @@ def test_expired_lease_is_retried_then_dead_lettered_at_attempt_cap(tmp_path) ->
     persisted = repository.get_job(job["job_id"])
     assert persisted["status"] == "dead_letter"
     assert persisted["last_error_code"] == "lease_expired"
+    repository.close()
+
+
+def test_approval_job_requires_locked_key_and_conflicts_on_payload_reuse(tmp_path) -> None:
+    repository = DurableJobRepository(str(tmp_path / "jobs.db"))
+    payload = {
+        "proposal_id": "proposal-1",
+        "review_id": "review-1",
+        "operation_id": "operation-1",
+        "authorization_binding": "authorization-1",
+        "batch_manifest_hash": None,
+        "transfer_binding_hash": None,
+        "destination_purpose": "human_reviews",
+    }
+    key = "review-notification-discord:v1:proposal-1:review-1:human_reviews"
+    created = repository.enqueue_job(
+        job_type=REVIEW_NOTIFICATION_DISCORD_JOB,
+        aggregate_id="proposal-1",
+        idempotency_key=key,
+        payload=payload,
+    )
+    repeated = repository.enqueue_job(
+        job_type=REVIEW_NOTIFICATION_DISCORD_JOB,
+        aggregate_id="proposal-1",
+        idempotency_key=key,
+        payload=payload,
+    )
+    assert repeated["job_id"] == created["job_id"]
+    with pytest.raises(ValueError, match="approval_job_idempotency_conflict"):
+        repository.enqueue_job(
+            job_type=REVIEW_NOTIFICATION_DISCORD_JOB,
+            aggregate_id="proposal-1",
+            idempotency_key=key,
+            payload={**payload, "operation_id": "operation-changed"},
+        )
+    with pytest.raises(ValueError, match="approval_job_idempotency_key_invalid"):
+        repository.enqueue_job(
+            job_type=REVIEW_NOTIFICATION_DISCORD_JOB,
+            aggregate_id="proposal-1",
+            idempotency_key="wrong-key",
+            payload=payload,
+        )
     repository.close()

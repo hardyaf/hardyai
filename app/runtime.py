@@ -8,10 +8,8 @@ import httpx
 from app.accelerator.client import accelerator_request_headers
 from app.config import settings
 from app.core.main_backend import OllamaMainConversationBackend, OllamaMainRepairBackend
-from app.core.micro_backend import OllamaMicroInferenceBackend
 from app.core.ollama_observability import AdaptiveTokenBudgetPolicy
 from app.core.main_jarvis import MainJarvis
-from app.core.micro_jarvis import MicroJarvis
 from app.core.router import JarvisRouter
 from app.core.session_store import SessionStore
 from app.core.state_machine import RuntimePowerController
@@ -48,8 +46,11 @@ from app.skills.domains.email_agent.config import EmailAgentPermissions
 from app.skills.domains.email_agent.service import EmailAgentRuntimeConfig, EmailAgentService
 from app.skills.domains.email_agent.storage import EmailAgentSQLiteStorage
 from app.skills.domains.email_agent.summarization import OllamaEmailSummaryCompiler
+from app.skills.domains.documents.handler import DocumentsToolHandler
 from app.skills.domains.lists.storage import SQLiteListsStorage
 from app.skills.domains.lists.tools import ListsToolHandler
+from app.skills.domains.lights.handler import HomeToolHandler
+from app.skills.domains.research.handler import ResearchToolHandler
 from app.skills.registry_service import SkillRegistryService
 from app.tools.calendar_service import CalendarService
 from app.tools.home_service import HomeService
@@ -71,6 +72,7 @@ from app.integrations.document_gateway.client import DocumentGatewayClient
 from app.integrations.local_service import validate_local_http_service_url
 from app.reviews.repository import HumanReviewRepository
 from app.reviews.service import HumanReviewService
+from app.services.discord.approval_delivery import load_action_approval_binding
 from app.skills.domains.documents.query_service import DocumentQueryService
 from app.skills.domains.documents.review_corrections import DocumentFieldReviewCoordinator
 from app.provenance.repository import ProvenanceRepository
@@ -196,25 +198,13 @@ external_identity_service = ExternalIdentityService(
     repository=ticket_repository,
     skill_registry=skill_registry,
 )
-micro_backend = None
-if settings.micro_model_enabled and settings.micro_model_provider.strip().lower() == "ollama":
-    micro_backend = OllamaMicroInferenceBackend(
-        base_url=settings.local_model_url,
-        model=settings.micro_model_name,
-        timeout_seconds=settings.micro_model_timeout_seconds,
-        skill_registry=skill_registry,
-        num_ctx=settings.micro_model_num_ctx,
-        num_predict=settings.micro_model_num_predict,
-        metrics_callback=_record_ollama_call,
-        adaptive_policy=adaptive_token_budget_policy,
-    )
 main_repair_backend = None
 if settings.main_repair_model_enabled and settings.main_repair_model_provider.strip().lower() == "ollama":
     main_repair_backend = OllamaMainRepairBackend(
         base_url=settings.local_model_url,
         model=settings.main_repair_model_name,
         timeout_seconds=settings.main_repair_model_timeout_seconds,
-        keep_alive_seconds=settings.larger_model_micro_only_window_seconds,
+        keep_alive_seconds=settings.main_model_keep_alive_seconds,
         skill_registry=skill_registry,
         num_ctx=settings.main_repair_model_num_ctx,
         num_predict=settings.main_repair_model_num_predict,
@@ -228,13 +218,10 @@ if settings.main_repair_model_enabled and settings.main_repair_model_provider.st
     # Keep main conversation and main repair on the same model family for consistent reasoning quality.
     conversation_model_name = settings.main_repair_model_name
     conversation_timeout = max(settings.main_conversation_model_timeout_seconds, 8.0)
-elif settings.micro_model_enabled and settings.micro_model_provider.strip().lower() == "ollama":
-    conversation_model_name = settings.micro_model_name
-    conversation_timeout = max(settings.micro_model_timeout_seconds, 8.0)
 if conversation_model_name:
     conversation_keep_alive = None
     if conversation_model_name == settings.main_repair_model_name:
-        conversation_keep_alive = settings.larger_model_micro_only_window_seconds
+        conversation_keep_alive = settings.main_model_keep_alive_seconds
     main_conversation_backend = OllamaMainConversationBackend(
         base_url=settings.local_model_url,
         model=conversation_model_name,
@@ -259,7 +246,7 @@ if settings.web_research_enabled and settings.web_research_provider == "searxng"
             model=conversation_model_name,
             timeout_seconds=settings.web_research_decision_timeout_seconds,
             keep_alive_seconds=(
-                settings.larger_model_micro_only_window_seconds
+                settings.main_model_keep_alive_seconds
                 if conversation_model_name == settings.main_repair_model_name
                 else None
             ),
@@ -281,12 +268,12 @@ if settings.web_research_enabled and settings.web_research_provider == "searxng"
         children_enabled=settings.web_research_children_enabled,
         cache_ttl_seconds=settings.web_research_cache_ttl_seconds,
     )
-
-micro_jarvis = MicroJarvis(
-    backend=micro_backend,
-    fast_confidence_threshold=settings.micro_fast_confidence_threshold,
-    heuristic_fallback_enabled=settings.micro_model_heuristic_fallback_enabled,
+research_tool_handler = (
+    ResearchToolHandler(research_service=web_research_service)
+    if web_research_service is not None
+    else None
 )
+
 main_jarvis = MainJarvis(
     repair_backend=main_repair_backend,
     conversation_backend=main_conversation_backend,
@@ -297,7 +284,7 @@ session_store = SessionStore(
     channel_idle_timeout_seconds=settings.channel_session_idle_timeout_seconds,
 )
 runtime_power = RuntimePowerController(
-    larger_model_micro_only_window_seconds=settings.larger_model_micro_only_window_seconds
+    larger_model_active_window_seconds=settings.main_model_keep_alive_seconds
 )
 private_notes_storage = PrivateNotesSQLiteStorage(database_path=settings.database_path)
 private_notes_service = PrivateNotesDigestService(
@@ -332,9 +319,9 @@ def _on_model_runtime_transition(previous_active: bool, current_active: bool) ->
             session_id="system:runtime",
             payload={
                 "from": "main",
-                "to": "micro",
+                "to": "idle",
                 "reason": "main_idle_timeout",
-                "timeout_seconds": settings.larger_model_micro_only_window_seconds,
+                "timeout_seconds": settings.main_model_keep_alive_seconds,
             },
         )
     elif (not previous_active) and current_active:
@@ -342,10 +329,10 @@ def _on_model_runtime_transition(previous_active: bool, current_active: bool) ->
             event_type="runtime.main_runtime_warm",
             session_id="system:runtime",
             payload={
-                "from": "micro",
+                "from": "idle",
                 "to": "main",
                 "reason": "main_labeled_task_detected",
-                "timeout_seconds": settings.larger_model_micro_only_window_seconds,
+                "timeout_seconds": settings.main_model_keep_alive_seconds,
             },
         )
 
@@ -377,7 +364,7 @@ google_calendar_live = (
     else None
 )
 calendar_service = CalendarService(google_live=google_calendar_live)
-calendar_tool_handler = CalendarToolHandler()
+calendar_tool_handler = CalendarToolHandler(calendar_service=calendar_service)
 calendar_inbox_storage = None
 calendar_inbox_service = None
 if settings.calendar_inbox_enabled:
@@ -475,11 +462,14 @@ if settings.email_agent_enabled:
             max_provider_attempts=settings.email_agent_spam_max_attempts,
         ),
         event_log=event_log,
+        effect_manifest_reservation=action_ticket_service.effect_manifest_reservation(),
+        ticket_resolver=ticket_repository.get_ticket_by_request_id,
     )
 home_service = HomeService(
     sqlite_store=sqlite_store,
     default_switch_names=settings.house_switch_names,
 )
+home_tool_handler = HomeToolHandler(home_service=home_service)
 
 document_gateway_client = None
 documents_service = None
@@ -497,6 +487,11 @@ if settings.documents_enabled:
             reviews=human_review_service,
         ),
     )
+documents_tool_handler = (
+    DocumentsToolHandler(documents_service=documents_service)
+    if documents_service is not None
+    else None
+)
 
 ticket_verifier_registry = VerifierRegistry()
 ticket_verifier_registry.register(ListsSourceVerifier(lists_service=lists_service))
@@ -557,7 +552,6 @@ if settings.plane_enabled:
     )
 
 router = JarvisRouter(
-    micro_jarvis=micro_jarvis,
     main_jarvis=main_jarvis,
     session_store=session_store,
     runtime_power=runtime_power,
@@ -583,11 +577,26 @@ router = JarvisRouter(
     main_sticky_followup_turns=settings.main_sticky_followup_turns,
     main_pending_clarification_heuristic_fallback_enabled=settings.main_pending_clarification_heuristic_fallback_enabled,
     action_ticket_service=action_ticket_service,
+    action_approval_service=human_review_service,
+    approval_binding_provider=(
+        lambda _context: load_action_approval_binding(settings.discord_permissions_path)
+    ),
     identity_service=external_identity_service,
     email_agent_service=email_agent_service,
     typed_domain_handlers={
         ListsToolHandler.SKILL_ID: lists_tool_handler,
         CalendarToolHandler.SKILL_ID: calendar_tool_handler,
+        HomeToolHandler.SKILL_ID: home_tool_handler,
+        **(
+            {DocumentsToolHandler.SKILL_ID: documents_tool_handler}
+            if documents_tool_handler is not None
+            else {}
+        ),
+        **(
+            {ResearchToolHandler.SKILL_ID: research_tool_handler}
+            if research_tool_handler is not None
+            else {}
+        ),
         **(
             {EmailAgentService.SKILL_ID: email_agent_service}
             if email_agent_service is not None
@@ -595,6 +604,11 @@ router = JarvisRouter(
         ),
     },
     documents_service=documents_service,
+    skill_service_bindings=(
+        {"web_research_service": web_research_service}
+        if web_research_service is not None
+        else {}
+    ),
     durable_write_service=durable_write_service,
     main_tool_model=main_conversation_backend,
     main_tool_execution_mode=settings.main_tool_execution_mode,
@@ -604,7 +618,8 @@ router = JarvisRouter(
         ("email_operations",)
         if email_agent_service is not None and settings.email_agent_label_writes_enabled
         else ()
-    ),
+    )
+    + (("action_approval",) if settings.action_approval_worker_enabled else ()),
     main_tool_max_selected_skills=settings.main_tool_max_selected_skills,
     main_tool_max_steps=settings.main_tool_max_steps,
     main_tool_max_failures=settings.main_tool_max_failures,
@@ -612,7 +627,6 @@ router = JarvisRouter(
     main_tool_max_observation_chars=settings.main_tool_max_observation_chars,
     main_tool_max_total_observation_chars=settings.main_tool_max_total_observation_chars,
     main_tool_timeout_seconds=settings.main_tool_timeout_seconds,
-    legacy_micro_routing_enabled=settings.legacy_micro_routing_enabled,
     email_timezone=settings.email_agent_timezone,
     calendar_timezone_resolver=calendar_service.tool_timezone,
 )
@@ -638,12 +652,11 @@ turn_service = TurnService(
 
 
 def model_backends_status() -> dict[str, Any]:
-    micro_ollama_configured = settings.micro_model_enabled and settings.micro_model_provider.strip().lower() == "ollama"
     main_ollama_configured = (
         settings.main_repair_model_enabled and settings.main_repair_model_provider.strip().lower() == "ollama"
     )
     ollama_reachable: bool | None = None
-    if micro_ollama_configured or main_ollama_configured:
+    if main_ollama_configured:
         try:
             response = httpx.get(
                 f"{settings.local_model_url.rstrip('/')}/api/tags",
@@ -662,18 +675,14 @@ def model_backends_status() -> dict[str, Any]:
         return value if isinstance(value, dict) else None
 
     return {
-        "micro_model_enabled": settings.micro_model_enabled,
         "main_repair_model_enabled": settings.main_repair_model_enabled,
         "main_conversation_model_enabled": conversation_model_name is not None,
-        "micro_provider": settings.micro_model_provider,
         "main_repair_provider": settings.main_repair_model_provider,
-        "micro_model_name": settings.micro_model_name,
         "main_repair_model_name": settings.main_repair_model_name,
         "main_conversation_model_name": conversation_model_name,
         "main_conversation_model_timeout_seconds": settings.main_conversation_model_timeout_seconds,
         "main_agent_loop_context_max_chars": settings.main_agent_loop_context_max_chars,
         "ollama_lanes": {
-            "micro": _lane_status(micro_backend),
             "main_repair": _lane_status(main_repair_backend),
             "main_conversation": _lane_status(main_conversation_backend),
             "research_decision": _lane_status(research_decision_backend),
@@ -681,10 +690,9 @@ def model_backends_status() -> dict[str, Any]:
             "email_classifier": _lane_status(email_model_classifier),
             "action_ticket_review": _lane_status(ticket_review_backend),
         },
-        "larger_model_micro_only_window_seconds": settings.larger_model_micro_only_window_seconds,
+        "main_model_keep_alive_seconds": settings.main_model_keep_alive_seconds,
         "skill_artifact_auto_compile_enabled": settings.skill_artifact_auto_compile_enabled,
         "larger_model_runtime": runtime_power.model_runtime_status(),
-        "micro_heuristic_fallback_enabled": settings.micro_model_heuristic_fallback_enabled,
         "main_agent_content_policy_enabled": settings.main_agent_content_policy_enabled,
         "main_agent_content_policy_children_only": settings.main_agent_content_policy_children_only,
         "main_agent_token_session_enabled": settings.main_agent_token_session_enabled,

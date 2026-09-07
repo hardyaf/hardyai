@@ -406,6 +406,20 @@ class DocumentProcessingWorker:
             document_id = str(payload.get("document_id") or "")
             source_version_id = str(payload.get("source_version_id") or "")
             try:
+                if document_id and (not run_id or not source_version_id):
+                    operation_id = str(job.get("idempotency_key") or "").strip()
+                    operation = self.documents.get_tool_operation(operation_id)
+                    if (
+                        operation is None
+                        or str(operation.get("status") or "") != "completed"
+                        or str(operation.get("target_ref") or "") != document_id
+                    ):
+                        raise DocumentProcessingError("processing_tool_operation_missing")
+                    run_id = str(operation.get("result_ref") or "")
+                    run = self.documents.get_processing_run(run_id)
+                    if run is None:
+                        raise DocumentProcessingError("processing_run_missing")
+                    source_version_id = str(run.get("source_version_id") or "")
                 if not all((run_id, document_id, source_version_id)):
                     raise DocumentProcessingError("processing_job_payload_invalid")
                 if not self.jobs.update_progress(

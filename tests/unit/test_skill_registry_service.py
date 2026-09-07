@@ -122,11 +122,8 @@ def test_runtime_capability_catalog_is_safe_sql_projection():
 
         assert "skill.email.agent" in by_id
         assert "email.list_recent" in by_id["skill.email.agent"]["intents"]
-        assert by_id["skill.email.agent"]["micro_enabled"] is False
-        assert by_id["skill.lists.core"]["micro_intents"] == [
-            "lists.add_item",
-            "lists.get_items",
-        ]
+        assert "micro_enabled" not in by_id["skill.email.agent"]
+        assert "micro_intents" not in by_id["skill.lists.core"]
         assert all(
             "home.get_switch_state" not in item["intents"]
             and "home.list_switches" not in item["intents"]
@@ -199,25 +196,11 @@ def test_skill_registry_compiles_critical_skills_markdown():
         assert compiled_cached["status"] == "skipped"
         assert str(compiled_cached["source_hash"]) == first_hash
 
-        micro_output_path = scratch / "micro_jarvis_skills.md"
-        micro_compiled = registry.compile_micro_skills_markdown(
-            output_path=str(micro_output_path),
-            compile_if_stale=True,
-        )
-        assert micro_compiled["status"] == "ok"
-        micro_markdown = micro_output_path.read_text(encoding="utf-8")
-        assert "lists.add_item" in micro_markdown
-        assert "lists.get_items" in micro_markdown
-        micro_cached = registry.compile_micro_skills_markdown(
-            output_path=str(micro_output_path),
-            compile_if_stale=True,
-        )
-        assert micro_cached["status"] == "skipped"
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
 
 
-def test_skill_registry_sync_from_markdown_sets_micro_contract_and_learnable_flags():
+def test_skill_registry_sync_from_markdown_disables_legacy_classifier_contracts():
     data_root = (Path.cwd() / "data").resolve()
     data_root.mkdir(parents=True, exist_ok=True)
     scratch = data_root / f"jarvis-skill-sync-{uuid4().hex[:8]}"
@@ -240,11 +223,8 @@ def test_skill_registry_sync_from_markdown_sets_micro_contract_and_learnable_fla
         lists_skill = skills["skill.lists.core"]
         assert lists_skill["learnable_ready"] is True
         assert lists_skill["active"] is True
-        assert lists_skill["micro_enabled"] is True
-        assert isinstance(lists_skill["micro_functions"], list)
-        assert registry.is_micro_allowed_for_intent(skill=lists_skill, intent="lists.add_item") is True
-        assert registry.is_micro_allowed_for_intent(skill=lists_skill, intent="lists.get_items") is True
-        assert registry.is_micro_allowed_for_intent(skill=lists_skill, intent="lists.create_list") is False
+        assert lists_skill["micro_enabled"] is False
+        assert lists_skill["micro_functions"] == []
 
         private_notes = skills["skill.private_notes.digest"]
         assert private_notes["learnable_ready"] is True
@@ -325,9 +305,6 @@ def _write_typed_skill_markdown(root: Path, declarations: list[dict]) -> Path:
         "execution_ref": "app.skills.domains.lists.handler:run",
         "storage_type": "sql",
         "storage_ref": "fixture",
-        "micro_enabled": False,
-        "micro_functions": [],
-        "micro_failure_handoff": {},
         "main_handoff_context": {"always_pass_from_session": ["pending_clarification"]},
         "main_tools_contract_version": 1,
         "main_tools": declarations,
@@ -342,7 +319,6 @@ def _write_typed_skill_markdown(root: Path, declarations: list[dict]) -> Path:
         "Duplicate / Conflict Handling",
         "Storage Contract",
         "Failure Behavior",
-        "MicroJarvis Contract",
         "Main Handoff Context Contract",
         "Learnability Checklist",
     ]
@@ -679,14 +655,14 @@ def test_skill_registry_loads_compact_runtime_contract_for_model_prompt():
         shutil.rmtree(scratch, ignore_errors=True)
 
 
-def test_skill_registry_micro_boot_memory_is_slim_and_includes_micro_skills_bundle():
+def test_skill_registry_reads_but_does_not_activate_retired_boot_rows():
     data_root = (Path.cwd() / "data").resolve()
     data_root.mkdir(parents=True, exist_ok=True)
-    scratch = data_root / f"jarvis-micro-boot-{uuid4().hex[:8]}"
+    scratch = data_root / f"jarvis-retired-boot-{uuid4().hex[:8]}"
     scratch.mkdir(parents=True, exist_ok=True)
 
     try:
-        db_path = scratch / "micro-boot.db"
+        db_path = scratch / "retired-boot.db"
         store = SQLiteStore(database_path=str(db_path))
         registry = SkillRegistryService(sqlite_store=store, repo_root=str(Path.cwd()))
         registry.seed_defaults()
@@ -696,14 +672,6 @@ def test_skill_registry_micro_boot_memory_is_slim_and_includes_micro_skills_bund
         store.upsert_model_boot_memory(model_name="microj", doc_path="app/prompts/jarvis_loop.md", priority=7, required=True)
 
         docs = registry.load_model_boot_memory(model_name="microj", agent_id="jarvis")
-        paths = [str(item.get("doc_path") or "") for item in docs]
-        assert "app/prompts/microjarvis_identity.md" in paths
-        assert "app/prompts/microjarvis_capabilities.md" in paths
-        assert "app/prompts/micro_jarvis_skills.md" in paths
-        assert "app/prompts/jarvis_identity.md" not in paths
-        assert "app/prompts/jarvis_capabilities.md" not in paths
-        assert "app/prompts/jarvis_loop.md" not in paths
-        assert "app/prompts/agent_registry.md" not in paths
-        assert "app/prompts/jarvis_system.md" not in paths
+        assert docs == []
     finally:
         shutil.rmtree(scratch, ignore_errors=True)

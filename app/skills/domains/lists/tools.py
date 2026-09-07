@@ -18,6 +18,10 @@ LISTS_TYPED_TOOLS = frozenset(
         "lists.get_collection",
         "lists.create_collection",
         "lists.add_items",
+        "lists.update_item",
+        "lists.remove_items",
+        "lists.clear_collection",
+        "lists.delete_collection",
     }
 )
 _COLLECTION_REF_PREFIX = "collection_v1:"
@@ -58,6 +62,18 @@ class ListsToolHandler:
             if set(arguments) != {"name"}:
                 raise ToolArgumentCanonicalizationError("lists_collection_name_invalid")
             return {"name": self._collection_name(arguments.get("name"))}
+
+        if normalized_tool_id in {
+            "lists.update_item",
+            "lists.remove_items",
+            "lists.clear_collection",
+            "lists.delete_collection",
+        }:
+            return self._canonicalize_mutation(
+                tool_id=normalized_tool_id,
+                arguments=arguments,
+                owner_user_id=owner,
+            )
 
         limit = self._limit(arguments.get("limit", 100)) if normalized_tool_id == "lists.get_collection" else None
         selector = self._selector(arguments=arguments, owner_user_id=owner)
@@ -100,10 +116,21 @@ class ListsToolHandler:
                 return self._get_collection(owner_user_id=owner, arguments=arguments)
             if envelope.tool_id == "lists.create_collection":
                 return self._create_collection(owner_user_id=owner, arguments=arguments, envelope=envelope)
-            return self._add_items(owner_user_id=owner, arguments=arguments, envelope=envelope)
+            if envelope.tool_id == "lists.add_items":
+                return self._add_items(owner_user_id=owner, arguments=arguments, envelope=envelope)
+            return self._mutate_collection(
+                owner_user_id=owner,
+                arguments=arguments,
+                envelope=envelope,
+            )
         except ValueError as exc:
             code = str(exc).strip().casefold()
-            if code == "list_operation_id_conflict":
+            if code in {
+                "list_collection_not_authorized",
+                "list_collection_version_stale",
+                "list_item_not_authorized",
+                "list_operation_id_conflict",
+            }:
                 return self._denied(code)
             return {
                 "status": "error",
@@ -252,6 +279,142 @@ class ListsToolHandler:
             "committed_effect": not bool(result.get("idempotent_replay")),
         }
 
+    def _canonicalize_mutation(
+        self,
+        *,
+        tool_id: str,
+        arguments: dict[str, Any],
+        owner_user_id: str,
+    ) -> dict[str, Any]:
+        collection_ref = str(arguments.get("collection_ref") or "").strip()
+        record = self._record_for_ref(collection_ref, owner_user_id=owner_user_id)
+        if record is None:
+            raise ToolArgumentCanonicalizationError("lists_collection_not_authorized")
+        canonical_ref = self._collection_ref(str(record["list_id"]))
+        current_version = str(record.get("updated_at") or "").strip()
+        supplied_version = str(arguments.get("collection_version") or "").strip()
+        if supplied_version and supplied_version != current_version:
+            raise ToolArgumentCanonicalizationError("lists_collection_version_stale")
+
+        canonical: dict[str, Any] = {
+            "collection_ref": canonical_ref,
+            "collection_version": current_version,
+            "owner_scope": self._owner_scope(record, owner_user_id),
+        }
+        if tool_id in {"lists.clear_collection", "lists.delete_collection"}:
+            return canonical
+
+        entries = self._storage.list_item_entries(
+            owner_user_id=str(record["owner_user_id"]),
+            list_name=str(record["list_name_normalized"]),
+        )
+        by_id = {str(item.get("item_id") or ""): item for item in entries}
+        raw_refs = (
+            [arguments.get("item_ref")]
+            if tool_id == "lists.update_item"
+            else arguments.get("item_refs")
+        )
+        if not isinstance(raw_refs, (list, tuple)):
+            raise ToolArgumentCanonicalizationError("lists_item_references_invalid")
+        item_ids: list[str] = []
+        for raw_ref in raw_refs:
+            item_id = self._parse_item_ref(str(raw_ref or ""))
+            if item_id not in by_id:
+                raise ToolArgumentCanonicalizationError("lists_item_not_authorized")
+            if item_id in item_ids:
+                raise ToolArgumentCanonicalizationError("lists_duplicate_item_reference")
+            item_ids.append(item_id)
+        if not 1 <= len(item_ids) <= 50:
+            raise ToolArgumentCanonicalizationError("lists_item_references_invalid")
+        item_refs = [self._item_ref(item_id) for item_id in sorted(item_ids)]
+        if tool_id == "lists.remove_items":
+            canonical["item_refs"] = item_refs
+            return canonical
+
+        patch = arguments.get("patch")
+        if not isinstance(patch, Mapping) or not patch or set(patch) - {"text", "checked"}:
+            raise ToolArgumentCanonicalizationError("lists_item_patch_invalid")
+        canonical_patch: dict[str, Any] = {}
+        if "text" in patch:
+            text = str(patch.get("text") or "").strip()
+            if not text or len(text) > 500:
+                raise ToolArgumentCanonicalizationError("lists_item_text_invalid")
+            canonical_patch["text"] = text
+        if "checked" in patch:
+            if not isinstance(patch.get("checked"), bool):
+                raise ToolArgumentCanonicalizationError("lists_item_checked_invalid")
+            canonical_patch["checked"] = bool(patch["checked"])
+        canonical["item_ref"] = item_refs[0]
+        canonical["patch"] = canonical_patch
+        return canonical
+
+    def _mutate_collection(
+        self,
+        *,
+        owner_user_id: str,
+        arguments: dict[str, Any],
+        envelope: ToolCallEnvelope,
+    ) -> dict[str, Any]:
+        collection_ref = str(arguments.get("collection_ref") or "")
+        list_id = self._parse_collection_ref(collection_ref)
+        owner_scope = str(arguments.get("owner_scope") or "").strip().casefold()
+        if owner_scope not in {"personal", "shared"}:
+            return self._denied("lists_collection_owner_scope_invalid")
+        effective_owner = owner_user_id if owner_scope == "personal" else "all"
+        expected_version = str(arguments.get("collection_version") or "").strip()
+        if not expected_version:
+            return self._denied("lists_collection_version_stale")
+
+        item_refs = (
+            [arguments.get("item_ref")]
+            if envelope.tool_id == "lists.update_item"
+            else arguments.get("item_refs") or []
+        )
+        item_ids = [self._parse_item_ref(str(ref or "")) for ref in item_refs]
+        patch = dict(arguments.get("patch") or {})
+        result = self._storage.mutate_collection(
+            owner_user_id=effective_owner,
+            list_id=list_id,
+            action=envelope.tool_id,
+            item_ids=item_ids,
+            patch=patch,
+            expected_version=expected_version,
+            timestamp=_utc_now(),
+            operation_id=envelope.operation_id,
+            arguments_hash=envelope.arguments_hash,
+        )
+        replay = bool(result.get("idempotent_replay"))
+        payload: dict[str, Any] = {
+            "collection_ref": self._collection_ref(list_id),
+            "collection_version": str(result.get("collection_version") or expected_version),
+            "changed": bool(result.get("changed")),
+            "idempotent_replay": replay,
+        }
+        if envelope.tool_id == "lists.update_item":
+            payload["item"] = self._item(result.get("item") or {})
+        elif envelope.tool_id == "lists.remove_items":
+            payload["removed_items"] = [
+                self._item(item) for item in result.get("removed_items") or []
+            ]
+            payload["remaining_item_count"] = int(result.get("remaining_item_count") or 0)
+        elif envelope.tool_id == "lists.clear_collection":
+            payload["removed_item_count"] = int(result.get("removed_item_count") or 0)
+        else:
+            payload["deleted_item_count"] = int(result.get("deleted_item_count") or 0)
+            payload["deleted"] = bool(result.get("deleted"))
+        return {
+            "status": "ok",
+            "message": {
+                "lists.update_item": "Updated the selected list item.",
+                "lists.remove_items": "Removed the selected list item(s).",
+                "lists.clear_collection": "Cleared the selected list collection.",
+                "lists.delete_collection": "Deleted the selected list collection.",
+            }[envelope.tool_id],
+            "payload": payload,
+            "receipt_id": self._receipt_ref(envelope.operation_id),
+            "committed_effect": bool(result.get("changed")) and not replay,
+        }
+
     def _selector(self, *, arguments: dict[str, Any], owner_user_id: str) -> dict[str, str]:
         collection_ref = str(arguments.get("collection_ref") or "").strip()
         name = str(arguments.get("name") or "").strip()
@@ -383,6 +546,23 @@ class ListsToolHandler:
         if not list_id or len(list_id) > 200 or any(char.isspace() for char in list_id):
             raise ToolArgumentCanonicalizationError("lists_collection_ref_invalid")
         return list_id
+
+    @staticmethod
+    def _item_ref(item_id: str) -> str:
+        cleaned = str(item_id or "").strip()
+        if not cleaned or len(cleaned) > 200:
+            raise ValueError("list_item_ref_invalid")
+        return _ITEM_REF_PREFIX + cleaned
+
+    @staticmethod
+    def _parse_item_ref(value: str) -> str:
+        cleaned = str(value or "").strip()
+        if not cleaned.startswith(_ITEM_REF_PREFIX):
+            raise ToolArgumentCanonicalizationError("lists_item_ref_invalid")
+        item_id = cleaned[len(_ITEM_REF_PREFIX) :]
+        if not item_id or len(item_id) > 200 or any(char.isspace() for char in item_id):
+            raise ToolArgumentCanonicalizationError("lists_item_ref_invalid")
+        return item_id
 
     @staticmethod
     def _receipt_ref(operation_id: str) -> str:

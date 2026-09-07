@@ -5,6 +5,11 @@ from typing import Any
 from datetime import timedelta
 
 from app.context.serialization import deserialize_session_context, serialize_session_context
+from app.tickets.async_receipts import (
+    EffectManifestReservation,
+    TicketEffectManifestReservation,
+    reduce_ticket_effects,
+)
 from app.tickets.eligibility import ticket_is_eligible
 from app.tickets.repository import TicketRepository, content_hash
 from app.tickets.types import TicketEntryType, TicketStatus, iso_utc, utc_now
@@ -47,65 +52,67 @@ class ActionTicketService:
         return self._repository
 
     def replay_response(self, request_id: str) -> dict[str, Any] | None:
-        """Return the persisted outcome for an already-seen external request ID."""
+        """Reconstruct an already-seen request from durable effect truth only."""
         if not self._enabled:
             return None
         ticket = self._repository.get_ticket_by_request_id(str(request_id or "").strip())
         if ticket is None:
             return None
-        entries = self._repository.list_entries(str(ticket["ticket_id"]))
-        assistant_entry = next(
-            (
-                item
-                for item in reversed(entries)
-                if item.get("entry_type")
-                in {
-                    TicketEntryType.ASSISTANT_RESPONSE.value,
-                    TicketEntryType.ASSISTANT_CLARIFICATION.value,
-                }
-            ),
-            None,
-        )
-        classification_entry = next(
-            (
-                item
-                for item in reversed(entries)
-                if item.get("entry_type")
-                in {
-                    TicketEntryType.MAIN_REPAIR_DECISION.value,
-                    TicketEntryType.MICRO_DECISION.value,
-                }
-            ),
-            None,
-        )
-        structured = (
-            assistant_entry.get("structured_payload")
-            if isinstance(assistant_entry, dict)
-            and isinstance(assistant_entry.get("structured_payload"), dict)
+        ticket_id = str(ticket["ticket_id"])
+        receipts = self._repository.list_receipts(ticket_id)
+        latest = receipts[-1] if receipts else None
+        intent = str(ticket.get("intent") or "")
+        result = (
+            dict(self.strip_internal_fields(latest.get("result") or {}))
+            if isinstance(latest, dict) and isinstance(latest.get("result"), dict)
             else {}
         )
-        result = structured.get("result") if isinstance(structured.get("result"), dict) else {}
-        dialog = structured.get("dialog") if isinstance(structured.get("dialog"), dict) else {}
-        if not result:
-            receipt = self._repository.get_latest_receipt(str(ticket["ticket_id"]))
-            if receipt and isinstance(receipt.get("result"), dict):
-                result = dict(receipt["result"])
-        if not result:
-            result = {
-                "status": "processing",
-                "message": "This request was already accepted and is still being reconciled.",
+        if intent.startswith(("email.", "documents.", "private_notes.")):
+            result = {}
+        try:
+            aggregate = reduce_ticket_effects(self._repository, ticket_id)
+        except (KeyError, TypeError, ValueError):
+            aggregate = {
+                "status": "queued",
+                "reason": "effect_reducer_conflict",
             }
-        result = dict(self.strip_internal_fields(result))
+        if aggregate["status"] in {"queued", "partial", "failed"}:
+            result = {
+                "status": aggregate["status"],
+                "reason": aggregate["reason"],
+                "message": "This replay reflects an incomplete or no-effect durable outcome.",
+            }
+        elif not result:
+            result = {
+                "status": (
+                    aggregate["status"]
+                    if aggregate["status"] != "no_manifest"
+                    else str(ticket.get("status") or "processing")
+                ),
+                "message": "This request was already accepted; this replay reflects durable records.",
+            }
+        validators = {str(item.get("validator_name") or "") for item in receipts}
+        if "home.sqlite_simulated" in validators:
+            result["truth_scope"] = "simulated_state_only_not_physical_device_truth"
+        elif intent.startswith("calendar.") and not receipts:
+            result["truth_scope"] = "local_calendar_unverifiable"
+        result["receipt_refs"] = [str(item["operation_id"]) for item in receipts]
         result["idempotent_replay"] = True
         return {
             "ticket": ticket,
             "result": result,
-            "dialog": dict(dialog),
-            "assistant_text": str((assistant_entry or {}).get("verbatim_text") or ""),
-            "classification": dict(
-                (classification_entry or {}).get("structured_payload") or {}
-            ),
+            "dialog": {"turn_complete": True, "mode": "durable_replay"},
+            "assistant_text": "This replay was reconstructed from durable execution records.",
+            "classification": {
+                "intent": intent,
+                "skill_id": ticket.get("skill_id"),
+                "route": ticket.get("route"),
+                "source": "durable_ticket",
+            },
         }
+
+    def effect_manifest_reservation(self) -> EffectManifestReservation:
+        return TicketEffectManifestReservation(self._repository)
 
     def _enqueue_plane(self, ticket_id: str) -> None:
         if not self._plane_enabled:
@@ -368,13 +375,7 @@ class ActionTicketService:
             dedupe_key=f"ticket:{ticket_id}:request:{request_id}:user",
         )
 
-        classification_type = (
-            TicketEntryType.MAIN_REPAIR_DECISION.value
-            if route == "main_jarvis_repair"
-            or classification.get("recovered_from") is not None
-            or classification.get("repair_status") is not None
-            else TicketEntryType.MICRO_DECISION.value
-        )
+        classification_type = TicketEntryType.ROUTING_DECISION.value
         self._repository.append_entry(
             ticket_id=ticket_id,
             request_id=request_id,
@@ -458,7 +459,10 @@ class ActionTicketService:
             structured_payload={"status": status, "result": public_result},
             dedupe_key=f"ticket:{ticket_id}:request:{request_id}:execution-completed",
         )
-        recorded_receipts: list[dict[str, Any]] = []
+        recorded_receipts = self._repository.list_receipts(ticket_id)
+        known_operation_ids = {
+            str(item.get("operation_id") or "") for item in recorded_receipts
+        }
         for receipt in receipts:
             required = {
                 "operation_id",
@@ -474,32 +478,36 @@ class ActionTicketService:
             }
             if not required.issubset(receipt):
                 continue
-            recorded = self._repository.record_operation_receipt(ticket_id=ticket_id, receipt=receipt)
-            recorded_receipts.append(recorded)
-            self._repository.create_expectation(
-                ticket_id=ticket_id,
-                operation_id=str(recorded["operation_id"]),
-                capability=str(recorded["capability"]),
-                validator_name=str(recorded["validator_name"]),
-                validator_version=str(recorded["validator_version"]),
-                resource_locator=dict(recorded.get("resource_locator") or {}),
-                expected_state=dict(recorded.get("expected_effect") or {}),
-                source_revision_at_execution=(
-                    str(recorded.get("provider_revision"))
-                    if recorded.get("provider_revision") is not None
-                    else None
-                ),
-            )
-            self._repository.append_entry(
+            completion = self._repository.record_operation_completion_atomic(
                 ticket_id=ticket_id,
                 request_id=request_id,
-                entry_type=TicketEntryType.OPERATION_RECEIPT.value,
-                actor_type="domain",
-                structured_payload=self.strip_internal_fields(recorded),
-                dedupe_key=f"ticket:{ticket_id}:operation:{recorded['operation_id']}",
+                receipt=receipt,
             )
+            recorded = dict(completion["receipt"])
+            if str(recorded.get("operation_id") or "") not in known_operation_ids:
+                recorded_receipts.append(recorded)
+                known_operation_ids.add(str(recorded.get("operation_id") or ""))
 
-        if recorded_receipts:
+        try:
+            effect_aggregate = reduce_ticket_effects(self._repository, ticket_id)
+        except (KeyError, TypeError, ValueError):
+            effect_aggregate = {
+                "status": "queued",
+                "reason": "effect_reducer_conflict",
+            }
+        if effect_aggregate["status"] in {"queued", "partial", "failed"}:
+            aggregate_status = str(effect_aggregate["status"])
+            updated = self._repository.transition_ticket(
+                ticket_id=ticket_id,
+                status=(
+                    TicketStatus.ESCALATED
+                    if aggregate_status == "failed"
+                    else TicketStatus.RECONCILIATION_REQUIRED
+                ),
+                completed_at=iso_utc(),
+                terminal_reason=str(effect_aggregate["reason"]),
+            )
+        elif recorded_receipts:
             resource_keys = sorted({str(item["resource_key"]) for item in recorded_receipts})
             source_revision = content_hash(
                 [

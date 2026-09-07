@@ -35,6 +35,7 @@ class ResearchOutcome:
     reason: str
     results: list[SearchResult] = field(default_factory=list)
     error_code: str | None = None
+    safe_search: int | None = None
 
     def prompt_payload(self) -> dict[str, Any]:
         return {

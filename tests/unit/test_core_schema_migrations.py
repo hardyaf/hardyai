@@ -111,10 +111,43 @@ def _version10_email_operation_database(path: Path) -> None:
     connection = sqlite3.connect(path)
     try:
         connection.execute(
-            "CREATE TABLE email_messages (gmail_message_id TEXT PRIMARY KEY)"
+            """
+            CREATE TABLE email_messages (
+                gmail_message_id TEXT PRIMARY KEY,
+                gmail_thread_id TEXT NOT NULL,
+                rfc_message_id TEXT,
+                source_route_key TEXT NOT NULL,
+                gmail_history_id TEXT NOT NULL,
+                internal_date INTEGER NOT NULL,
+                sender_name TEXT,
+                sender_email TEXT,
+                recipient_headers_json TEXT NOT NULL DEFAULT '[]',
+                subject TEXT NOT NULL,
+                snippet TEXT NOT NULL,
+                gmail_label_ids_json TEXT NOT NULL DEFAULT '[]',
+                attachment_metadata_json TEXT NOT NULL DEFAULT '[]',
+                canonical_body_hash TEXT NOT NULL,
+                list_id TEXT,
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                content_changed_at TEXT
+            )
+            """
         )
         migrations_module._migration_010_email_managed_label_operations(connection)
-        connection.execute("INSERT INTO email_messages VALUES ('message-existing')")
+        connection.execute(
+            """
+            INSERT INTO email_messages(
+                gmail_message_id, gmail_thread_id, source_route_key, gmail_history_id,
+                internal_date, subject, snippet, canonical_body_hash,
+                first_seen_at, last_seen_at
+            ) VALUES (
+                'message-existing', 'thread-existing', 'work', '1', 1,
+                'Subject', 'Snippet', 'body-hash',
+                '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z'
+            )
+            """
+        )
         connection.execute(
             """
             INSERT INTO email_tool_operations (
@@ -145,6 +178,65 @@ def _version10_email_operation_database(path: Path) -> None:
             """
         )
         connection.execute("PRAGMA user_version = 10")
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _version11_email_operation_database(path: Path) -> None:
+    _version10_email_operation_database(path)
+    connection = sqlite3.connect(path)
+    try:
+        migrations_module._migration_011_email_reversible_mailbox_state(connection)
+        connection.execute("PRAGMA user_version = 11")
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _version12_home_database(path: Path) -> None:
+    _version11_email_operation_database(path)
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute(
+            "CREATE TABLE switches (name TEXT PRIMARY KEY, room_name TEXT, state TEXT NOT NULL, updated_at TEXT NOT NULL)"
+        )
+        connection.execute(
+            """
+            CREATE TABLE switch_actions_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                switch_name TEXT NOT NULL,
+                action TEXT NOT NULL,
+                state_after TEXT NOT NULL,
+                source_interface TEXT,
+                requested_by_user_id TEXT
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO switches VALUES ('office light', NULL, 'off', '2026-09-01T00:00:00Z')"
+        )
+        connection.execute(
+            """
+            INSERT INTO switch_actions_log (
+                timestamp, switch_name, action, state_after, source_interface, requested_by_user_id
+            ) VALUES ('2026-09-01T00:00:00Z', 'office light', 'off', 'off', 'test', 'operator')
+            """
+        )
+        migrations_module._migration_012_action_approval_proposals(connection)
+        connection.execute("PRAGMA user_version = 12")
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _version13_email_database(path: Path) -> None:
+    _version12_home_database(path)
+    connection = sqlite3.connect(path)
+    try:
+        migrations_module._migration_013_home_operation_idempotency(connection)
+        connection.execute("PRAGMA user_version = 13")
         connection.commit()
     finally:
         connection.close()
@@ -189,18 +281,18 @@ def test_current_core_schema_initializes_at_reader_version(tmp_path: Path) -> No
     connection = sqlite3.connect(tmp_path / "current.db")
     connection.row_factory = sqlite3.Row
     try:
-        assert initialize_schema(connection) == LATEST_SCHEMA_VERSION == 11
+        assert initialize_schema(connection) == LATEST_SCHEMA_VERSION == 14
         assert evaluate_schema_reader_compatibility(connection).compatible is True
     finally:
         connection.close()
 
 
-def test_fresh_version11_schema_has_typed_tools_and_operation_ledgers(tmp_path: Path) -> None:
-    path = tmp_path / "fresh-v11.db"
+def test_fresh_version14_schema_has_typed_tools_and_operation_ledgers(tmp_path: Path) -> None:
+    path = tmp_path / "fresh-v14.db"
     connection = sqlite3.connect(path)
     connection.row_factory = sqlite3.Row
     try:
-        assert initialize_schema(connection) == 11
+        assert initialize_schema(connection) == LATEST_SCHEMA_VERSION
         assert {"main_tools_json", "main_tools_contract_version"}.issubset(
             _column_names(connection, "skills")
         )
@@ -212,12 +304,45 @@ def test_fresh_version11_schema_has_typed_tools_and_operation_ledgers(tmp_path: 
             """
         ).fetchone()) == (7, "additive")
         assert tuple(connection.execute(
+            "SELECT minimum_reader_version, change_class FROM schema_reader_compatibility "
+            "WHERE schema_version = 14"
+        ).fetchone()) == (7, "additive")
+        assert {"idempotency_key", "operation_identity_hash", "parent_manifest_hash"}.issubset(
+            _column_names(connection, "email_tool_operations")
+        )
+        assert {"parent_operation_id", "parent_manifest_hash", "child_index", "arguments_hash"}.issubset(
+            _column_names(connection, "email_mailbox_operations")
+        )
+        assert tuple(connection.execute(
+            """
+            SELECT minimum_reader_version, change_class
+            FROM schema_reader_compatibility
+            WHERE schema_version = 13
+            """
+        ).fetchone()) == (7, "additive")
+        assert {"operation_id", "arguments_hash"}.issubset(
+            _column_names(connection, "switch_actions_log")
+        )
+        assert connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_switch_actions_operation_id'"
+        ).fetchone() is not None
+        assert tuple(connection.execute(
             """
             SELECT minimum_reader_version, change_class
             FROM schema_reader_compatibility
             WHERE schema_version = 11
             """
         ).fetchone()) == (10, "additive")
+        assert tuple(connection.execute(
+            """
+            SELECT minimum_reader_version, change_class
+            FROM schema_reader_compatibility
+            WHERE schema_version = 12
+            """
+        ).fetchone()) == (7, "additive")
+        assert connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='action_proposals'"
+        ).fetchone() is not None
         for table in (
             "email_managed_labels",
             "email_message_managed_labels",
@@ -255,7 +380,7 @@ def test_populated_version7_upgrade_is_additive_and_idempotent(tmp_path: Path) -
     connection = sqlite3.connect(path)
     connection.row_factory = sqlite3.Row
     try:
-        assert initialize_schema(connection) == 11
+        assert initialize_schema(connection) == LATEST_SCHEMA_VERSION
         row = connection.execute(
             """
             SELECT skill_id, main_tools_json, main_tools_contract_version
@@ -266,7 +391,7 @@ def test_populated_version7_upgrade_is_additive_and_idempotent(tmp_path: Path) -
         assert evaluate_schema_reader_compatibility(connection, reader_version=10).reason == (
             "additive_reader_bridge"
         )
-        assert initialize_schema(connection) == 11
+        assert initialize_schema(connection) == LATEST_SCHEMA_VERSION
         assert connection.execute(
             "SELECT COUNT(*) FROM schema_reader_compatibility WHERE schema_version = 8"
         ).fetchone()[0] == 1
@@ -278,6 +403,12 @@ def test_populated_version7_upgrade_is_additive_and_idempotent(tmp_path: Path) -
         ).fetchone()[0] == 1
         assert connection.execute(
             "SELECT COUNT(*) FROM schema_reader_compatibility WHERE schema_version = 11"
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM schema_reader_compatibility WHERE schema_version = 12"
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM schema_reader_compatibility WHERE schema_version = 13"
         ).fetchone()[0] == 1
     finally:
         connection.close()
@@ -322,7 +453,7 @@ def test_migration8_rolls_back_every_step_and_retries_cleanly(
         ).fetchone() is None
 
         monkeypatch.setattr(migrations_module, "_MIGRATION_STEP_HOOK", None)
-        assert initialize_schema(connection) == 11
+        assert initialize_schema(connection) == LATEST_SCHEMA_VERSION
         assert {"main_tools_json", "main_tools_contract_version"}.issubset(
             _column_names(connection, "skills")
         )
@@ -366,7 +497,7 @@ def test_migration9_rolls_back_every_step_and_retries_cleanly(
         ).fetchone()[0] == 0
 
         monkeypatch.setattr(migrations_module, "_MIGRATION_STEP_HOOK", None)
-        assert initialize_schema(connection) == 11
+        assert initialize_schema(connection) == LATEST_SCHEMA_VERSION
         assert connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='list_operations'"
         ).fetchone() is not None
@@ -412,7 +543,7 @@ def test_migration10_rolls_back_every_step_and_retries_cleanly(
         ).fetchone()[0] == 0
 
         monkeypatch.setattr(migrations_module, "_MIGRATION_STEP_HOOK", None)
-        assert initialize_schema(connection) == 11
+        assert initialize_schema(connection) == LATEST_SCHEMA_VERSION
         assert connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='email_tool_operations'"
         ).fetchone() is not None
@@ -461,7 +592,7 @@ def test_migration11_preserves_email_operations_and_rolls_back_every_step(
         assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
 
         monkeypatch.setattr(migrations_module, "_MIGRATION_STEP_HOOK", None)
-        assert initialize_schema(connection) == 11
+        assert initialize_schema(connection) == LATEST_SCHEMA_VERSION
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
         assert connection.execute(
             "SELECT COUNT(*) FROM schema_reader_compatibility WHERE schema_version=11"
@@ -505,7 +636,7 @@ def test_version10_reader_accepts_additive_version11_bridge(tmp_path: Path) -> N
     connection = sqlite3.connect(path)
     connection.row_factory = sqlite3.Row
     try:
-        assert initialize_schema(connection) == 11
+        assert initialize_schema(connection) == LATEST_SCHEMA_VERSION
         decision = evaluate_schema_reader_compatibility(connection, reader_version=10)
         assert decision.compatible is True
         assert decision.reason == "additive_reader_bridge"
@@ -521,23 +652,176 @@ def test_version10_reader_accepts_additive_version11_bridge(tmp_path: Path) -> N
         connection.close()
 
 
+@pytest.mark.parametrize(
+    "failure_step",
+    ["create_action_proposals", "record_reader_compatibility", "set_user_version"],
+)
+def test_migration12_is_atomic_preserves_rows_and_reopens_idempotently(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_step: str,
+) -> None:
+    path = tmp_path / f"action-approval-atomic-{failure_step}.db"
+    _version11_email_operation_database(path)
+    connection = sqlite3.connect(path)
+    connection.row_factory = sqlite3.Row
+
+    def fail_after_step(version: int, step: str) -> None:
+        if version == 12 and step == failure_step:
+            raise RuntimeError(f"injected failure after {step}")
+
+    monkeypatch.setattr(migrations_module, "_MIGRATION_STEP_HOOK", fail_after_step)
+    try:
+        with pytest.raises(RuntimeError, match="injected failure"):
+            initialize_schema(connection)
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 11
+        assert connection.execute(
+            "SELECT tool_id FROM email_tool_operations WHERE operation_id='operation-existing'"
+        ).fetchone()[0] == "email.apply_labels"
+        assert connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='action_proposals'"
+        ).fetchone() is None
+
+        monkeypatch.setattr(migrations_module, "_MIGRATION_STEP_HOOK", None)
+        assert initialize_schema(connection) == 14
+        assert initialize_schema(connection) == 14
+        assert connection.execute(
+            "SELECT COUNT(*) FROM schema_reader_compatibility WHERE schema_version=12"
+        ).fetchone()[0] == 1
+        required = {
+            "proposal_id",
+            "review_id",
+            "destination_arguments_json",
+            "batch_manifest_json",
+            "batch_manifest_hash",
+            "transfer_manifest_json",
+            "transfer_binding_hash",
+            "outcome_guild_id",
+            "outcome_channel_id",
+            "outcome_message_id",
+        }
+        assert required.issubset(_column_names(connection, "action_proposals"))
+        assert connection.execute(
+            "SELECT tool_id FROM email_tool_operations WHERE operation_id='operation-existing'"
+        ).fetchone()[0] == "email.apply_labels"
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize(
+    "failure_step",
+    [
+        "add_switch_operation_id",
+        "add_switch_arguments_hash",
+        "create_switch_operation_index",
+        "record_reader_compatibility",
+        "set_user_version",
+    ],
+)
+def test_migration13_is_atomic_preserves_home_rows_and_retries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_step: str,
+) -> None:
+    path = tmp_path / f"home-operation-atomic-{failure_step}.db"
+    _version12_home_database(path)
+    connection = sqlite3.connect(path)
+    connection.row_factory = sqlite3.Row
+
+    def fail_after_step(version: int, step: str) -> None:
+        if version == 13 and step == failure_step:
+            raise RuntimeError(f"injected failure after {step}")
+
+    monkeypatch.setattr(migrations_module, "_MIGRATION_STEP_HOOK", fail_after_step)
+    try:
+        with pytest.raises(RuntimeError, match="injected failure"):
+            initialize_schema(connection)
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 12
+        assert connection.execute(
+            "SELECT state FROM switches WHERE name='office light'"
+        ).fetchone()[0] == "off"
+        assert connection.execute("SELECT COUNT(*) FROM switch_actions_log").fetchone()[0] == 1
+
+        monkeypatch.setattr(migrations_module, "_MIGRATION_STEP_HOOK", None)
+        assert initialize_schema(connection) == 14
+        assert initialize_schema(connection) == 14
+        assert {"operation_id", "arguments_hash"}.issubset(
+            _column_names(connection, "switch_actions_log")
+        )
+        legacy = connection.execute(
+            "SELECT operation_id, arguments_hash FROM switch_actions_log"
+        ).fetchone()
+        assert tuple(legacy) == (None, None)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM schema_reader_compatibility WHERE schema_version=13"
+        ).fetchone()[0] == 1
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize(
+    "failure_step",
+    ["ensure_email_schema", "add_mailbox_parent_manifest_hash", "set_user_version"],
+)
+def test_migration14_is_atomic_preserves_p5f_rows_and_retries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_step: str,
+) -> None:
+    path = tmp_path / f"email-p8d-atomic-{failure_step}.db"
+    _version13_email_database(path)
+    connection = sqlite3.connect(path)
+    connection.row_factory = sqlite3.Row
+
+    def fail_after_step(version: int, step: str) -> None:
+        if version == 14 and step == failure_step:
+            raise RuntimeError("injected migration14 failure")
+
+    monkeypatch.setattr(migrations_module, "_MIGRATION_STEP_HOOK", fail_after_step)
+    try:
+        with pytest.raises(RuntimeError, match="migration14"):
+            initialize_schema(connection)
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 13
+        assert connection.execute(
+            "SELECT tool_id FROM email_tool_operations WHERE operation_id='operation-existing'"
+        ).fetchone()[0] == "email.apply_labels"
+
+        monkeypatch.setattr(migrations_module, "_MIGRATION_STEP_HOOK", None)
+        assert initialize_schema(connection) == 14
+        assert initialize_schema(connection) == 14
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        parent = connection.execute(
+            "SELECT tool_id, idempotency_key, parent_manifest_hash "
+            "FROM email_tool_operations WHERE operation_id='operation-existing'"
+        ).fetchone()
+        assert tuple(parent) == ("email.apply_labels", None, None)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM schema_reader_compatibility WHERE schema_version=14"
+        ).fetchone()[0] == 1
+    finally:
+        connection.close()
+
+
 def test_p1_reader_accepts_complete_additive_newer_chain_without_migration(tmp_path: Path) -> None:
     path = tmp_path / "newer.db"
     _newer_database(
         path,
-        version=11,
+        version=14,
         rows=(
             (8, 7, "additive"),
             (9, 7, "additive"),
             (10, 7, "additive"),
             (11, 10, "additive"),
+            (12, 7, "additive"),
+            (13, 7, "additive"),
+            (14, 7, "additive"),
         ),
     )
     connection = sqlite3.connect(path)
     connection.row_factory = sqlite3.Row
     try:
-        assert initialize_schema(connection) == 11
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 11
+        assert initialize_schema(connection) == LATEST_SCHEMA_VERSION
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 14
         assert connection.execute("SELECT value FROM canary").fetchone()[0] == "unchanged"
     finally:
         connection.close()

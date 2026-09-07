@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -44,6 +45,717 @@ class GoogleCalendarLiveService:
         except Exception:
             return None
         return timezone_name
+
+    def canonicalize_typed_write(
+        self,
+        *,
+        tool_id: str,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Resolve provider-owned refs/revisions before tool-operation hashing."""
+
+        normalized_tool = str(tool_id or "").strip().casefold()
+        if normalized_tool not in {
+            "calendar.create_event",
+            "calendar.create_event_with_invites",
+            "calendar.update_event",
+            "calendar.delete_event",
+        }:
+            raise ValueError("calendar_tool_unsupported")
+        config = self._load_permissions()
+        calendar_cfg = config.get("calendar") or {}
+        bindings = self._calendar_bindings(calendar_cfg)
+        requested_scope = str(arguments.get("calendar_scope") or "").strip()
+        binding, candidates, _ = self._resolve_query_binding(
+            calendar_scope=requested_scope,
+            bindings=bindings,
+            config=config,
+            calendar_cfg=calendar_cfg,
+        )
+        if binding is None:
+            raise ValueError(
+                "calendar_scope_ambiguous" if candidates else "calendar_scope_not_authorized"
+            )
+        timezone_name = str(calendar_cfg.get("default_timezone") or "UTC").strip() or "UTC"
+        try:
+            ZoneInfo(timezone_name)
+        except Exception as exc:
+            raise ValueError("calendar_timezone_invalid") from exc
+        requested_timezone = str(arguments.get("timezone") or "").strip()
+        if requested_timezone and requested_timezone != timezone_name:
+            raise ValueError("calendar_timezone_stale")
+        calendar_ref = self._calendar_ref(binding.calendar_id)
+        calendar_version = self._calendar_resource_version(
+            binding=binding,
+            timezone_name=timezone_name,
+        )
+        supplied_ref = str(arguments.get("calendar_ref") or "").strip()
+        supplied_version = str(arguments.get("resource_version") or "").strip()
+        if supplied_ref and supplied_ref != calendar_ref:
+            raise ValueError("calendar_target_changed")
+        canonical = dict(arguments)
+        canonical.update(
+            {
+                "calendar_scope": binding.person_name,
+                "calendar_ref": calendar_ref,
+                "timezone": timezone_name,
+            }
+        )
+        if normalized_tool in {"calendar.create_event", "calendar.create_event_with_invites"}:
+            if supplied_version and supplied_version != calendar_version:
+                raise ValueError("calendar_resource_version_stale")
+            canonical["resource_version"] = calendar_version
+            return canonical
+
+        service = self._authorized_calendar_service(
+            config=config,
+            binding=binding,
+            include_write=True,
+        )
+        current = self._resolve_typed_event(
+            service=service,
+            binding=binding,
+            event_ref=str(arguments.get("event_ref") or ""),
+            event_start=str(arguments.get("event_start") or ""),
+            timezone_name=timezone_name,
+        )
+        current_version = self._event_resource_version(str(current.get("etag") or ""))
+        if supplied_version and supplied_version != current_version:
+            raise ValueError("calendar_event_revision_stale")
+        canonical["resource_version"] = current_version
+        return canonical
+
+    def execute_typed_create(
+        self,
+        *,
+        operation_id: str,
+        arguments_hash: str,
+        arguments: dict[str, Any],
+        include_invites: bool,
+    ) -> dict[str, Any]:
+        try:
+            binding, timezone_name, service = self._typed_runtime(arguments)
+            event_id = self.typed_event_id(operation_id)
+            body = self._typed_create_body(
+                event_id=event_id,
+                operation_id=operation_id,
+                arguments_hash=arguments_hash,
+                arguments=arguments,
+                include_invites=include_invites,
+            )
+            try:
+                created = (
+                    service.events()
+                    .insert(
+                        calendarId=binding.calendar_id,
+                        body=body,
+                        sendUpdates="all" if include_invites else "none",
+                    )
+                    .execute()
+                )
+            except Exception as exc:
+                return self._reconcile_typed_create(
+                    service=service,
+                    binding=binding,
+                    timezone_name=timezone_name,
+                    event_id=event_id,
+                    expected=body,
+                    operation_id=operation_id,
+                    arguments_hash=arguments_hash,
+                    original_error=exc,
+                )
+            if not isinstance(created, dict) or not self._typed_event_matches(
+                created,
+                expected=body,
+                operation_id=operation_id,
+                arguments_hash=arguments_hash,
+            ):
+                return self._reconcile_typed_create(
+                    service=service,
+                    binding=binding,
+                    timezone_name=timezone_name,
+                    event_id=event_id,
+                    expected=body,
+                    operation_id=operation_id,
+                    arguments_hash=arguments_hash,
+                    original_error=RuntimeError("calendar_insert_response_uncertain"),
+                )
+            return self._typed_success(
+                event=created,
+                binding=binding,
+                timezone_name=timezone_name,
+                operation_id=operation_id,
+                action="created",
+            )
+        except ValueError as exc:
+            return self._typed_denied(str(exc))
+        except Exception as exc:
+            return self._typed_retryable(type(exc).__name__)
+
+    def execute_typed_update(
+        self,
+        *,
+        operation_id: str,
+        arguments_hash: str,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        try:
+            binding, timezone_name, service = self._typed_runtime(arguments)
+            current = self._resolve_typed_event(
+                service=service,
+                binding=binding,
+                event_ref=str(arguments.get("event_ref") or ""),
+                event_start=str(arguments.get("event_start") or ""),
+                timezone_name=timezone_name,
+            )
+            revision = str(current.get("etag") or "")
+            if self._event_resource_version(revision) != str(
+                arguments.get("resource_version") or ""
+            ):
+                return self._typed_denied("calendar_event_revision_stale")
+            patch = dict(arguments.get("patch") or {})
+            body = self._typed_update_body(
+                current=current,
+                patch=patch,
+                timezone_name=timezone_name,
+                operation_id=operation_id,
+                arguments_hash=arguments_hash,
+            )
+            event_id = str(current.get("id") or "")
+            try:
+                request = service.events().patch(
+                    calendarId=binding.calendar_id,
+                    eventId=event_id,
+                    body=body,
+                    sendUpdates="none",
+                )
+                updated = self._execute_conditional(request, revision=revision)
+            except Exception as exc:
+                return self._reconcile_typed_update(
+                    service=service,
+                    binding=binding,
+                    timezone_name=timezone_name,
+                    event_id=event_id,
+                    expected=body,
+                    original_revision=revision,
+                    operation_id=operation_id,
+                    arguments_hash=arguments_hash,
+                    original_error=exc,
+                )
+            if not isinstance(updated, dict):
+                return self._typed_retryable("calendar_update_response_uncertain")
+            return self._typed_success(
+                event=updated,
+                binding=binding,
+                timezone_name=timezone_name,
+                operation_id=operation_id,
+                action="updated",
+            )
+        except ValueError as exc:
+            return self._typed_denied(str(exc))
+        except Exception as exc:
+            return self._typed_retryable(type(exc).__name__)
+
+    def execute_typed_delete(
+        self,
+        *,
+        operation_id: str,
+        arguments_hash: str,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        del arguments_hash
+        try:
+            binding, timezone_name, service = self._typed_runtime(arguments)
+            current = self._resolve_typed_event(
+                service=service,
+                binding=binding,
+                event_ref=str(arguments.get("event_ref") or ""),
+                event_start=str(arguments.get("event_start") or ""),
+                timezone_name=timezone_name,
+            )
+            revision = str(current.get("etag") or "")
+            if self._event_resource_version(revision) != str(
+                arguments.get("resource_version") or ""
+            ):
+                return self._typed_denied("calendar_event_revision_stale")
+            event_id = str(current.get("id") or "")
+            try:
+                request = service.events().delete(
+                    calendarId=binding.calendar_id,
+                    eventId=event_id,
+                    sendUpdates="none",
+                )
+                self._execute_conditional(request, revision=revision)
+            except Exception as exc:
+                status, observed = self._get_exact_event(
+                    service=service,
+                    calendar_id=binding.calendar_id,
+                    event_id=event_id,
+                )
+                if status == "not_found":
+                    return self._typed_success(
+                        event=current,
+                        binding=binding,
+                        timezone_name=timezone_name,
+                        operation_id=operation_id,
+                        action="deleted",
+                        deleted=True,
+                    )
+                if status == "ok" and self._event_resource_version(
+                    str(observed.get("etag") or "")
+                ) == self._event_resource_version(revision):
+                    return self._typed_retryable(type(exc).__name__)
+                return self._typed_conflict("calendar_delete_revision_conflict")
+            return self._typed_success(
+                event=current,
+                binding=binding,
+                timezone_name=timezone_name,
+                operation_id=operation_id,
+                action="deleted",
+                deleted=True,
+            )
+        except ValueError as exc:
+            code = str(exc)
+            if code == "calendar_event_not_found":
+                return self._typed_denied("calendar_event_stale")
+            return self._typed_denied(code)
+        except Exception as exc:
+            return self._typed_retryable(type(exc).__name__)
+
+    @staticmethod
+    def typed_event_id(operation_id: str) -> str:
+        digest = hashlib.sha256(str(operation_id or "").encode("utf-8")).digest()
+        encoded = base64.b32hexencode(digest).decode("ascii").rstrip("=").lower()
+        return "jarvis" + encoded
+
+    @staticmethod
+    def _calendar_ref(calendar_id: str) -> str:
+        digest = hashlib.sha256(str(calendar_id or "").encode("utf-8")).hexdigest()
+        return "calendar_target_v1_" + digest[:32]
+
+    @staticmethod
+    def _event_resource_version(etag: str) -> str:
+        digest = hashlib.sha256(str(etag or "").encode("utf-8")).hexdigest()
+        return "calendar_revision_v1_" + digest
+
+    @staticmethod
+    def _calendar_resource_version(
+        *,
+        binding: CalendarBinding,
+        timezone_name: str,
+    ) -> str:
+        material = json.dumps(
+            {
+                "account_key": binding.account_key or "",
+                "calendar_id": binding.calendar_id,
+                "person_name": binding.person_name,
+                "timezone": timezone_name,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return "calendar_config_v1_" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+    def _typed_runtime(
+        self,
+        arguments: dict[str, Any],
+    ) -> tuple[CalendarBinding, str, Any]:
+        config = self._load_permissions()
+        calendar_cfg = config.get("calendar") or {}
+        timezone_name = str(calendar_cfg.get("default_timezone") or "UTC").strip() or "UTC"
+        calendar_ref = str(arguments.get("calendar_ref") or "")
+        scope = str(arguments.get("calendar_scope") or "").strip().casefold()
+        matches = [
+            item
+            for item in self._calendar_bindings(calendar_cfg)
+            if self._calendar_ref(item.calendar_id) == calendar_ref
+            and item.person_name.strip().casefold() == scope
+        ]
+        if len(matches) != 1:
+            raise ValueError("calendar_target_changed")
+        binding = matches[0]
+        requested_timezone = str(arguments.get("timezone") or "")
+        if requested_timezone != timezone_name:
+            raise ValueError("calendar_timezone_stale")
+        supplied_version = str(arguments.get("resource_version") or "")
+        if str(arguments.get("event_ref") or ""):
+            if not supplied_version.startswith("calendar_revision_v1_"):
+                raise ValueError("calendar_event_revision_invalid")
+        elif supplied_version != self._calendar_resource_version(
+            binding=binding,
+            timezone_name=timezone_name,
+        ):
+            raise ValueError("calendar_resource_version_stale")
+        service = self._authorized_calendar_service(
+            config=config,
+            binding=binding,
+            include_write=True,
+        )
+        return binding, timezone_name, service
+
+    def _resolve_typed_event(
+        self,
+        *,
+        service: Any,
+        binding: CalendarBinding,
+        event_ref: str,
+        event_start: str,
+        timezone_name: str,
+    ) -> dict[str, Any]:
+        reference = str(event_ref or "").strip().casefold()
+        if not re.fullmatch(r"calendar_event_v1_[0-9a-f]{32}", reference):
+            raise ValueError("calendar_event_ref_invalid")
+        raw_start = str(event_start or "").strip()
+        try:
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw_start):
+                local_start = datetime.combine(
+                    date.fromisoformat(raw_start),
+                    time.min,
+                    tzinfo=ZoneInfo(timezone_name),
+                )
+            else:
+                local_start = datetime.fromisoformat(raw_start.replace("Z", "+00:00"))
+                if local_start.tzinfo is None:
+                    raise ValueError
+        except Exception as exc:
+            raise ValueError("calendar_event_start_invalid") from exc
+        response = (
+            service.events()
+            .list(
+                calendarId=binding.calendar_id,
+                timeMin=(local_start - timedelta(days=2)).isoformat(),
+                timeMax=(local_start + timedelta(days=2)).isoformat(),
+                singleEvents=True,
+                orderBy="startTime",
+                maxResults=100,
+                timeZone=timezone_name,
+                showDeleted=False,
+            )
+            .execute()
+        )
+        items = response.get("items", []) if isinstance(response, dict) else []
+        matches = [
+            item
+            for item in items
+            if isinstance(item, dict)
+            and str(item.get("status") or "confirmed").casefold() != "cancelled"
+            and self._event_ref(event=item, binding=binding) == reference
+        ]
+        if not matches:
+            raise ValueError("calendar_event_not_found")
+        if len(matches) != 1:
+            raise ValueError("calendar_event_ambiguous")
+        return dict(matches[0])
+
+    @classmethod
+    def _event_ref(cls, *, event: dict[str, Any], binding: CalendarBinding) -> str:
+        start = event.get("start") or {}
+        end = event.get("end") or {}
+        start_value = str(start.get("dateTime") or start.get("date") or "")[:64]
+        end_value = str(end.get("dateTime") or end.get("date") or "")[:64]
+        material = f"{binding.calendar_id}\n{event.get('id') or ''}\n{start_value}\n{end_value}"
+        return "calendar_event_v1_" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
+
+    @staticmethod
+    def _typed_private_properties(
+        *,
+        operation_id: str,
+        arguments_hash: str,
+        current: dict[str, Any] | None = None,
+    ) -> dict[str, str]:
+        private = dict((((current or {}).get("extendedProperties") or {}).get("private") or {}))
+        private.update(
+            {
+                "jarvisOperationId": operation_id,
+                "jarvisArgumentsHash": arguments_hash,
+            }
+        )
+        return private
+
+    def _typed_create_body(
+        self,
+        *,
+        event_id: str,
+        operation_id: str,
+        arguments_hash: str,
+        arguments: dict[str, Any],
+        include_invites: bool,
+    ) -> dict[str, Any]:
+        all_day = bool(arguments.get("all_day"))
+        timezone_name = str(arguments.get("timezone") or "UTC")
+        body: dict[str, Any] = {
+            "id": event_id,
+            "summary": str(arguments.get("title") or ""),
+            "start": (
+                {"date": str(arguments.get("start") or "")}
+                if all_day
+                else {
+                    "dateTime": str(arguments.get("start") or ""),
+                    "timeZone": timezone_name,
+                }
+            ),
+            "end": (
+                {"date": str(arguments.get("end") or "")}
+                if all_day
+                else {
+                    "dateTime": str(arguments.get("end") or ""),
+                    "timeZone": timezone_name,
+                }
+            ),
+            "extendedProperties": {
+                "private": self._typed_private_properties(
+                    operation_id=operation_id,
+                    arguments_hash=arguments_hash,
+                )
+            },
+        }
+        for field in ("location", "description"):
+            value = str(arguments.get(field) or "").strip()
+            if value:
+                body[field] = value
+        if include_invites:
+            body["attendees"] = [
+                {"email": str(value)} for value in arguments.get("invitee_emails") or []
+            ]
+        return body
+
+    def _typed_update_body(
+        self,
+        *,
+        current: dict[str, Any],
+        patch: dict[str, Any],
+        timezone_name: str,
+        operation_id: str,
+        arguments_hash: str,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "extendedProperties": {
+                "private": self._typed_private_properties(
+                    operation_id=operation_id,
+                    arguments_hash=arguments_hash,
+                    current=current,
+                )
+            }
+        }
+        mappings = {"title": "summary", "location": "location", "description": "description"}
+        for source, destination in mappings.items():
+            if source in patch:
+                body[destination] = str(patch[source])
+        if "start" in patch:
+            all_day = bool(patch.get("all_day"))
+            if all_day:
+                body["start"] = {"date": str(patch["start"])}
+                body["end"] = {"date": str(patch["end"])}
+            else:
+                body["start"] = {
+                    "dateTime": str(patch["start"]),
+                    "timeZone": timezone_name,
+                }
+                body["end"] = {
+                    "dateTime": str(patch["end"]),
+                    "timeZone": timezone_name,
+                }
+        return body
+
+    @classmethod
+    def _typed_event_matches(
+        cls,
+        event: dict[str, Any],
+        *,
+        expected: dict[str, Any],
+        operation_id: str,
+        arguments_hash: str,
+    ) -> bool:
+        private = ((event.get("extendedProperties") or {}).get("private") or {})
+        if (
+            str(private.get("jarvisOperationId") or "") != operation_id
+            or str(private.get("jarvisArgumentsHash") or "") != arguments_hash
+        ):
+            return False
+        for field in ("id", "summary", "start", "end", "location", "description"):
+            if field in expected and event.get(field) != expected.get(field):
+                return False
+        if "attendees" in expected:
+            desired = sorted(
+                str(item.get("email") or "").casefold()
+                for item in expected.get("attendees") or []
+            )
+            actual = sorted(
+                str(item.get("email") or "").casefold()
+                for item in event.get("attendees") or []
+                if isinstance(item, dict)
+            )
+            if desired != actual:
+                return False
+        return True
+
+    @staticmethod
+    def _execute_conditional(request: Any, *, revision: str) -> Any:
+        headers = getattr(request, "headers", None)
+        if not isinstance(headers, dict) or not str(revision or ""):
+            raise ValueError("calendar_conditional_request_unavailable")
+        headers["If-Match"] = revision
+        return request.execute()
+
+    def _get_exact_event(
+        self,
+        *,
+        service: Any,
+        calendar_id: str,
+        event_id: str,
+    ) -> tuple[str, dict[str, Any]]:
+        try:
+            event = service.events().get(
+                calendarId=calendar_id,
+                eventId=event_id,
+            ).execute()
+            return "ok", dict(event) if isinstance(event, dict) else {}
+        except Exception as exc:
+            if self._exception_status_code(exc) == 404:
+                return "not_found", {}
+            return "unavailable", {}
+
+    def _reconcile_typed_create(
+        self,
+        *,
+        service: Any,
+        binding: CalendarBinding,
+        timezone_name: str,
+        event_id: str,
+        expected: dict[str, Any],
+        operation_id: str,
+        arguments_hash: str,
+        original_error: Exception,
+    ) -> dict[str, Any]:
+        status, event = self._get_exact_event(
+            service=service,
+            calendar_id=binding.calendar_id,
+            event_id=event_id,
+        )
+        if status == "not_found":
+            return self._typed_retryable(type(original_error).__name__)
+        if status == "ok" and self._typed_event_matches(
+            event,
+            expected=expected,
+            operation_id=operation_id,
+            arguments_hash=arguments_hash,
+        ):
+            return self._typed_success(
+                event=event,
+                binding=binding,
+                timezone_name=timezone_name,
+                operation_id=operation_id,
+                action="created",
+                idempotent_replay=True,
+            )
+        if status == "ok":
+            return self._typed_conflict("calendar_create_id_conflict")
+        return self._typed_retryable(type(original_error).__name__)
+
+    def _reconcile_typed_update(
+        self,
+        *,
+        service: Any,
+        binding: CalendarBinding,
+        timezone_name: str,
+        event_id: str,
+        expected: dict[str, Any],
+        original_revision: str,
+        operation_id: str,
+        arguments_hash: str,
+        original_error: Exception,
+    ) -> dict[str, Any]:
+        status, event = self._get_exact_event(
+            service=service,
+            calendar_id=binding.calendar_id,
+            event_id=event_id,
+        )
+        if status == "not_found":
+            return self._typed_conflict("calendar_update_event_missing")
+        if status == "ok" and self._typed_event_matches(
+            event,
+            expected=expected,
+            operation_id=operation_id,
+            arguments_hash=arguments_hash,
+        ):
+            return self._typed_success(
+                event=event,
+                binding=binding,
+                timezone_name=timezone_name,
+                operation_id=operation_id,
+                action="updated",
+                idempotent_replay=True,
+            )
+        if status == "ok" and str(event.get("etag") or "") == original_revision:
+            return self._typed_retryable(type(original_error).__name__)
+        if status == "ok":
+            return self._typed_conflict("calendar_update_revision_conflict")
+        return self._typed_retryable(type(original_error).__name__)
+
+    def _typed_success(
+        self,
+        *,
+        event: dict[str, Any],
+        binding: CalendarBinding,
+        timezone_name: str,
+        operation_id: str,
+        action: str,
+        deleted: bool = False,
+        idempotent_replay: bool = False,
+    ) -> dict[str, Any]:
+        normalized = self._normalize_event(event)
+        event_id = str(event.get("id") or normalized.get("google_event_id") or "")
+        event_ref = self._event_ref(event=event, binding=binding)
+        return {
+            "status": "ok",
+            "source": "google_live",
+            "message": f"Calendar event {action} and provider state verified.",
+            "payload": {
+                "action": action,
+                "sync_status": "synced",
+                "provider_event_id": event_id,
+                "event_ref": event_ref,
+                "calendar_ref": self._calendar_ref(binding.calendar_id),
+                "resource_version": self._event_resource_version(str(event.get("etag") or "")),
+                "idempotent_replay": idempotent_replay,
+                "event": {
+                    "title": str(event.get("summary") or normalized.get("title") or ""),
+                    "start": str(normalized.get("start_at") or ""),
+                    "end": str(normalized.get("end_at") or ""),
+                    "all_day": bool((event.get("start") or {}).get("date")),
+                    "timezone": timezone_name,
+                    "location": str(event.get("location") or ""),
+                    "attendee_emails": self._attendee_emails(event),
+                    "deleted": deleted,
+                },
+            },
+            "receipt_id": "calendar_receipt:" + operation_id,
+            "committed_effect": not idempotent_replay,
+        }
+
+    @staticmethod
+    def _typed_denied(code: str) -> dict[str, Any]:
+        return {
+            "status": "policy_denied",
+            "message": "The Calendar target or revision is no longer authorized.",
+            "denial_reason": str(code or "calendar_write_denied"),
+        }
+
+    @staticmethod
+    def _typed_retryable(code: str) -> dict[str, Any]:
+        return {
+            "status": "retryable_error",
+            "message": "The Calendar provider result was uncertain; the exact operation can be retried.",
+            "error_code": str(code or "calendar_provider_uncertain"),
+        }
+
+    @staticmethod
+    def _typed_conflict(code: str) -> dict[str, Any]:
+        return {
+            "status": "error",
+            "message": "The Calendar provider state conflicts with this exact operation.",
+            "error_code": code,
+        }
 
     def add_event(
         self,
@@ -377,6 +1089,15 @@ class GoogleCalendarLiveService:
             calendar_cfg = config.get("calendar") or {}
             oauth_cfg = config.get("oauth") or {}
             bindings = self._calendar_bindings(calendar_cfg)
+            if normalized_calendar_id.startswith("calendar_target_v1_"):
+                resolved = [
+                    item
+                    for item in bindings
+                    if self._calendar_ref(item.calendar_id) == normalized_calendar_id
+                ]
+                if len(resolved) != 1:
+                    return {"status": "error", "error_code": "calendar_binding_missing"}
+                normalized_calendar_id = resolved[0].calendar_id
             binding = next(
                 (item for item in bindings if item.calendar_id == normalized_calendar_id),
                 None,
@@ -764,11 +1485,10 @@ class GoogleCalendarLiveService:
         end = event.get("end") or {}
         start_value = str(start.get("dateTime") or start.get("date") or "")[:64]
         end_value = str(end.get("dateTime") or end.get("date") or "")[:64]
-        event_id = str(event.get("id") or "")
-        ref_material = f"{binding.calendar_id}\n{event_id}\n{start_value}\n{end_value}"
         return {
-            "event_ref": "calendar_event_v1_"
-            + hashlib.sha256(ref_material.encode("utf-8")).hexdigest()[:32],
+            "event_ref": cls._event_ref(event=event, binding=binding),
+            "calendar_ref": cls._calendar_ref(binding.calendar_id),
+            "resource_version": cls._event_resource_version(str(event.get("etag") or "")),
             "title": cls._bounded_query_text(event.get("summary"), 200, "(untitled event)"),
             "start": start_value,
             "end": end_value,

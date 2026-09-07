@@ -5,6 +5,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+import re
 from typing import Any, Literal
 import traceback
 import uuid
@@ -49,11 +50,11 @@ def extract_command_text(content: str, prefix: str = "!jarvis") -> str | None:
 
 @dataclass(frozen=True)
 class DiscordMessageEnvelope:
-    """Accepted Discord text plus its explicit model-routing lane."""
+    """Accepted Discord text plus prefix provenance for the Main route."""
 
     text: str
-    lane: Literal["micro", "main"]
-    micro_command_explicit: bool
+    lane: Literal["main"]
+    command_prefix_explicit: bool
 
 
 def build_session_id(guild_id: int | None, channel_id: int, user_id: int) -> str:
@@ -192,7 +193,30 @@ def load_discord_permissions_policy(permissions_path: str | None) -> dict[str, A
         "guilds": {},
         "private_notes_channels": [],
         "skill_channel_access": [],
+        "protected_destinations": {},
     }
+
+    raw_destinations = loaded.get("protected_destinations")
+    protected_destinations: dict[str, dict[str, str]] = {}
+    if isinstance(raw_destinations, dict):
+        for purpose in ("human_reviews", "operator_notices"):
+            row = raw_destinations.get(purpose)
+            if not isinstance(row, dict):
+                continue
+            guild_id = parse_discord_guild_id(row.get("guild_id"))
+            channel_id = parse_discord_channel_id(row.get("channel_id"))
+            approver_user_id = parse_discord_channel_id(row.get("approver_user_id"))
+            if guild_id is None or channel_id is None:
+                continue
+            destination = {
+                "purpose": purpose,
+                "guild_id": str(guild_id),
+                "channel_id": str(channel_id),
+            }
+            if approver_user_id is not None:
+                destination["approver_principal"] = f"discord_user:{approver_user_id}"
+            protected_destinations[purpose] = destination
+    policy["protected_destinations"] = protected_destinations
 
     guild_rows = loaded.get("guilds")
     if not isinstance(guild_rows, list):
@@ -285,6 +309,31 @@ def load_discord_permissions_policy(permissions_path: str | None) -> dict[str, A
     policy["private_notes_channels"] = private_notes_channels
     policy["skill_channel_access"] = skill_channel_access
     return policy
+
+
+def resolve_discord_protected_destination(
+    policy: dict[str, Any] | None,
+    *,
+    purpose: str,
+) -> dict[str, str] | None:
+    """Resolve a symbolic purpose without accepting IDs from request/model data."""
+
+    normalized = str(purpose or "").strip().casefold()
+    if normalized not in {"human_reviews", "operator_notices"} or not isinstance(policy, dict):
+        return None
+    destinations = policy.get("protected_destinations")
+    row = destinations.get(normalized) if isinstance(destinations, dict) else None
+    if not isinstance(row, dict):
+        return None
+    guild_id = str(row.get("guild_id") or "").strip()
+    channel_id = str(row.get("channel_id") or "").strip()
+    if not guild_id or not channel_id:
+        return None
+    result = {"purpose": normalized, "guild_id": guild_id, "channel_id": channel_id}
+    approver = str(row.get("approver_principal") or "").strip()
+    if approver:
+        result["approver_principal"] = approver
+    return result
 
 
 def discord_document_response_allowed(
@@ -495,14 +544,14 @@ def parse_discord_message_envelope(
     if explicit is not None:
         return DiscordMessageEnvelope(
             text=explicit,
-            lane="micro",
-            micro_command_explicit=True,
+            lane="main",
+            command_prefix_explicit=True,
         )
     if allow_unprefixed or (command_channel_id is not None and not require_prefix):
         return DiscordMessageEnvelope(
             text=content.strip(),
             lane="main",
-            micro_command_explicit=False,
+            command_prefix_explicit=False,
         )
     return None
 
@@ -546,7 +595,7 @@ def build_ask_request_payload(
     document_attachment_ids: list[str] | None = None,
     current_document_attachment_ids: list[str] | None = None,
     document_result_contexts: list[dict[str, Any]] | None = None,
-    micro_command_explicit: bool = False,
+    command_prefix_explicit: bool = False,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "text": command_text.strip(),
@@ -556,15 +605,15 @@ def build_ask_request_payload(
             "mode": "discord_command",
             "auto_channel_session": True,
             "channel_session_scope": "per_user",
-            "force_main_owner": micro_command_explicit is not True,
+            "force_main_owner": True,
             "wake_on_message": True,
             "session_channel": build_session_channel(guild_id=guild_id, channel_id=channel_id),
             "discord_channel_id": str(channel_id),
             "discord_guild_id": str(guild_id) if guild_id is not None else "dm",
             "external_user_id": str(user_id),
             "external_display_name": str(display_name or "").strip() or None,
-            "micro_command_explicit": micro_command_explicit is True,
-            "discord_routing_lane": "micro" if micro_command_explicit is True else "main",
+            "command_prefix_explicit": command_prefix_explicit is True,
+            "discord_routing_lane": "main",
         },
     }
     if message_id is not None and str(message_id).strip():
@@ -677,6 +726,7 @@ if discord is not None:
             attachment_ingress: DiscordAttachmentIngressPort | None = None,
             document_completion_notifications: DocumentCompletionNotificationService | None = None,
             model_compute_budget_notifications: ModelComputeBudgetNotificationService | None = None,
+            human_review_service: Any | None = None,
             document_notification_poll_seconds: float = 2.0,
             attachment_max_bytes: int = 52428800,
             attachment_max_per_message: int = 4,
@@ -692,6 +742,7 @@ if discord is not None:
             self._attachment_ingress = attachment_ingress
             self._document_completion_notifications = document_completion_notifications
             self._model_compute_budget_notifications = model_compute_budget_notifications
+            self._human_review_service = human_review_service
             self._document_notification_poll_seconds = max(
                 1.0,
                 min(float(document_notification_poll_seconds), 60.0),
@@ -730,19 +781,10 @@ if discord is not None:
                         duplicate_private_notes_channels.add(key)
                         continue
                     self._private_notes_channels[key] = config
-            compute_notice_configs = [
-                config
-                for config in self._private_notes_channels.values()
-                if config.compute_budget_notices
-            ]
-            self._compute_budget_notice_config = (
-                compute_notice_configs[0] if len(compute_notice_configs) == 1 else None
+            self._operator_notice_destination = resolve_discord_protected_destination(
+                self._permissions_policy,
+                purpose="operator_notices",
             )
-            if len(compute_notice_configs) > 1:
-                print(
-                    "[discord] compute budget notices disabled: configure exactly one private "
-                    "notes delivery channel"
-                )
             raw_skill_channel_access = self._permissions_policy.get("skill_channel_access")
             if isinstance(raw_skill_channel_access, list):
                 for row in raw_skill_channel_access:
@@ -781,7 +823,7 @@ if discord is not None:
                 )
             if (
                 self._model_compute_budget_notifications is not None
-                and self._compute_budget_notice_config is not None
+                and self._operator_notice_destination is not None
             ):
                 self._model_compute_budget_notification_task = asyncio.create_task(
                     self._model_compute_budget_notification_loop(),
@@ -920,8 +962,11 @@ if discord is not None:
 
         async def _run_model_compute_budget_notifications_once(self) -> int:
             service = self._model_compute_budget_notifications
-            config = self._compute_budget_notice_config
-            if service is None or config is None:
+            destination = resolve_discord_protected_destination(
+                load_discord_permissions_policy(self._permissions_path),
+                purpose="operator_notices",
+            )
+            if service is None or destination is None:
                 return 0
             jobs = await asyncio.to_thread(service.claim)
             delivered = 0
@@ -931,9 +976,9 @@ if discord is not None:
                         if not await asyncio.to_thread(service.complete, job):
                             raise RuntimeError("model_compute_notice_completion_lost")
                         continue
-                    channel = self.get_channel(int(config.delivery_channel_id))
+                    channel = self.get_channel(int(destination["channel_id"]))
                     if channel is None:
-                        channel = await self.fetch_channel(int(config.delivery_channel_id))
+                        channel = await self.fetch_channel(int(destination["channel_id"]))
                     sent = await channel.send(
                         service.message(job),
                         allowed_mentions=discord.AllowedMentions.none(),
@@ -1366,6 +1411,8 @@ if discord is not None:
             guild_id = message.guild.id if message.guild else None
             channel_id = message.channel.id
             user_id = message.author.id
+            if await self._handle_action_approval_command(message):
+                return
             scoped_rows = self._skill_channel_access.get((str(guild_id), str(channel_id)), [])
             matched_skill_rows = [
                 row
@@ -1515,7 +1562,7 @@ if discord is not None:
                 document_attachment_ids=self._active_document_attachment_ids(message),
                 current_document_attachment_ids=current_document_attachment_ids,
                 document_result_contexts=self._active_document_result_contexts(message),
-                micro_command_explicit=command_envelope.micro_command_explicit,
+                command_prefix_explicit=command_envelope.command_prefix_explicit,
             )
 
             try:
@@ -1552,6 +1599,85 @@ if discord is not None:
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
 
+        async def _handle_action_approval_command(self, message: discord.Message) -> bool:
+            content = " ".join(str(getattr(message, "content", "") or "").split())
+            match = re.fullmatch(
+                r"(approve|reject)\s+([A-Za-z0-9_-]{1,255})(?:\s+(.{1,500}))?",
+                content,
+                flags=re.IGNORECASE,
+            )
+            if match is None:
+                return False
+            policy = load_discord_permissions_policy(self._permissions_path)
+            destination = resolve_discord_protected_destination(
+                policy,
+                purpose="human_reviews",
+            )
+            actor_principal = f"discord_user:{message.author.id}"
+            guild_id = str(message.guild.id) if message.guild else ""
+            channel_id = str(message.channel.id)
+            if (
+                self._human_review_service is None
+                or destination is None
+                or guild_id != str(destination.get("guild_id") or "")
+                or channel_id != str(destination.get("channel_id") or "")
+                or actor_principal != str(destination.get("approver_principal") or "")
+            ):
+                await message.channel.send(
+                    "Approval command denied for this actor or destination.",
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                return True
+            review_id = str(match.group(2))
+            proposal = await asyncio.to_thread(
+                self._human_review_service.repository.action_proposal_for_review,
+                review_id,
+            )
+            if not isinstance(proposal, dict):
+                await message.channel.send(
+                    "That approval request is unavailable.",
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                return True
+            decision = str(match.group(1)).casefold()
+            supplied_reason = str(match.group(3) or "").strip()
+            reason = supplied_reason or (
+                "Approved in the protected review destination."
+                if decision == "approve"
+                else "Rejected in the protected review destination."
+            )
+            try:
+                await asyncio.to_thread(
+                    self._human_review_service.decide_action_proposal,
+                    proposal_id=str(proposal["proposal_id"]),
+                    review_id=review_id,
+                    bound_proposal_hash=str(proposal["proposal_hash"]),
+                    decision=decision,
+                    actor_principal=actor_principal,
+                    destination_purpose="human_reviews",
+                    guild_id=guild_id,
+                    channel_id=channel_id,
+                    message_id=str(message.id),
+                    reason=reason,
+                    idempotency_key=f"review-decision-discord:v1:{review_id}:{message.id}",
+                )
+            except (KeyError, PermissionError, ValueError):
+                await message.channel.send(
+                    "That approval decision was stale, conflicting, or not authorized.",
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                return True
+            response = (
+                "Approval recorded; execution is queued."
+                if decision == "approve"
+                else "Rejection recorded; the action will not execute."
+            )
+            await message.channel.send(
+                response,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return True
+
 else:
 
     class DiscordJarvisBot:
@@ -1567,6 +1693,7 @@ else:
             attachment_ingress: DiscordAttachmentIngressPort | None = None,
             document_completion_notifications: DocumentCompletionNotificationService | None = None,
             model_compute_budget_notifications: ModelComputeBudgetNotificationService | None = None,
+            human_review_service: Any | None = None,
             document_notification_poll_seconds: float = 2.0,
             attachment_max_bytes: int = 52428800,
             attachment_max_per_message: int = 4,
@@ -1577,6 +1704,7 @@ else:
             del attachment_ingress
             del document_completion_notifications
             del model_compute_budget_notifications
+            del human_review_service
             del document_notification_poll_seconds
             del attachment_max_bytes
             del attachment_max_per_message

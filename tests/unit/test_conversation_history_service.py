@@ -6,7 +6,6 @@ import shutil
 from uuid import uuid4
 
 from app.core.main_jarvis import MainJarvis
-from app.core.micro_jarvis import MicroJarvis
 from tests.router_support import RegistryBackedTestRouter as JarvisRouter
 from app.core.session_store import SessionStore
 from app.core.state_machine import RuntimePowerController
@@ -106,7 +105,6 @@ def test_router_conversation_turn_writes_conversation_topic_history():
         )
 
         router = JarvisRouter(
-            micro_jarvis=MicroJarvis(),
             main_jarvis=MainJarvis(),
             session_store=SessionStore(persistence=store),
             runtime_power=RuntimePowerController(),

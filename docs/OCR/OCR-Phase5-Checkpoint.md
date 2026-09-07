@@ -66,11 +66,10 @@ scores/status only, not OCR text.
 | Cold Main conversation during VLM from no resident Ollama model | Valid in 16.66 seconds; VLM valid in 4.80 seconds |
 
 The first coexistence attempt exposed the direct cause of the reported minute-scale Discord regression:
-the initial document-VLM preparation policy unloaded both Ollama models. The next Main request then paid
-approximately 100 seconds to reload `gpt-oss:20b`. The final policy explicitly protects Main and unloads
-only Micro. The trusted Discord benchmark is important: an operator-authenticated `/ask` probe is
-correctly normalized to the dashboard path and includes a Micro classification pass, so it is not an
-accurate measurement of unprefixed Discord conversation.
+the initial document-VLM preparation policy unloaded both Ollama models that existed at that release.
+The next Main request then paid approximately 100 seconds to reload `gpt-oss:20b`. The final policy
+protected Main and unloaded the now-retired secondary model. This paragraph is historical evidence;
+current Discord inputs all enter the Main-only boundary.
 
 Long document compute remains allowed to take longer, but Discord confirms acceptance before ingress or
 OCR begins. Ordinary resident Discord conversation retains the historical approximately three-second

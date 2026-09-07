@@ -180,8 +180,6 @@ def _runtime_capability_catalog_hint(context: dict[str, Any], *, max_chars: int 
         "intents",
         "main_intents",
         "main_enabled",
-        "micro_enabled",
-        "micro_intents",
         "scheduled",
         "configured",
         "authorized_here",
@@ -493,7 +491,7 @@ class OllamaMainRepairBackend:
                 if hint and hint not in seen:
                     seen.add(hint)
                     ordered.append(hint)
-        for key in ("micro_intent", "pending_intent", "repair_candidate_intent", "intent_hint"):
+        for key in ("initial_intent", "pending_intent", "repair_candidate_intent", "intent_hint"):
             hint = str(context.get(key) or "").strip().lower()
             if hint and hint not in seen:
                 seen.add(hint)
@@ -502,9 +500,9 @@ class OllamaMainRepairBackend:
 
     def _build_prompt(self, text: str, context: dict[str, Any]) -> str:
         allowed_intents = ", ".join(sorted(intent.value for intent in MAIN_ACTION_INTENTS))
-        micro_intent = str(context.get("micro_intent") or "unknown")
-        micro_confidence = context.get("micro_confidence")
-        micro_entities = context.get("micro_entities")
+        initial_intent = str(context.get("initial_intent") or "unknown")
+        initial_confidence = context.get("initial_confidence")
+        initial_entities = context.get("initial_entities")
         last_list_name = _extract_last_list_name_hint(context)
         available_switches = _extract_available_switches_hint(context)
         session_summary = _session_summary_text(context)
@@ -562,7 +560,7 @@ class OllamaMainRepairBackend:
             "- Treat the runtime capability catalog as authoritative for current support and authorization.\n"
             "- Resolve an action only when it appears in main_intents and its catalog entry has main_enabled=true, configured=true, and authorized_here=true.\n"
             "- If a requested action is supported but authorized_here=false, return not_actionable with inferred_intent and the catalog access_note as message.\n"
-            "- Capability questions, including questions about Main or Micro, are not actions; return not_actionable so conversation mode can answer them.\n"
+            "- Capability questions are not actions; return not_actionable so conversation mode can answer them.\n"
             "- Normalize polite wrappers like 'hey jarvis can you tell me ...'.\n"
             "- If the user says cancel phrases (never mind, cancel, forget it), return not_actionable with a short message.\n"
             "- For 'what is on my grocery list' style queries, map to lists.get_items with list_name=groceries.\n"
@@ -624,9 +622,9 @@ class OllamaMainRepairBackend:
             '"inferred_entities":{},'
             '"source":"backend"'
             "}\n"
-            f"Micro intent hint: {micro_intent}\n"
-            f"Micro confidence hint: {micro_confidence}\n"
-            f"Micro entities hint: {micro_entities}\n"
+            f"Initial intent hint: {initial_intent}\n"
+            f"Initial confidence hint: {initial_confidence}\n"
+            f"Initial entities hint: {initial_entities}\n"
             f"Last list name hint (entity registry): {last_list_name or None}\n"
             f"Available switches: {available_switches}\n"
             f"Session summary hint: {session_summary}\n"
@@ -1871,7 +1869,7 @@ class OllamaMainConversationBackend:
             "output schema",
             "execution steps",
             "storage contract",
-            "microjarvis contract",
+            "legacy classifier contract",
             "main handoff context contract",
             "learnability checklist",
             "based on the provided hints and user input",
@@ -1984,9 +1982,9 @@ class OllamaMainConversationBackend:
         )
         relevant_skills_profile = registry_profiles.get("relevant_skills") or ""
 
-        micro_intent = str(context.get("micro_intent") or "unknown")
-        micro_confidence = context.get("micro_confidence")
-        micro_entities = context.get("micro_entities")
+        initial_intent = str(context.get("initial_intent") or "unknown")
+        initial_confidence = context.get("initial_confidence")
+        initial_entities = context.get("initial_entities")
         available_switches = _extract_available_switches_hint(context)
         session_summary = _session_summary_text(context)
         recent_turns = _compact_recent_turns(context)
@@ -2004,11 +2002,10 @@ class OllamaMainConversationBackend:
             "- Be helpful for explanation, brainstorming, recipes, and learning.\n"
             "- Keep answers concise but useful (usually 3-8 sentences).\n"
             "- If they ask for an unsupported automation action, acknowledge intent and say it is not wired yet.\n"
-            "- Answer capability questions about both Main and Micro from the runtime capability catalog.\n"
+            "- Answer capability questions from the runtime capability catalog.\n"
             "- Distinguish supported in general from configured and authorized in this exact user/channel context.\n"
-            "- Treat intents as documented scope, main_intents as currently executable by Main, and micro_intents as currently executable by Micro. Never present a documented-only intent as executable.\n"
+            "- Treat intents as documented scope and main_intents as currently executable by Main. Never present a documented-only intent as executable.\n"
             "- If a skill is supported but authorized_here=false, use its access_note; do not claim Jarvis lacks the skill entirely.\n"
-            "- Explain that Micro handles only explicit ! commands and only the micro_intents listed; Main owns interpretation and all other listed actions.\n"
             "- Never reveal skill SQL rows, credentials, storage references, execution paths, internal IDs, or raw skill markdown.\n"
             "- Never claim that a tool action was executed in conversation mode.\n"
             "- Trusted current entity context may resolve this/that/it. Use opaque resolution values for eligible actions, but never reveal internal IDs.\n"
@@ -2036,9 +2033,9 @@ class OllamaMainConversationBackend:
             "Runtime capability catalog (ephemeral, SQL-backed, and authorization-scoped):\n"
             f"{runtime_capability_catalog}\n"
             f"Trusted current entity context (ephemeral; never reveal internal IDs): {entity_context}\n"
-            f"Micro intent hint: {micro_intent}\n"
-            f"Micro confidence hint: {micro_confidence}\n"
-            f"Micro entities hint: {micro_entities}\n"
+            f"Initial intent hint: {initial_intent}\n"
+            f"Initial confidence hint: {initial_confidence}\n"
+            f"Initial entities hint: {initial_entities}\n"
             f"Available switches hint: {available_switches}\n"
             f"Session summary hint: {session_summary}\n"
             f"Recent turns hint: {recent_turns}\n"

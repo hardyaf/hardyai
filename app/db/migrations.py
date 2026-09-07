@@ -5,11 +5,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from app.db.core_schema import ensure_core_schema
-from app.db.review_schema import ensure_review_schema
+from app.db.domain_schema import create_email_agent_schema
+from app.db.review_schema import ensure_action_approval_schema, ensure_review_schema
 
 
-LATEST_SCHEMA_VERSION = 11
-CORE_SCHEMA_READER_VERSION = 11
+LATEST_SCHEMA_VERSION = 14
+CORE_SCHEMA_READER_VERSION = 14
 
 
 # Tests may replace this content-free hook to prove that every version-8 step
@@ -705,6 +706,258 @@ def _migration_011_email_reversible_mailbox_state(conn: sqlite3.Connection) -> N
     _notify_migration_step(11, "record_reader_compatibility")
 
 
+def _migration_012_action_approval_proposals(conn: sqlite3.Connection) -> None:
+    ensure_action_approval_schema(conn)
+    _notify_migration_step(12, "create_action_proposals")
+    conn.execute(
+        """
+        INSERT INTO schema_reader_compatibility (
+            schema_version, minimum_reader_version, change_class, description
+        )
+        VALUES (
+            12, 7, 'additive',
+            'Adds exact-call pre-action approval proposals to shared Human Review.'
+        )
+        ON CONFLICT(schema_version) DO UPDATE SET
+            minimum_reader_version=excluded.minimum_reader_version,
+            change_class=excluded.change_class,
+            description=excluded.description
+        """
+    )
+    _notify_migration_step(12, "record_reader_compatibility")
+
+
+def _migration_013_home_operation_idempotency(conn: sqlite3.Connection) -> None:
+    columns = {
+        str(row[1]).strip().casefold()
+        for row in conn.execute("PRAGMA table_info(switch_actions_log)").fetchall()
+    }
+    if "operation_id" not in columns:
+        conn.execute("ALTER TABLE switch_actions_log ADD COLUMN operation_id TEXT")
+        _notify_migration_step(13, "add_switch_operation_id")
+    if "arguments_hash" not in columns:
+        conn.execute("ALTER TABLE switch_actions_log ADD COLUMN arguments_hash TEXT")
+        _notify_migration_step(13, "add_switch_arguments_hash")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_switch_actions_operation_id "
+        "ON switch_actions_log(operation_id) WHERE operation_id IS NOT NULL"
+    )
+    _notify_migration_step(13, "create_switch_operation_index")
+    conn.execute(
+        """
+        INSERT INTO schema_reader_compatibility (
+            schema_version, minimum_reader_version, change_class, description
+        )
+        VALUES (
+            13, 7, 'additive',
+            'Adds atomic idempotent operation identity to simulated Home state changes.'
+        )
+        ON CONFLICT(schema_version) DO UPDATE SET
+            minimum_reader_version=excluded.minimum_reader_version,
+            change_class=excluded.change_class,
+            description=excluded.description
+        """
+    )
+    _notify_migration_step(13, "record_reader_compatibility")
+
+
+def _migration_014_email_reasoning_led_writes(conn: sqlite3.Connection) -> None:
+    create_email_agent_schema(conn)
+    _notify_migration_step(14, "ensure_email_schema")
+    _execute_sql_batch(
+        conn,
+        """
+        CREATE TABLE email_tool_operations_v14 (
+            operation_id TEXT PRIMARY KEY,
+            tool_id TEXT NOT NULL CHECK (
+                tool_id IN (
+                    'email.apply_labels',
+                    'email.remove_labels',
+                    'email.set_read_state',
+                    'email.archive_messages',
+                    'email.restore_to_inbox',
+                    'email.set_review_state',
+                    'email.correct_local_category',
+                    'email.move_to_spam'
+                )
+            ),
+            contract_version INTEGER NOT NULL CHECK (contract_version = 1),
+            owner_user_id TEXT NOT NULL,
+            discord_channel_id TEXT NOT NULL,
+            arguments_hash TEXT NOT NULL,
+            effect_cardinality TEXT NOT NULL CHECK (
+                effect_cardinality IN ('atomic_batch','independent_batch')
+            ),
+            expected_child_count INTEGER NOT NULL CHECK (
+                expected_child_count >= 1 AND expected_child_count <= 50
+            ),
+            recovery_manifest_json TEXT NOT NULL,
+            recovery_manifest_hash TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (
+                status IN ('reserved','queued','committed','completed','partial','failed','cancelled')
+            ),
+            result_json TEXT NOT NULL DEFAULT '{}',
+            error_code TEXT,
+            idempotency_key TEXT UNIQUE,
+            operation_identity_hash TEXT CHECK (
+                operation_identity_hash IS NULL OR length(operation_identity_hash) = 64
+            ),
+            parent_manifest_hash TEXT CHECK (
+                parent_manifest_hash IS NULL OR length(parent_manifest_hash) = 64
+            ),
+            created_at TEXT NOT NULL,
+            completed_at TEXT
+        );
+
+        INSERT INTO email_tool_operations_v14 (
+            operation_id, tool_id, contract_version, owner_user_id,
+            discord_channel_id, arguments_hash, effect_cardinality,
+            expected_child_count, recovery_manifest_json, recovery_manifest_hash,
+            status, result_json, error_code, created_at, completed_at
+        )
+        SELECT operation_id, tool_id, contract_version, owner_user_id,
+               discord_channel_id, arguments_hash, effect_cardinality,
+               expected_child_count, recovery_manifest_json, recovery_manifest_hash,
+               status, result_json, error_code, created_at, completed_at
+        FROM email_tool_operations;
+
+        CREATE TABLE email_managed_label_operations_v14 (
+            child_operation_id TEXT PRIMARY KEY,
+            parent_operation_id TEXT NOT NULL,
+            child_index INTEGER NOT NULL CHECK (child_index >= 1 AND child_index <= 50),
+            gmail_message_id TEXT NOT NULL,
+            action TEXT NOT NULL CHECK (action IN ('apply','remove')),
+            managed_label_refs_json TEXT NOT NULL,
+            arguments_hash TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            parent_manifest_hash TEXT CHECK (
+                parent_manifest_hash IS NULL OR length(parent_manifest_hash) = 64
+            ),
+            status TEXT NOT NULL CHECK (
+                status IN ('queued','claimed','verified','dead_letter','cancelled')
+            ),
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            max_attempts INTEGER NOT NULL DEFAULT 4 CHECK (
+                max_attempts >= 1 AND max_attempts <= 10
+            ),
+            lease_owner TEXT,
+            lease_expires_at TEXT,
+            lease_fencing_token INTEGER NOT NULL DEFAULT 0,
+            next_attempt_at TEXT NOT NULL,
+            provider_labels_before_json TEXT NOT NULL DEFAULT '[]',
+            provider_labels_after_json TEXT NOT NULL DEFAULT '[]',
+            last_error_code TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            completed_at TEXT,
+            FOREIGN KEY (parent_operation_id)
+                REFERENCES email_tool_operations_v14(operation_id),
+            FOREIGN KEY (gmail_message_id) REFERENCES email_messages(gmail_message_id),
+            UNIQUE (parent_operation_id, child_index)
+        );
+
+        INSERT INTO email_managed_label_operations_v14 (
+            child_operation_id, parent_operation_id, child_index, gmail_message_id,
+            action, managed_label_refs_json, arguments_hash, idempotency_key,
+            status, attempt_count, max_attempts, lease_owner, lease_expires_at,
+            lease_fencing_token, next_attempt_at, provider_labels_before_json,
+            provider_labels_after_json, last_error_code, created_at, updated_at,
+            completed_at
+        )
+        SELECT child_operation_id, parent_operation_id, child_index, gmail_message_id,
+               action, managed_label_refs_json, arguments_hash, idempotency_key,
+               status, attempt_count, max_attempts, lease_owner, lease_expires_at,
+               lease_fencing_token, next_attempt_at, provider_labels_before_json,
+               provider_labels_after_json, last_error_code, created_at, updated_at,
+               completed_at
+        FROM email_managed_label_operations;
+
+        DROP TABLE email_managed_label_operations;
+        DROP TABLE email_tool_operations;
+        ALTER TABLE email_tool_operations_v14 RENAME TO email_tool_operations;
+        ALTER TABLE email_managed_label_operations_v14
+            RENAME TO email_managed_label_operations;
+
+        CREATE INDEX idx_email_tool_operations_owner_created
+            ON email_tool_operations(owner_user_id, discord_channel_id, created_at DESC);
+        CREATE INDEX idx_email_managed_label_operations_parent_message
+            ON email_managed_label_operations(parent_operation_id, gmail_message_id);
+        CREATE INDEX idx_email_managed_label_operations_claim
+            ON email_managed_label_operations(
+                status, next_attempt_at, lease_expires_at, created_at
+            );
+        """,
+    )
+    mailbox_columns = {
+        str(row[1]).strip().casefold()
+        for row in conn.execute("PRAGMA table_info(email_mailbox_operations)").fetchall()
+    }
+    for name, column_sql in (
+        ("parent_operation_id", "TEXT"),
+        ("parent_manifest_hash", "TEXT"),
+        ("child_index", "INTEGER"),
+        ("arguments_hash", "TEXT"),
+    ):
+        if name not in mailbox_columns:
+            conn.execute(f"ALTER TABLE email_mailbox_operations ADD COLUMN {name} {column_sql}")
+            _notify_migration_step(14, f"add_mailbox_{name}")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_email_mailbox_parent_child "
+        "ON email_mailbox_operations(parent_operation_id, child_index) "
+        "WHERE parent_operation_id IS NOT NULL"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_email_mailbox_parent_message "
+        "ON email_mailbox_operations(parent_operation_id, gmail_message_id)"
+    )
+    _execute_sql_batch(
+        conn,
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_email_mailbox_group_insert
+        BEFORE INSERT ON email_mailbox_operations
+        WHEN NOT (
+            (NEW.parent_operation_id IS NULL AND NEW.parent_manifest_hash IS NULL
+             AND NEW.child_index IS NULL AND NEW.arguments_hash IS NULL)
+            OR
+            (NEW.parent_operation_id IS NOT NULL AND NEW.parent_manifest_hash IS NOT NULL
+             AND NEW.child_index IS NOT NULL AND NEW.arguments_hash IS NOT NULL)
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'email_mailbox_grouping_invalid');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_email_mailbox_group_update
+        BEFORE UPDATE OF parent_operation_id, parent_manifest_hash, child_index, arguments_hash
+        ON email_mailbox_operations
+        WHEN NOT (
+            (NEW.parent_operation_id IS NULL AND NEW.parent_manifest_hash IS NULL
+             AND NEW.child_index IS NULL AND NEW.arguments_hash IS NULL)
+            OR
+            (NEW.parent_operation_id IS NOT NULL AND NEW.parent_manifest_hash IS NOT NULL
+             AND NEW.child_index IS NOT NULL AND NEW.arguments_hash IS NOT NULL)
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'email_mailbox_grouping_invalid');
+        END;
+        """,
+    )
+    conn.execute(
+        """
+        INSERT INTO schema_reader_compatibility (
+            schema_version, minimum_reader_version, change_class, description
+        ) VALUES (
+            14, 7, 'additive',
+            'Extends Email operation ledgers for reasoning-led local and approved provider writes.'
+        )
+        ON CONFLICT(schema_version) DO UPDATE SET
+            minimum_reader_version=excluded.minimum_reader_version,
+            change_class=excluded.change_class,
+            description=excluded.description
+        """
+    )
+    _notify_migration_step(14, "record_reader_compatibility")
+
+
 def _execute_sql_batch(conn: sqlite3.Connection, sql: str) -> None:
     """Execute a fixed DDL batch without sqlite3.executescript's implicit commit."""
 
@@ -737,6 +990,9 @@ _MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     9: _migration_009_lists_operation_idempotency,
     10: _migration_010_email_managed_label_operations,
     11: _migration_011_email_reversible_mailbox_state,
+    12: _migration_012_action_approval_proposals,
+    13: _migration_013_home_operation_idempotency,
+    14: _migration_014_email_reasoning_led_writes,
 }
 
 
@@ -761,7 +1017,7 @@ def apply_migrations(conn: sqlite3.Connection) -> int:
         # otherwise validates the child table's Email-domain FK while the
         # parent is being replaced, including in core-only stores where the
         # Email domain tables have not been composed yet.
-        suspend_foreign_keys = version == 11 and foreign_keys_enabled
+        suspend_foreign_keys = version in {11, 14} and foreign_keys_enabled
         if suspend_foreign_keys:
             conn.execute("PRAGMA foreign_keys = OFF")
         conn.execute("BEGIN IMMEDIATE")

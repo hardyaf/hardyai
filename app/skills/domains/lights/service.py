@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from datetime import datetime, timezone
+from typing import Any
 
 from app.db.sqlite_store import SQLiteStore
 from app.skills.domains.lights.storage import InMemoryLightsStorage, LightsStorage, SQLiteLightsStorage
@@ -12,6 +14,10 @@ def _utc_now() -> str:
 
 
 class HomeService:
+    _DEVICE_REF_PREFIX = "device_v1:"
+    _MAX_ALIAS_HINTS = 8
+    _MAX_CANDIDATES = 3
+
     def __init__(
         self,
         sqlite_store: SQLiteStore | None = None,
@@ -44,6 +50,196 @@ class HomeService:
 
     def _existing_switch_names(self) -> list[str]:
         return [str(item["name"]) for item in self._storage.list_switches()]
+
+    @classmethod
+    def _device_ref(cls, name: str) -> str:
+        normalized = cls._normalize_switch_name(name)
+        digest = hashlib.sha256(f"home-device-v1\n{normalized}".encode("utf-8")).hexdigest()
+        return f"{cls._DEVICE_REF_PREFIX}{digest[:32]}"
+
+    @classmethod
+    def _alias_hints(cls, *, name: str, room_name: str | None) -> list[str]:
+        canonical = cls._normalize_switch_name(name)
+        aliases: set[str] = set()
+        if canonical:
+            aliases.add(canonical)
+            without_kind = re.sub(r"\s+(?:light|lamp|switch)$", "", canonical).strip()
+            if without_kind:
+                aliases.add(without_kind)
+            without_test = re.sub(r"\btest\b", " ", canonical)
+            without_test = re.sub(r"\s+", " ", without_test).strip()
+            if without_test:
+                aliases.add(without_test)
+                aliases.add(
+                    re.sub(r"\s+(?:light|lamp|switch)$", "", without_test).strip()
+                )
+            location_tokens = [
+                token
+                for token in canonical.split()
+                if token not in {"ceiling", "floor", "light", "lamp", "switch", "test"}
+            ]
+            if location_tokens:
+                aliases.add(location_tokens[0])
+        normalized_room = cls._normalize_switch_name(room_name or "")
+        if normalized_room:
+            aliases.add(normalized_room)
+        aliases.discard("")
+        aliases.discard(canonical)
+        return sorted(aliases)[: cls._MAX_ALIAS_HINTS]
+
+    @classmethod
+    def _device_projection(cls, row: dict[str, Any]) -> dict[str, Any]:
+        name = cls._normalize_switch_name(str(row.get("name") or ""))
+        state = str(row.get("state") or "off").strip().casefold()
+        projected: dict[str, Any] = {
+            "device_ref": cls._device_ref(name),
+            "name": name,
+            "state": state if state in {"on", "off"} else "unknown",
+            "alias_hints": cls._alias_hints(
+                name=name,
+                room_name=str(row.get("room_name") or "").strip() or None,
+            ),
+        }
+        room_name = str(row.get("room_name") or "").strip()
+        if room_name:
+            projected["room_name"] = room_name[:100]
+        updated_at = str(row.get("updated_at") or "").strip()
+        if updated_at:
+            projected["updated_at"] = updated_at[:64]
+        return projected
+
+    def list_devices(self, *, limit: int = 100) -> dict[str, Any]:
+        bounded_limit = max(1, min(int(limit), 100))
+        rows = self._storage.list_switches()
+        devices = [self._device_projection(row) for row in rows[:bounded_limit]]
+        return {
+            "devices": devices,
+            "source": "local_simulated_state",
+            "simulated": True,
+            "truncated": len(rows) > bounded_limit,
+        }
+
+    def canonicalize_device_selector(
+        self,
+        *,
+        device_ref: str | None = None,
+        name: str | None = None,
+    ) -> dict[str, str]:
+        normalized_ref = str(device_ref or "").strip()
+        normalized_name = self._normalize_switch_name(str(name or ""))
+        resolved = self._resolve_device(device_ref=normalized_ref, name=normalized_name)
+        device = resolved.get("device")
+        if isinstance(device, dict) and str(device.get("device_ref") or "").strip():
+            return {"device_ref": str(device["device_ref"])}
+        if normalized_ref:
+            return {"device_ref": normalized_ref}
+        return {"name": normalized_name}
+
+    def get_device_state(
+        self,
+        *,
+        device_ref: str | None = None,
+        name: str | None = None,
+    ) -> dict[str, Any]:
+        resolved = self._resolve_device(device_ref=device_ref, name=name)
+        device = resolved.get("device")
+        match_status = str(resolved.get("match_status") or "not_found")
+        candidates = list(resolved.get("candidates") or [])[: self._MAX_CANDIDATES]
+        payload: dict[str, Any] = {
+            "candidates": candidates,
+            "match_status": match_status,
+            "source": "local_simulated_state",
+            "simulated": True,
+        }
+        if isinstance(device, dict):
+            payload["device"] = device
+            return {
+                "status": "ok",
+                "message": (
+                    f"The simulated state for {device['name']} is {device['state']}."
+                ),
+                "payload": payload,
+            }
+        return {
+            "status": "needs_input",
+            "message": (
+                "That device reference is stale; choose a currently configured device."
+                if match_status == "stale_reference"
+                else "Please choose one exact configured device."
+            ),
+            "missing_fields": ["device_ref"],
+            "payload": payload,
+        }
+
+    def _resolve_device(
+        self,
+        *,
+        device_ref: str | None,
+        name: str | None,
+    ) -> dict[str, Any]:
+        devices = [self._device_projection(row) for row in self._storage.list_switches()]
+        normalized_ref = str(device_ref or "").strip()
+        if normalized_ref:
+            matches = [item for item in devices if item["device_ref"] == normalized_ref]
+            if len(matches) == 1:
+                return {"device": matches[0], "candidates": [], "match_status": "exact_ref"}
+            return {
+                "device": None,
+                "candidates": [self._device_candidate(item) for item in devices[: self._MAX_CANDIDATES]],
+                "match_status": "stale_reference",
+            }
+
+        normalized_name = self._normalize_switch_name(str(name or ""))
+        exact = [item for item in devices if item["name"] == normalized_name]
+        if len(exact) == 1:
+            return {"device": exact[0], "candidates": [], "match_status": "exact_name"}
+
+        alias_matches = [
+            item
+            for item in devices
+            if normalized_name and normalized_name in item["alias_hints"]
+        ]
+        if len(alias_matches) == 1:
+            return {
+                "device": alias_matches[0],
+                "candidates": [],
+                "match_status": "unique_alias",
+            }
+        if len(alias_matches) > 1:
+            ordered = sorted(alias_matches, key=lambda item: str(item["name"]))
+            return {
+                "device": None,
+                "candidates": [
+                    self._device_candidate(item)
+                    for item in ordered[: self._MAX_CANDIDATES]
+                ],
+                "match_status": "ambiguous_alias",
+            }
+
+        requested_tokens = self._tokens(normalized_name)
+        suggestions: list[tuple[int, str, dict[str, Any]]] = []
+        for item in devices:
+            candidate_tokens = self._tokens(str(item["name"]))
+            overlap = len(requested_tokens & candidate_tokens)
+            if overlap:
+                suggestions.append((-overlap, str(item["name"]), item))
+        suggestions.sort(key=lambda item: (item[0], item[1]))
+        return {
+            "device": None,
+            "candidates": [
+                self._device_candidate(item)
+                for _, _, item in suggestions[: self._MAX_CANDIDATES]
+            ],
+            "match_status": "not_found",
+        }
+
+    @staticmethod
+    def _device_candidate(device: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "device_ref": str(device["device_ref"]),
+            "name": str(device["name"]),
+            "alias_hints": list(device.get("alias_hints") or [])[:8],
+        }
 
     def _resolve_switch_name(self, requested_name: str) -> tuple[str, bool]:
         normalized_request = self._normalize_switch_name(requested_name)
@@ -216,6 +412,76 @@ class HomeService:
             "matched_existing": matched_existing,
             "action": normalized_action,
             "switches": switches,
+        }
+
+    def set_device_state(
+        self,
+        *,
+        device_ref: str | None,
+        state: str,
+        source_interface: str | None,
+        requested_by_user_id: str | None,
+        operation_id: str,
+        arguments_hash: str,
+    ) -> dict[str, Any]:
+        desired_state = str(state or "").strip().casefold()
+        if desired_state not in {"on", "off"}:
+            return {
+                "status": "policy_denied",
+                "message": "The desired Home state is not supported.",
+                "denial_reason": "home_device_state_invalid",
+            }
+        resolved = self._resolve_device(device_ref=device_ref, name=None)
+        device = resolved.get("device")
+        if not isinstance(device, dict):
+            return {
+                "status": "needs_input",
+                "message": "That device reference is stale; choose a currently configured device.",
+                "missing_fields": ["device_ref"],
+                "payload": {
+                    "candidates": list(resolved.get("candidates") or [])[: self._MAX_CANDIDATES],
+                    "match_status": str(resolved.get("match_status") or "stale_reference"),
+                    "changed": False,
+                    "idempotent_replay": False,
+                    "source": "local_simulated_state",
+                    "simulated": True,
+                },
+            }
+        try:
+            mutation = self._storage.set_device_state(
+                name=str(device["name"]),
+                state=desired_state,
+                timestamp=_utc_now(),
+                source_interface=source_interface,
+                requested_by_user_id=requested_by_user_id,
+                operation_id=operation_id,
+                arguments_hash=arguments_hash,
+            )
+        except ValueError as exc:
+            code = str(exc).strip().casefold()
+            if code == "home_operation_id_conflict":
+                return {
+                    "status": "policy_denied",
+                    "message": "That Home operation identity conflicts with an earlier call.",
+                    "denial_reason": code,
+                }
+            return {
+                "status": "error",
+                "message": "The simulated Home state could not be updated safely.",
+            }
+        projected = self._device_projection(dict(mutation["switch"]))
+        return {
+            "status": "ok",
+            "message": f"The simulated state for {projected['name']} is {projected['state']}.",
+            "payload": {
+                "device": projected,
+                "candidates": [],
+                "match_status": "exact_ref",
+                "changed": bool(mutation.get("changed")),
+                "idempotent_replay": bool(mutation.get("idempotent_replay")),
+                "source": "local_simulated_state",
+                "simulated": True,
+            },
         }
 
     def list_switches(self) -> list[dict[str, object]]:

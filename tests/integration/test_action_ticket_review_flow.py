@@ -13,6 +13,44 @@ from app.tickets.service import ActionTicketService
 from app.tickets.verifier_registry import VerifierRegistry
 from app.tickets.verifiers.lists import ListsSourceVerifier
 from app.tools.lists_service import ListsService
+from app.workers.ticket_review_worker import TicketReviewWorker
+
+
+class _ListsRemediationGateway:
+    def __init__(self, lists):
+        self._lists = lists
+        self._results = {}
+
+    def execute_remediation(self, *, operation_id, capability, entities, context):
+        if operation_id in self._results:
+            return self._results[operation_id]
+        execution_context = {
+            **dict(context),
+            "list_owner_user_id": str(context.get("requested_by_user_id") or "all"),
+        }
+        result = run_lists(
+            intent=capability,
+            entities=dict(entities),
+            services={"lists_service": self._lists},
+            context=execution_context,
+        )
+        receipt = build_operation_receipt(
+            intent=capability,
+            entities=dict(entities),
+            context=execution_context,
+            result=result,
+            services={"lists_service": self._lists},
+        )
+        receipt["operation_id"] = operation_id
+        receipt["idempotency_key"] = f"ticket-effect-receipt:v1:{operation_id}"
+        outcome = {
+            "authorization_status": "authorized",
+            "approval_status": "not_required",
+            "result": result,
+            "receipt": receipt,
+        }
+        self._results[operation_id] = outcome
+        return outcome
 
 
 def _capture_add(*, repository, lists, item: str):
@@ -90,6 +128,7 @@ def _review_service(*, repository, lists, auto_remediation: bool):
         lists_service=lists,
         review_delay_seconds=0,
         review_max_attempts=3,
+        execution_gateway=_ListsRemediationGateway(lists),
     )
     return TicketReviewService(
         repository=repository,
@@ -143,18 +182,16 @@ def test_incorrect_list_action_creates_and_executes_bounded_child_repair(tmp_pat
         assert child["remediation_generation"] == 1
         assert lists.get_items("groceries", owner_user_id="all")["items"] == ["eggs"]
 
-        child_job = next(
-            item
-            for item in repository.claim_jobs(
-                job_type="ticket_review", worker_id="child", limit=5, lease_seconds=60
-            )
-            if item["aggregate_id"] == child["ticket_id"]
-        )
-        child_outcome = _review_service(
+        child_review = _review_service(
             repository=repository, lists=lists, auto_remediation=True
-        ).process_job(child_job)
-        assert child_outcome["ticket"]["status"] == "verified"
+        )
+        TicketReviewWorker(
+            repository=repository,
+            review_service=child_review,
+            live_idle_seconds=0,
+            review_delay_seconds=0,
+        ).run_once()
+        assert repository.get_ticket(child["ticket_id"])["status"] == "verified"
     finally:
         repository.close()
         store.close()
-

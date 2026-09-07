@@ -33,6 +33,128 @@ class CalendarService:
         except Exception:  # pragma: no cover - defensive protected-config boundary
             return None
 
+    def canonicalize_typed_write(
+        self,
+        *,
+        tool_id: str,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        if self._google_live is not None:
+            return self._google_live.canonicalize_typed_write(
+                tool_id=tool_id,
+                arguments=arguments,
+            )
+        if tool_id != "calendar.create_event":
+            raise ValueError("google_calendar_required")
+        if str(arguments.get("calendar_scope") or "").strip().casefold() not in {
+            "default",
+            "house",
+            "home",
+            "household",
+            "my",
+            "our",
+            "local",
+        }:
+            raise ValueError("calendar_scope_not_authorized")
+        if str(arguments.get("timezone") or "") != "UTC":
+            raise ValueError("calendar_timezone_stale")
+        canonical = dict(arguments)
+        canonical.update(
+            {
+                "calendar_scope": "Local",
+                "calendar_ref": "calendar_target_v1_local",
+                "resource_version": "calendar_config_v1_local",
+            }
+        )
+        return canonical
+
+    def execute_typed_write(
+        self,
+        *,
+        tool_id: str,
+        operation_id: str,
+        arguments_hash: str,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        if self._google_live is not None:
+            if tool_id == "calendar.create_event":
+                return self._google_live.execute_typed_create(
+                    operation_id=operation_id,
+                    arguments_hash=arguments_hash,
+                    arguments=arguments,
+                    include_invites=False,
+                )
+            if tool_id == "calendar.create_event_with_invites":
+                return self._google_live.execute_typed_create(
+                    operation_id=operation_id,
+                    arguments_hash=arguments_hash,
+                    arguments=arguments,
+                    include_invites=True,
+                )
+            if tool_id == "calendar.update_event":
+                return self._google_live.execute_typed_update(
+                    operation_id=operation_id,
+                    arguments_hash=arguments_hash,
+                    arguments=arguments,
+                )
+            if tool_id == "calendar.delete_event":
+                return self._google_live.execute_typed_delete(
+                    operation_id=operation_id,
+                    arguments_hash=arguments_hash,
+                    arguments=arguments,
+                )
+            return {"status": "error", "message": "Unsupported typed Calendar write."}
+        if tool_id != "calendar.create_event":
+            return {
+                "status": "error",
+                "source": "local_stub",
+                "message": "This Calendar request requires the live Google provider.",
+                "error_code": "google_calendar_required",
+            }
+        event = {
+            "event_title": str(arguments.get("title") or ""),
+            "start_at": str(arguments.get("start") or ""),
+            "end_at": str(arguments.get("end") or ""),
+            "all_day": bool(arguments.get("all_day")),
+            "timezone": str(arguments.get("timezone") or "UTC"),
+            "location": str(arguments.get("location") or ""),
+            "description": str(arguments.get("description") or ""),
+        }
+        append_once = getattr(self._storage, "append_event_once", None)
+        if callable(append_once):
+            _, changed = append_once(operation_id=operation_id, event=event)
+        else:
+            self._storage.append_event(event)
+            changed = True
+        event_ref = "calendar_event_v1_" + hashlib.sha256(
+            operation_id.encode("utf-8")
+        ).hexdigest()[:32]
+        return {
+            "status": "ok",
+            "source": "local_stub",
+            "message": "Created the local Calendar event; it is not synchronized to Google.",
+            "payload": {
+                "action": "created",
+                "sync_status": "not_synced",
+                "provider_event_id": "",
+                "event_ref": event_ref,
+                "calendar_ref": "calendar_target_v1_local",
+                "resource_version": "calendar_config_v1_local",
+                "idempotent_replay": not changed,
+                "event": {
+                    "title": event["event_title"],
+                    "start": event["start_at"],
+                    "end": event["end_at"],
+                    "all_day": event["all_day"],
+                    "timezone": event["timezone"],
+                    "location": event["location"],
+                    "attendee_emails": [],
+                    "deleted": False,
+                },
+            },
+            "committed_effect": changed,
+        }
+
     def query_events(
         self,
         *,

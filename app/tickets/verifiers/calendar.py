@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
 from app.tickets.types import ReviewVerdict, SourceObservation, iso_utc
@@ -21,7 +22,11 @@ class GoogleCalendarSourceVerifier:
     ) -> SourceObservation:
         resource_key = str(operation_receipt.get("resource_key") or "")
         result = self._calendar_service.source_event_by_id(
-            calendar_id=str(resource_locator.get("calendar_id") or ""),
+            calendar_id=str(
+                resource_locator.get("calendar_id")
+                or resource_locator.get("calendar_ref")
+                or ""
+            ),
             event_id=str(resource_locator.get("event_id") or ""),
         )
         if result.get("status") != "ok":
@@ -55,7 +60,14 @@ class GoogleCalendarSourceVerifier:
             correct = False
         provider_revision = str(event.get("google_event_etag") or "") or None
         original_revision = str(operation_receipt.get("provider_revision") or "") or None
-        later_change = bool(provider_revision and original_revision and provider_revision != original_revision)
+        observed_revision = provider_revision
+        if original_revision and original_revision.startswith("calendar_revision_v1_"):
+            observed_revision = "calendar_revision_v1_" + hashlib.sha256(
+                str(provider_revision or "").encode("utf-8")
+            ).hexdigest()
+        later_change = bool(
+            observed_revision and original_revision and observed_revision != original_revision
+        )
         return SourceObservation(
             verifier_name=self.name,
             verifier_version=self.version,

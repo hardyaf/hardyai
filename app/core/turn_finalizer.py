@@ -18,7 +18,7 @@ from app.core.persistence_policy import (
 from app.core.state_machine import RuntimePowerController
 from app.core.types import (
     EMAIL_AGENT_INTENTS,
-    FAST_COMMAND_INTENTS,
+    LEGACY_ACTION_INTENTS,
     Intent,
     SessionOwner,
     SessionState,
@@ -611,7 +611,7 @@ class TurnFinalizer:
             payload={
                 "larger_models_active": status.get("larger_models_active"),
                 "task_count": status.get("task_count"),
-                "micro_labeled_count": status.get("micro_labeled_count"),
+                "historical_labeled_count": status.get("historical_labeled_count"),
                 "main_labeled_count": status.get("main_labeled_count"),
                 "window_seconds": status.get("window_seconds"),
             },
@@ -629,12 +629,12 @@ class TurnFinalizer:
             return None
         if route in {"main_jarvis", "main_jarvis_repair", "main_skill", "main_jarvis_commitment"}:
             return SessionOwner.MAIN
-        if route == "micro_tool":
-            return SessionOwner.MICRO
         recommended_owner = cls._coerce_owner(str(classification.get("recommended_owner") or ""))
-        if recommended_owner in {SessionOwner.MICRO, SessionOwner.MAIN}:
+        if recommended_owner == SessionOwner.MAIN:
             return recommended_owner
-        return SessionOwner.MICRO if intent in FAST_COMMAND_INTENTS else None
+        if recommended_owner == SessionOwner.MICRO:
+            return SessionOwner.MAIN
+        return SessionOwner.MAIN if intent in LEGACY_ACTION_INTENTS else None
 
     @staticmethod
     def _coerce_owner(raw: str) -> SessionOwner | None:

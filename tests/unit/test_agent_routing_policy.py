@@ -5,16 +5,8 @@ from app.core.request_pipeline import ExecutionPath, RequestClassification
 from app.core.types import Intent, SessionOwner
 
 
-class _RegistryStub:
-    def __init__(self, *, micro_allowed: bool) -> None:
-        self._micro_allowed = micro_allowed
-
-    def is_micro_allowed_for_intent(self, *, skill: object, intent: str) -> bool:
-        return self._micro_allowed
-
-
-def test_agent_routing_policy_keeps_micro_owner_for_allowed_fast_intent():
-    policy = AgentRoutingPolicy(skill_registry=_RegistryStub(micro_allowed=True))
+def test_agent_routing_policy_maps_historical_owner_to_main():
+    policy = AgentRoutingPolicy()
     decision = policy.decide(
         intent=Intent.LIST_ADD_ITEM,
         recommended_owner=SessionOwner.MICRO,
@@ -24,14 +16,14 @@ def test_agent_routing_policy_keeps_micro_owner_for_allowed_fast_intent():
         skill={"skill_id": "skill.lists.core"},
     )
 
-    assert decision.owner == SessionOwner.MICRO
-    assert decision.micro_contract_escalation is False
+    assert decision.owner == SessionOwner.MAIN
+    assert decision.legacy_contract_escalation is False
     assert decision.pipeline.request_classification == RequestClassification.ACTIONABLE
     assert decision.pipeline.execution_path == ExecutionPath.SKILL
 
 
-def test_agent_routing_policy_escalates_when_micro_contract_disallows_intent():
-    policy = AgentRoutingPolicy(skill_registry=_RegistryStub(micro_allowed=False))
+def test_agent_routing_policy_keeps_all_semantic_actions_main_owned():
+    policy = AgentRoutingPolicy()
     decision = policy.decide(
         intent=Intent.HOME_SET_SWITCH,
         recommended_owner=SessionOwner.MICRO,
@@ -42,5 +34,5 @@ def test_agent_routing_policy_escalates_when_micro_contract_disallows_intent():
     )
 
     assert decision.owner == SessionOwner.MAIN
-    assert decision.micro_contract_escalation is True
-    assert "micro_contract_escalation" in decision.reasons
+    assert decision.legacy_contract_escalation is False
+    assert decision.reasons == []

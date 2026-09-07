@@ -24,7 +24,6 @@ Required deployment-only `.env` values:
 JARVIS_UID=1001
 JARVIS_GID=1001
 JARVIS_BIND_ADDRESS=127.0.0.1
-JARVIS_MICRO_MODEL=qwen2.5:7b
 JARVIS_MAIN_MODEL=gpt-oss:20b
 JARVIS_MODELS_ENABLED=false
 JARVIS_DISCORD_ENABLED=false
@@ -44,25 +43,23 @@ docker compose --env-file .env -f deploy/docker/compose.yaml up -d --build
 docker compose --env-file .env -f deploy/docker/compose.yaml ps
 ```
 
-Pull the lightweight routing model and the larger main model, then set
+Pull the Main model, then set
 `JARVIS_MODELS_ENABLED=true`:
 
 ```bash
-docker compose --env-file .env -f deploy/docker/compose.yaml exec ollama ollama pull qwen2.5:7b
 docker compose --env-file .env -f deploy/docker/compose.yaml exec ollama ollama pull gpt-oss:20b
 docker compose --env-file .env -f deploy/docker/compose.yaml up -d jarvis
 ```
 
-The runtime constrains Ollama to two loaded models and one request per model.
-Micro uses Qwen 2.5 7B and Main uses GPT-OSS 20B on the 24 GB RTX 3090. Explicit
+The runtime constrains Ollama to the Main semantic model and one request per model.
+Main uses GPT-OSS 20B on the 24 GB RTX 3090. Explicit
 per-lane context allocations must be verified with `ollama ps` after deployment;
 do not infer residency from the model's advertised maximum context.
 
-Discord uses an explicit model-entry boundary. With the production
-`DISCORD_COMMAND_PREFIX=!`, only `!phrase` or `! phrase` enters MicroJarvis.
-Allowed unprefixed messages still receive a response, but they bypass Micro and
-go to Main for conversation, action repair, or typed planning. The adapter records
-the distinction as `micro_command_explicit`; a missing value fails closed to Main.
+Discord uses one Main semantic-entry boundary. The production
+`DISCORD_COMMAND_PREFIX=!` remains accepted UI syntax, but `!phrase`, `! phrase`,
+and allowed unprefixed messages all go to Main. The adapter records only
+`command_prefix_explicit` provenance; the prefix grants no capability or authorization.
 
 Discord PDF/JPEG/PNG attachment intake is separately isolated. Core sends only a bounded
 Discord attachment descriptor to `discord-attachment-ingress`; that sidecar validates an

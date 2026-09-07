@@ -37,6 +37,19 @@ class LightsStorage(Protocol):
     def recent_actions(self, *, limit: int) -> list[dict[str, Any]]:
         """Return recent switch action history."""
 
+    def set_device_state(
+        self,
+        *,
+        name: str,
+        state: str,
+        timestamp: str,
+        source_interface: str | None,
+        requested_by_user_id: str | None,
+        operation_id: str,
+        arguments_hash: str,
+    ) -> dict[str, Any]:
+        """Atomically set one exact simulated device and record one operation."""
+
     def clear(self) -> None:
         """Clear in-memory state when applicable."""
 
@@ -87,6 +100,27 @@ class SQLiteLightsStorage:
 
     def recent_actions(self, *, limit: int) -> list[dict[str, Any]]:
         return self._sqlite_store.recent_switch_actions(limit=limit)
+
+    def set_device_state(
+        self,
+        *,
+        name: str,
+        state: str,
+        timestamp: str,
+        source_interface: str | None,
+        requested_by_user_id: str | None,
+        operation_id: str,
+        arguments_hash: str,
+    ) -> dict[str, Any]:
+        return self._sqlite_store.set_switch_state_with_operation(
+            name=name,
+            state=state,
+            timestamp=timestamp,
+            source_interface=source_interface,
+            requested_by_user_id=requested_by_user_id,
+            operation_id=operation_id,
+            arguments_hash=arguments_hash,
+        )
 
     def clear(self) -> None:
         # SQL-backed rows are cleared by store-level reset routines.
@@ -159,7 +193,67 @@ class InMemoryLightsStorage:
         bounded = max(1, min(limit, 1000))
         return list(reversed(self._actions[-bounded:]))
 
+    def set_device_state(
+        self,
+        *,
+        name: str,
+        state: str,
+        timestamp: str,
+        source_interface: str | None,
+        requested_by_user_id: str | None,
+        operation_id: str,
+        arguments_hash: str,
+    ) -> dict[str, Any]:
+        for action in self._actions:
+            if str(action.get("operation_id") or "") != operation_id:
+                continue
+            if (
+                str(action.get("switch_name") or "") != name
+                or str(action.get("action") or "") != state
+                or str(action.get("arguments_hash") or "") != arguments_hash
+            ):
+                raise ValueError("home_operation_id_conflict")
+            return {
+                "switch": {
+                    "name": name,
+                    "room_name": self._switches.get(name, {}).get("room_name"),
+                    "state": str(action.get("state_after") or state),
+                    "updated_at": str(action.get("timestamp") or timestamp),
+                },
+                "changed": bool(action.get("changed")),
+                "idempotent_replay": True,
+            }
+        current = self._switches.get(name)
+        if current is None:
+            raise ValueError("home_device_not_found")
+        changed = str(current.get("state") or "") != state
+        if changed:
+            current["state"] = state
+            current["updated_at"] = timestamp
+        self._actions.append(
+            {
+                "timestamp": timestamp,
+                "switch_name": name,
+                "action": state,
+                "state_after": state,
+                "source_interface": source_interface,
+                "requested_by_user_id": requested_by_user_id,
+                "operation_id": operation_id,
+                "arguments_hash": arguments_hash,
+                "changed": changed,
+            }
+        )
+        return {
+            "switch": {
+                "name": name,
+                "room_name": current.get("room_name"),
+                "state": state,
+                "updated_at": current.get("updated_at"),
+            },
+            "changed": changed,
+            "idempotent_replay": False,
+        }
+
     def clear(self) -> None:
         self._switches.clear()
         self._actions.clear()
-

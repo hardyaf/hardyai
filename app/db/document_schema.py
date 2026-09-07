@@ -3,7 +3,60 @@ from __future__ import annotations
 import sqlite3
 
 
-DOCUMENT_SCHEMA_VERSION = 14
+DOCUMENT_SCHEMA_VERSION = 15
+DOCUMENT_SCHEMA_READER_VERSION = 15
+
+
+def evaluate_document_schema_reader_compatibility(
+    conn: sqlite3.Connection,
+    *,
+    reader_version: int = DOCUMENT_SCHEMA_READER_VERSION,
+) -> tuple[bool, str, int]:
+    """Read-only compatibility decision for an encrypted Documents database."""
+
+    current = int(conn.execute("PRAGMA user_version").fetchone()[0])
+    if current <= int(reader_version):
+        return True, "schema_not_newer", current
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='document_schema_reader_compatibility'"
+    ).fetchone() is None:
+        return False, "compatibility_table_missing", current
+    try:
+        rows = conn.execute(
+            """
+            SELECT schema_version, minimum_reader_version, change_class
+            FROM document_schema_reader_compatibility
+            WHERE schema_version > ? AND schema_version <= ?
+            ORDER BY schema_version
+            """,
+            (int(reader_version), current),
+        ).fetchall()
+    except sqlite3.Error:
+        return False, "compatibility_table_invalid", current
+    by_version: dict[int, list[sqlite3.Row | tuple[object, ...]]] = {}
+    try:
+        for row in rows:
+            by_version.setdefault(int(row[0]), []).append(row)
+    except (TypeError, ValueError):
+        return False, "compatibility_row_invalid", current
+    for version in range(int(reader_version) + 1, current + 1):
+        version_rows = by_version.get(version, [])
+        if not version_rows:
+            return False, "compatibility_row_missing", current
+        if len(version_rows) != 1:
+            return False, "compatibility_row_invalid", current
+        try:
+            minimum = int(version_rows[0][1])
+            change_class = str(version_rows[0][2] or "").strip().casefold()
+        except (TypeError, ValueError):
+            return False, "compatibility_row_invalid", current
+        if minimum < 0:
+            return False, "compatibility_row_invalid", current
+        if change_class != "additive":
+            return False, "change_not_additive", current
+        if minimum > int(reader_version):
+            return False, "minimum_reader_too_new", current
+    return True, "additive_reader_bridge", current
 
 
 def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -477,6 +530,7 @@ def _migrate_phase6_classification_and_extraction(conn: sqlite3.Connection) -> N
             source_version_id TEXT NOT NULL,
             field_name TEXT NOT NULL,
             review_decision_id TEXT NOT NULL UNIQUE,
+            operation_id TEXT,
             selected_observation_id TEXT,
             applied_value_json TEXT,
             decision_kind TEXT NOT NULL,
@@ -511,6 +565,8 @@ def _migrate_phase6_classification_and_extraction(conn: sqlite3.Connection) -> N
             ON document_field_observations(document_id, source_version_id, field_name, created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_document_field_decisions_lookup
             ON document_field_decisions(document_id, source_version_id, field_name, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_document_field_decisions_operation
+            ON document_field_decisions(operation_id, created_at) WHERE operation_id IS NOT NULL;
         CREATE INDEX IF NOT EXISTS idx_document_metadata_sync_state
             ON document_metadata_sync(state, updated_at);
         """
@@ -693,14 +749,68 @@ def _migrate_phase10_restricted_access_audit(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_reasoning_led_tool_operations(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS document_schema_reader_compatibility (
+            schema_version INTEGER PRIMARY KEY,
+            minimum_reader_version INTEGER NOT NULL,
+            change_class TEXT NOT NULL,
+            description TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO document_schema_reader_compatibility (
+            schema_version, minimum_reader_version, change_class, description
+        ) VALUES (
+            15, 14, 'additive',
+            'Adds idempotent reasoning-led Documents tool operations and field-decision linkage.'
+        )
+        ON CONFLICT(schema_version) DO UPDATE SET
+            minimum_reader_version=excluded.minimum_reader_version,
+            change_class=excluded.change_class,
+            description=excluded.description
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS document_tool_operations (
+            operation_id TEXT PRIMARY KEY,
+            tool_id TEXT NOT NULL,
+            arguments_hash TEXT NOT NULL,
+            status TEXT NOT NULL,
+            target_ref TEXT NOT NULL,
+            result_ref TEXT,
+            created_at TEXT NOT NULL,
+            completed_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_document_tool_operations_target "
+        "ON document_tool_operations(target_ref, created_at DESC)"
+    )
+    if "operation_id" not in _columns(conn, "document_field_decisions"):
+        conn.execute("ALTER TABLE document_field_decisions ADD COLUMN operation_id TEXT")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_document_field_decisions_operation "
+        "ON document_field_decisions(operation_id, created_at) WHERE operation_id IS NOT NULL"
+    )
+
+
 def initialize_document_schema(conn: sqlite3.Connection) -> int:
     """Initialize the private Documents ledger; this DB is never mounted by core Jarvis."""
 
     current = int(conn.execute("PRAGMA user_version").fetchone()[0])
     if current > DOCUMENT_SCHEMA_VERSION:
-        raise RuntimeError(
-            f"Document schema version {current} is newer than supported version {DOCUMENT_SCHEMA_VERSION}."
-        )
+        compatible, _reason, _version = evaluate_document_schema_reader_compatibility(conn)
+        if not compatible:
+            raise RuntimeError(
+                f"Document schema version {current} is newer than supported version {DOCUMENT_SCHEMA_VERSION}."
+            )
+        return current
     if current < 1:
         conn.executescript(
             """
@@ -817,4 +927,16 @@ def initialize_document_schema(conn: sqlite3.Connection) -> int:
         _migrate_phase10_restricted_access_audit(conn)
         conn.execute("PRAGMA user_version = 14")
         conn.commit()
+        current = 14
+    if current < 15:
+        if conn.in_transaction:
+            conn.commit()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            _migrate_reasoning_led_tool_operations(conn)
+            conn.execute("PRAGMA user_version = 15")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
     return DOCUMENT_SCHEMA_VERSION

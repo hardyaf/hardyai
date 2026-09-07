@@ -209,6 +209,8 @@ class EmailAgentService:
         config: EmailAgentRuntimeConfig,
         event_log: EventLogService | None = None,
         worker_id: str | None = None,
+        effect_manifest_reservation: Any | None = None,
+        ticket_resolver: Any | None = None,
     ) -> None:
         self._storage = storage
         self._gateway = gateway
@@ -230,6 +232,8 @@ class EmailAgentService:
             storage=storage,
             permissions=permissions,
             max_attempts=config.max_provider_attempts,
+            effect_manifest_reservation=effect_manifest_reservation,
+            ticket_resolver=ticket_resolver,
         )
 
     def run_due(self, *, now: datetime | None = None) -> dict[str, Any] | None:

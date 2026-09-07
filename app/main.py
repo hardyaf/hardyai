@@ -122,6 +122,7 @@ async def _lifespan(application: FastAPI):
             attachment_ingress=discord_attachment_ingress,
             document_completion_notifications=document_completion_notifications,
             model_compute_budget_notifications=model_compute_budget_notifications,
+            human_review_service=container.human_review_service,
             document_notification_poll_seconds=(
                 settings.discord_document_notification_poll_seconds
             ),

@@ -17,23 +17,6 @@ active: true
 version: 1
 cron_enabled: true
 cron_expr: config:private_notes_channels
-micro_enabled: false
-micro_functions: []
-micro_failure_handoff:
-  baseline_context_keys:
-    - micro_intent
-    - micro_confidence
-    - micro_entities
-    - micro_ambiguity_flags
-    - required_missing_fields
-    - agent_id
-    - agent_display_name
-    - main_agent_token_session
-  capability_context_keys:
-    - private_notes_channel_id
-    - private_notes_owner_user_id
-    - private_notes_pending_count
-    - private_notes_last_capture_at
 main_handoff_context:
   always_pass_from_session:
     - main_agent_token_session
@@ -113,20 +96,9 @@ deliver one bounded evening digest in that channel.
 - Retention failure does not broaden the deletion query or delete undelivered notes; the next scheduler pass retries.
 - All loops, note counts, message parts, and delivery attempts have hard caps.
 
-## MicroJarvis Contract
+## Execution Ownership
 
-### Micro functions that are allowed
-
-- None. Capture is adapter-owned and scheduling is domain-owned.
-
-### Escalation triggers to Main Jarvis
-
-- None during capture. Digest compilation may use a conversation model directly but cannot route tools.
-
-### Failure handoff payload to Main Jarvis
-
-- Preserve the baseline fields plus configured channel, owner, pending count, and last capture time if an
-  operator later requests a diagnostic handoff.
+Capture remains adapter-owned and scheduling remains domain-owned.
 
 ## Main Handoff Context Contract
 
@@ -137,7 +109,7 @@ deliver one bounded evening digest in that channel.
 ## Learnability Checklist
 
 - [x] Domain-only execution path.
-- [x] Explicit failure handoff contract.
+- [x] Explicit Main context contract.
 - [x] Immutable author and channel scoping.
 - [x] Idempotent capture and daily digest keys.
 - [x] Bounded note, output-part, and retry limits.

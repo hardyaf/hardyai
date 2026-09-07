@@ -6,7 +6,7 @@ Status: implemented for every Ollama-backed model lane; PaddleOCR-VL uses its bo
 
 Configured output-token counts are efficient starting points, not cost or quality ceilings. When Ollama reports `length`/token-limit completion, or the observed generation count reaches the requested allowance, the same model call is retried with a larger output budget. The default sequence doubles the budget for at most four total attempts and never exceeds eight times the lane's starting budget. A repeated exhaustion at that boundary is treated as a failed loop and returns through the lane's existing failure contract.
 
-The policy applies to Micro classification, Main repair, Main conversation/turn commitment, research decisions, email classification, email summaries, and action-ticket review. It does not retry network, authorization, or provider failures as token problems.
+The policy applies to Main repair compatibility, Main conversation/turn commitment, research decisions, email classification, email summaries, and action-ticket review. It does not retry network, authorization, or provider failures as token problems.
 
 PaddleOCR-VL currently receives 4,096 `max_new_tokens` up front. Its pipeline API does not return a dependable generated-token count or stop reason, so speculative reruns would waste accelerator availability without proving truncation. This is compatibility debt: if the provider exposes a trustworthy exhaustion signal, it should adopt the same adaptive policy.
 

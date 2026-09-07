@@ -15,23 +15,6 @@ active: true
 version: 1
 cron_enabled: true
 cron_expr: hourly:08-20@America/New_York
-micro_enabled: false
-micro_functions: []
-micro_failure_handoff:
-  baseline_context_keys:
-    - micro_intent
-    - micro_confidence
-    - micro_entities
-    - micro_ambiguity_flags
-    - required_missing_fields
-    - agent_id
-    - agent_display_name
-    - main_agent_token_session
-  capability_context_keys:
-    - calendar_inbox_slot_key
-    - calendar_inbox_last_status
-    - calendar_inbox_last_counts
-    - calendar_inbox_last_error_type
 main_handoff_context:
   always_pass_from_session:
     - main_agent_token_session
@@ -118,19 +101,9 @@ appear on the configured house Google Calendar and therefore in normal Jarvis ca
 - Exhausted work becomes dead-letter state for operator inspection.
 - All job, page, message, payload-size, payload-count, and event-count loops have hard caps.
 
-## MicroJarvis Contract
+## Execution Ownership
 
-### Micro functions that are allowed
-
-- None. This capability is clock-owned and domain-executed.
-
-### Escalation triggers to Main Jarvis
-
-- None during scheduled ingestion.
-
-### Failure handoff payload to Main Jarvis
-
-- Preserve baseline context plus last slot, status, bounded counts, and error type for operator diagnostics.
+This capability remains clock-owned and domain-executed; it is not an interactive Main tool.
 
 ## Main Handoff Context Contract
 
@@ -140,7 +113,7 @@ appear on the configured house Google Calendar and therefore in normal Jarvis ca
 ## Learnability Checklist
 
 - [x] Domain-only execution path.
-- [x] Explicit failure handoff contract.
+- [x] Explicit Main context contract.
 - [x] Immutable Gmail message and iCalendar deduplication keys.
 - [x] Sender allowlist and house-calendar-only write scope.
 - [x] Bounded clock, retry, batch, MIME, and event loops.

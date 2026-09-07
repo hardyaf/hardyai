@@ -64,8 +64,6 @@ repo_root="$(cd -- "${script_dir}/../.." && pwd -P)"
 [[ -f "${repo_root}/.env.example" ]] || fail ".env.example is missing from ${repo_root}"
 [[ -s "${repo_root}/app/prompts/skills/critical_skills.md" ]] \
   || fail "checked-in critical skill artifact is missing from ${repo_root}"
-[[ -s "${repo_root}/app/prompts/micro_jarvis_skills.md" ]] \
-  || fail "checked-in micro skill artifact is missing from ${repo_root}"
 
 [[ -r /etc/os-release ]] || fail "cannot identify the operating system because /etc/os-release is unavailable"
 # /etc/os-release is trusted operating-system metadata on the target host.

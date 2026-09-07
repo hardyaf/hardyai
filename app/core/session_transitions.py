@@ -7,7 +7,7 @@ from app.services.event_log import EventLogService
 
 _OWNER_LABEL = {
     SessionOwner.SYSTEM: "system",
-    SessionOwner.MICRO: "micro",
+    SessionOwner.MICRO: "historical",
     SessionOwner.MAIN: "main",
 }
 

@@ -7,6 +7,7 @@ import pytest
 
 from app.services.google.gmail_spam_writer import GmailManagedLabelWriteResult
 from app.skills.domains.email_agent.catalog import EmailCatalogService
+from app.skills.domains.email_agent.storage import inspect_email_operations_worker_database
 from app.workers.email_operations_worker import (
     EmailOperationsWorker,
     EmailOperationsWorkerConfig,
@@ -192,5 +193,38 @@ def test_readiness_never_calls_the_provider(tmp_path):
         "worker_enabled": True,
         "managed_label_count": 2,
         "legacy_claim_eligible_count": 0,
+        "schema_version": 14,
+        "schema_ready": True,
+        "supported_row_kinds": True,
+        "unsupported_row_count": 0,
+        "active_lease_owner_count": 0,
+        "single_worker_ownership": True,
     }
     storage.close()
+
+
+def test_readiness_database_inspection_is_read_only(tmp_path):
+    permissions, storage, _ = _setup(tmp_path)
+    database = tmp_path / "email.db"
+    storage.close()
+    before = database.read_bytes()
+
+    inspection, stored_label_refs = inspect_email_operations_worker_database(
+        str(database),
+        now=NOW.isoformat(),
+    )
+
+    assert database.read_bytes() == before
+    assert inspection == {
+        "schema_version": 14,
+        "schema_ready": True,
+        "supported_row_kinds": True,
+        "unsupported_row_count": 0,
+        "active_lease_owner_count": 0,
+        "single_worker_ownership": True,
+    }
+    assert stored_label_refs == {
+        EmailCatalogService.label_ref(label.key)
+        for label in permissions.managed_labels
+        if label.enabled
+    }

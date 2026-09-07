@@ -75,6 +75,21 @@ class ListsStorage(Protocol):
     ) -> dict[str, object]:
         """Add one bounded item array and its operation identity atomically."""
 
+    def mutate_collection(
+        self,
+        *,
+        owner_user_id: str,
+        list_id: str,
+        action: str,
+        item_ids: list[str],
+        patch: dict[str, object],
+        expected_version: str,
+        timestamp: str,
+        operation_id: str,
+        arguments_hash: str,
+    ) -> dict[str, object]:
+        """Apply one exact update/remove/clear/delete and record it atomically."""
+
     def list_item_entries(self, *, owner_user_id: str, list_name: str) -> list[dict[str, object]]:
         """Return item rows for one normalized list name."""
 
@@ -237,6 +252,31 @@ class SQLiteListsStorage:
             list_id=list_id,
             item_names=item_names,
             added_by=added_by,
+            timestamp=timestamp,
+            operation_id=operation_id,
+            arguments_hash=arguments_hash,
+        )
+
+    def mutate_collection(
+        self,
+        *,
+        owner_user_id: str,
+        list_id: str,
+        action: str,
+        item_ids: list[str],
+        patch: dict[str, object],
+        expected_version: str,
+        timestamp: str,
+        operation_id: str,
+        arguments_hash: str,
+    ) -> dict[str, object]:
+        return self._sqlite_store.mutate_list_with_operation(
+            owner_user_id=owner_user_id,
+            list_id=list_id,
+            action=action,
+            item_ids=item_ids,
+            patch=patch,
+            expected_version=expected_version,
             timestamp=timestamp,
             operation_id=operation_id,
             arguments_hash=arguments_hash,
@@ -567,6 +607,111 @@ class InMemoryListsStorage:
             "existing_item_count": existing_count,
             "idempotent_replay": False,
         }
+
+    def mutate_collection(
+        self,
+        *,
+        owner_user_id: str,
+        list_id: str,
+        action: str,
+        item_ids: list[str],
+        patch: dict[str, object],
+        expected_version: str,
+        timestamp: str,
+        operation_id: str,
+        arguments_hash: str,
+    ) -> dict[str, object]:
+        owner = owner_user_id.strip().lower() or "all"
+        allowed = {
+            "lists.update_item",
+            "lists.remove_items",
+            "lists.clear_collection",
+            "lists.delete_collection",
+        }
+        if action not in allowed:
+            raise ValueError("list_operation_action_invalid")
+        existing = self._operations.get(operation_id)
+        if existing is not None:
+            if (
+                existing.get("owner_user_id") != owner
+                or existing.get("action") != action
+                or existing.get("target_ref") != list_id
+                or existing.get("arguments_hash") != arguments_hash
+            ):
+                raise ValueError("list_operation_id_conflict")
+            result = existing.get("result")
+            if not isinstance(result, dict):
+                raise ValueError("list_operation_result_invalid")
+            return {**result, "idempotent_replay": True}
+
+        record = self.get_list_record_by_id(owner_user_id=owner, list_id=list_id)
+        if record is None:
+            raise ValueError("list_collection_not_authorized")
+        name = str(record["list_name_normalized"])
+        if str(record.get("updated_at") or "") != expected_version:
+            raise ValueError("list_collection_version_stale")
+        entries = self._owner_bucket(owner)[name]
+        by_id = {str(item.get("item_id") or ""): item for item in entries}
+        if len(item_ids) != len(set(item_ids)) or any(item_id not in by_id for item_id in item_ids):
+            raise ValueError("list_item_not_authorized")
+
+        changed = False
+        result: dict[str, object]
+        if action == "lists.update_item":
+            if len(item_ids) != 1 or not patch or set(patch) - {"text", "checked"}:
+                raise ValueError("list_item_patch_invalid")
+            item = by_id[item_ids[0]]
+            if "text" in patch and str(item.get("item_name") or "") != str(patch["text"]):
+                item["item_name"] = str(patch["text"])
+                changed = True
+            if "checked" in patch and bool(item.get("checked")) != bool(patch["checked"]):
+                item["checked"] = bool(patch["checked"])
+                changed = True
+            if changed:
+                item["updated_at"] = timestamp
+            result = {"item": dict(item), "changed": changed}
+        elif action == "lists.remove_items":
+            if not 1 <= len(item_ids) <= 50:
+                raise ValueError("list_item_references_invalid")
+            removed = [dict(by_id[item_id]) for item_id in item_ids]
+            wanted = set(item_ids)
+            entries[:] = [item for item in entries if str(item.get("item_id") or "") not in wanted]
+            for position, item in enumerate(entries, start=1):
+                item["position"] = position
+            changed = True
+            result = {
+                "removed_items": removed,
+                "remaining_item_count": len(entries),
+                "changed": True,
+            }
+        elif action == "lists.clear_collection":
+            removed_count = len(entries)
+            entries.clear()
+            changed = removed_count > 0
+            result = {"removed_item_count": removed_count, "changed": changed}
+        else:
+            deleted_count = len(entries)
+            del self._owner_bucket(owner)[name]
+            self._list_ids.pop((owner, name), None)
+            self._list_updated_at.pop((owner, name), None)
+            changed = True
+            result = {
+                "deleted": True,
+                "deleted_item_count": deleted_count,
+                "changed": True,
+            }
+        version = timestamp if changed and action != "lists.delete_collection" else expected_version
+        if action != "lists.delete_collection" and changed:
+            self._list_updated_at[(owner, name)] = timestamp
+        result["collection_version"] = version
+        self._operations[operation_id] = {
+            "owner_user_id": owner,
+            "action": action,
+            "target_ref": list_id,
+            "arguments_hash": arguments_hash,
+            "result": dict(result),
+        }
+        return {**result, "idempotent_replay": False}
 
     def list_item_entries(self, *, owner_user_id: str, list_name: str) -> list[dict[str, object]]:
         bucket = self._owner_bucket(owner_user_id)

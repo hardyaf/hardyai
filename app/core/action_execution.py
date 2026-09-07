@@ -103,8 +103,8 @@ class ActionExecutionService:
             session_id=f"direct:{intent.value}:{request_id}",
             user_id=user_id,
             source=source_interface,
-            state=SessionState.FAST_COMMAND,
-            owner=SessionOwner.MICRO,
+            state=SessionState.CONVERSATIONAL,
+            owner=SessionOwner.MAIN,
             context_reference={"active_agent_id": agent_id},
         )
         classification = {
@@ -112,7 +112,7 @@ class ActionExecutionService:
             "confidence": 1.0,
             "entities": dict(entities),
             "ambiguity_flags": [],
-            "recommended_owner": "micro",
+            "recommended_owner": SessionOwner.MAIN.value,
             "reasoning": route,
         }
         if self._action_ticket_service is not None:

@@ -18,7 +18,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from app.db.document_schema import DOCUMENT_SCHEMA_VERSION  # noqa: E402
+from app.db.document_schema import (  # noqa: E402
+    DOCUMENT_SCHEMA_READER_VERSION,
+    evaluate_document_schema_reader_compatibility,
+)
 
 _REQUIRED_BACKUP_FILES = {
     "accepted-spool.tar",
@@ -307,20 +310,22 @@ def reader_check(args: argparse.Namespace) -> int:
         )
         try:
             connection.execute("PRAGMA query_only = ON")
-            version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            compatible, reason, version = evaluate_document_schema_reader_compatibility(
+                connection,
+                reader_version=DOCUMENT_SCHEMA_READER_VERSION,
+            )
         finally:
             connection.close()
     except (OSError, sqlite3.Error, TypeError, ValueError):
         print('{"reason":"database_unreadable","result":"incompatible","version":null}')
         return 1
 
-    compatible = version <= DOCUMENT_SCHEMA_VERSION
     print(
         json.dumps(
             {
                 "version": version,
                 "result": "compatible" if compatible else "incompatible",
-                "reason": "schema_not_newer" if compatible else "schema_newer",
+                "reason": reason,
             },
             separators=(",", ":"),
             sort_keys=True,

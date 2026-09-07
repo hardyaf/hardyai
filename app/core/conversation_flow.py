@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from app.core.micro_jarvis import MicroDecision
+from app.core.types import RoutingDecision
 from app.core.session_store import SessionRecord
 from app.core.types import Intent, SessionOwner, SessionState
 from app.schemas.api import AskRequest
@@ -35,7 +35,7 @@ class ConversationFlow:
         self,
         *,
         session: SessionRecord,
-        decision: MicroDecision,
+        decision: RoutingDecision,
         classification: dict[str, Any],
         response: dict[str, Any],
         request_text: str,
@@ -205,7 +205,7 @@ class ConversationFlow:
     def _maybe_open_tool_followup(
         self,
         session: SessionRecord,
-        decision: MicroDecision,
+        decision: RoutingDecision,
         tool_result: dict[str, Any],
         request_text: str,
         user_id: str,
@@ -349,10 +349,10 @@ class ConversationFlow:
         response = router._main_jarvis.respond(
             text=followup_prompt,
             context={
-                "micro_intent": Intent.CONVERSATIONAL.value,
-                "micro_confidence": 0.72,
-                "micro_entities": merged_entities,
-                "micro_ambiguity_flags": ["conversation_clarification_completed"],
+                "initial_intent": Intent.CONVERSATIONAL.value,
+                "initial_confidence": 0.72,
+                "initial_entities": merged_entities,
+                "initial_ambiguity_flags": ["conversation_clarification_completed"],
                 "runtime_skill_intents": [Intent.CONVERSATIONAL.value],
                 "runtime_capability_catalog": router._runtime_capability_catalog(
                     payload=payload,

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from app.config import settings
@@ -10,7 +12,25 @@ from app.skills.tool_contracts import (
     ToolContractError,
     ToolDescriptor,
     canonical_json,
+    thaw_json,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedToolCall:
+    envelope: ToolCallEnvelope
+    descriptor: ToolDescriptor
+    descriptor_hash: str
+    resource_version: str
+
+
+@dataclass(frozen=True, slots=True)
+class AuthorizedToolReference:
+    """Current content-free authorization and version for a tool descriptor."""
+
+    descriptor: ToolDescriptor
+    descriptor_hash: str
+    resource_version: str
 
 
 class AuthorizedSkillExecutor:
@@ -80,6 +100,9 @@ class AuthorizedSkillExecutor:
                 "skill_scopes",
                 "principal_kind",
                 "principal_subject",
+                "age_band",
+                "policy_profile",
+                "is_child",
                 "session_id",
                 "session_channel",
             ):
@@ -148,6 +171,96 @@ class AuthorizedSkillExecutor:
             if not set(descriptor.runtime_dependencies).issubset(normalized_dependencies):
                 return False
         return descriptor.interactive
+
+    def authorize_tool_reference(
+        self,
+        *,
+        tool_id: str,
+        contract_version: int,
+        source_interface: str,
+        requested_by_user_id: str,
+        agent_id: str,
+        request_context: dict[str, Any] | None,
+    ) -> AuthorizedToolReference | dict[str, Any]:
+        """Reauthorize a descriptor without recovering or persisting source values."""
+
+        if self._skill_registry is None or self._execution_mode != "active":
+            return self._tool_denied("typed_execution_inactive")
+        resolve_tool = getattr(self._skill_registry, "resolve_tool", None)
+        if not callable(resolve_tool):
+            return self._tool_denied("tool_registry_unavailable")
+        context = self.build_context(
+            source_interface=source_interface,
+            requested_by_user_id=requested_by_user_id,
+            agent_id=agent_id,
+            request_context=request_context,
+            request_id=None,
+        )
+        try:
+            resolved = resolve_tool(
+                tool_id=str(tool_id or "").strip().casefold(),
+                user_id=requested_by_user_id,
+                agent_id=agent_id,
+            )
+        except ToolContractError as exc:
+            return self._tool_denied(exc.code)
+        if not isinstance(resolved, tuple) or len(resolved) != 2:
+            return self._tool_denied("tool_unknown_or_unauthorized")
+        skill, descriptor = resolved
+        if not isinstance(skill, dict) or not isinstance(descriptor, ToolDescriptor):
+            return self._tool_denied("tool_descriptor_invalid")
+        if descriptor.contract_version != int(contract_version):
+            return self._tool_denied("tool_contract_stale")
+        if not self._descriptor_enabled(descriptor, request_context=context, allow_shadow=False):
+            return self._tool_denied("tool_rollout_disabled")
+        availability = self._dispatcher.describe_capability(skill=skill, context=context)
+        if not isinstance(availability, dict) or not (
+            availability.get("configured") is True
+            and availability.get("authorized_here") is True
+        ):
+            return self._tool_denied("tool_not_authorized_here")
+        try:
+            current = resolve_tool(
+                tool_id=descriptor.tool_id,
+                user_id=requested_by_user_id,
+                agent_id=agent_id,
+            )
+        except ToolContractError as exc:
+            return self._tool_denied(exc.code)
+        if not isinstance(current, tuple) or len(current) != 2:
+            return self._tool_denied("tool_became_unavailable")
+        current_skill, current_descriptor = current
+        if not isinstance(current_skill, dict) or not isinstance(
+            current_descriptor, ToolDescriptor
+        ):
+            return self._tool_denied("tool_descriptor_invalid")
+        if canonical_json(current_descriptor.to_storage_dict()) != canonical_json(
+            descriptor.to_storage_dict()
+        ):
+            return self._tool_denied("tool_contract_stale")
+        current_availability = self._dispatcher.describe_capability(
+            skill=current_skill,
+            context=context,
+        )
+        if not isinstance(current_availability, dict) or not (
+            current_availability.get("configured") is True
+            and current_availability.get("authorized_here") is True
+        ):
+            return self._tool_denied("tool_authorization_changed")
+        resource_version = str(
+            current_skill.get("updated_at")
+            or current_skill.get("main_tools_contract_version")
+            or current_descriptor.contract_version
+        ).strip()
+        if not resource_version:
+            return self._tool_denied("tool_resource_version_missing")
+        return AuthorizedToolReference(
+            descriptor=current_descriptor,
+            descriptor_hash=hashlib.sha256(
+                canonical_json(current_descriptor.to_storage_dict()).encode("utf-8")
+            ).hexdigest(),
+            resource_version=resource_version,
+        )
 
     def discovery_cards(
         self,
@@ -294,7 +407,38 @@ class AuthorizedSkillExecutor:
         }
         return "authz_v1_" + hashlib.sha256(canonical_json(material).encode("utf-8")).hexdigest()
 
-    def execute_tool(
+    @staticmethod
+    def _canonicalize_independent_batch_targets(
+        descriptor: ToolDescriptor,
+        arguments: Mapping[str, Any],
+    ) -> Any:
+        if descriptor.effect_cardinality != "independent_batch":
+            return arguments
+        properties = descriptor.input_schema.get("properties")
+        required = descriptor.input_schema.get("required")
+        if not isinstance(properties, Mapping) or not isinstance(required, (list, tuple)):
+            raise ToolContractError("independent_batch_target_contract_invalid")
+        target_fields = [
+            str(name)
+            for name, schema in properties.items()
+            if name in required
+            and isinstance(schema, Mapping)
+            and schema.get("type") == "array"
+            and isinstance(arguments.get(str(name)), (list, tuple))
+        ]
+        if not target_fields:
+            raise ToolContractError("independent_batch_target_contract_invalid")
+        target_field = target_fields[0]
+        targets = list(arguments[target_field])
+        canonical_targets = [canonical_json(item) for item in targets]
+        if len(canonical_targets) != len(set(canonical_targets)):
+            raise ToolContractError("independent_batch_target_duplicate")
+        ordered = [item for _, item in sorted(zip(canonical_targets, targets, strict=True))]
+        normalized = thaw_json(arguments)
+        normalized[target_field] = ordered
+        return descriptor.validate_arguments(normalized)
+
+    def prepare_tool_call(
         self,
         *,
         tool_id: str,
@@ -306,7 +450,7 @@ class AuthorizedSkillExecutor:
         request_context: dict[str, Any] | None,
         request_id: str,
         call_ordinal: int,
-    ) -> dict[str, Any]:
+    ) -> PreparedToolCall | dict[str, Any]:
         if self._skill_registry is None or self._execution_mode != "active":
             return self._tool_denied("typed_execution_inactive")
         resolve_tool = getattr(self._skill_registry, "resolve_tool", None)
@@ -351,6 +495,10 @@ class AuthorizedSkillExecutor:
                 context=context,
             )
             canonical_arguments = descriptor.validate_arguments(canonical_arguments)
+            canonical_arguments = self._canonicalize_independent_batch_targets(
+                descriptor,
+                canonical_arguments,
+            )
         except (ToolContractError, TypeError, ValueError) as exc:
             code = exc.code if isinstance(exc, ToolContractError) else "tool_arguments_invalid"
             return self._tool_denied(code)
@@ -388,6 +536,16 @@ class AuthorizedSkillExecutor:
             or context.get("session_channel")
             or source_interface
         ).strip()
+        descriptor_hash = hashlib.sha256(
+            canonical_json(current_descriptor.to_storage_dict()).encode("utf-8")
+        ).hexdigest()
+        resource_version = str(
+            current_skill.get("updated_at")
+            or current_skill.get("main_tools_contract_version")
+            or current_descriptor.contract_version
+        ).strip()
+        if not resource_version:
+            return self._tool_denied("tool_resource_version_missing")
         try:
             envelope = ToolCallEnvelope.create(
                 root_request_id=request_id,
@@ -411,13 +569,52 @@ class AuthorizedSkillExecutor:
                     context=context,
                 ),
                 validated_arguments=canonical_arguments,
+                resource_version=resource_version,
             )
         except ToolContractError as exc:
             return self._tool_denied(exc.code)
-        result = self._dispatcher.execute_tool(envelope)
+        return PreparedToolCall(
+            envelope=envelope,
+            descriptor=current_descriptor,
+            descriptor_hash=descriptor_hash,
+            resource_version=resource_version,
+        )
+
+    def execute_prepared_tool(self, prepared: PreparedToolCall) -> dict[str, Any]:
+        """Dispatch a call that this executor prepared and authorized in the current turn."""
+
+        result = self._dispatcher.execute_tool(prepared.envelope)
         if not isinstance(result, dict):
             return self._tool_denied("tool_handler_unavailable")
         return result
+
+    def execute_tool(
+        self,
+        *,
+        tool_id: str,
+        contract_version: int,
+        arguments: dict[str, Any],
+        source_interface: str,
+        requested_by_user_id: str,
+        agent_id: str,
+        request_context: dict[str, Any] | None,
+        request_id: str,
+        call_ordinal: int,
+    ) -> dict[str, Any]:
+        prepared = self.prepare_tool_call(
+            tool_id=tool_id,
+            contract_version=contract_version,
+            arguments=arguments,
+            source_interface=source_interface,
+            requested_by_user_id=requested_by_user_id,
+            agent_id=agent_id,
+            request_context=request_context,
+            request_id=request_id,
+            call_ordinal=call_ordinal,
+        )
+        if isinstance(prepared, dict):
+            return prepared
+        return self.execute_prepared_tool(prepared)
 
     def execute(
         self,
@@ -516,6 +713,12 @@ class RuntimeCapabilityProjector:
             if not isinstance(raw, dict):
                 continue
             entry = dict(raw)
+            for retired_key in (
+                "micro_enabled",
+                "micro_intents",
+                "legacy_classifier_intents",
+            ):
+                entry.pop(retired_key, None)
             documented_intents = [
                 str(item or "").strip().casefold()
                 for item in entry.get("intents") or []
@@ -524,11 +727,6 @@ class RuntimeCapabilityProjector:
             entry["intents"] = documented_intents
             entry["main_intents"] = [
                 intent for intent in documented_intents if intent in self._main_action_intents
-            ]
-            entry["micro_intents"] = [
-                str(item or "").strip().casefold()
-                for item in entry.get("micro_intents") or []
-                if str(item or "").strip().casefold() in self._known_intents
             ]
             skill = self._resolve_catalog_skill(
                 entry=entry,

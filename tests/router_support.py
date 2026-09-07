@@ -27,7 +27,6 @@ class PermissiveTestSkillRegistry:
                     "skill_id": f"test.{prefix.rstrip('.')}",
                     "active": True,
                     "execution_ref": execution_ref,
-                    "micro_enabled": not normalized.startswith(("email.", "documents.")),
                     "intents": [normalized],
                 }
         return None
@@ -57,10 +56,6 @@ class PermissiveTestSkillRegistry:
     def runtime_capability_catalog(*, user_id: str, agent_id: str) -> list[dict[str, Any]]:
         del user_id, agent_id
         return []
-
-    @staticmethod
-    def is_micro_allowed_for_intent(*, skill: dict[str, Any] | None, intent: str) -> bool:
-        return isinstance(skill, dict) and bool(intent) and skill.get("micro_enabled") is True
 
     @staticmethod
     def record_skill_run(**_: Any) -> None:

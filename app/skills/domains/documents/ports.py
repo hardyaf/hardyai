@@ -23,6 +23,9 @@ class DurableDocumentEnqueuePort(Protocol):
         document_id: str,
         source_version_id: str,
         run_id: str,
+        operation_id: str | None = None,
+        processing_tier: str = "default",
+        arguments_hash: str | None = None,
     ) -> str:
         """Durably enqueue one immutable processing run and return its job ID."""
 
@@ -201,7 +204,23 @@ class DocumentQueryPort(Protocol):
         review_decision_id: str,
         decision_kind: str,
         corrected_value: str | None = None,
+        operation_id: str | None = None,
+        tool_id: str | None = None,
+        arguments_hash: str | None = None,
     ) -> dict[str, Any]: ...
+
+    def confirm_fields(
+        self,
+        *,
+        document_id: str,
+        source_version_id: str,
+        confirmations: list[dict[str, str]],
+        operation_id: str,
+        tool_id: str,
+        arguments_hash: str,
+    ) -> dict[str, Any]: ...
+
+    def confirmed_field_decisions(self, *, operation_id: str) -> dict[str, Any]: ...
 
     def classifications(self, *, document_id: str) -> dict[str, Any]: ...
 
@@ -222,6 +241,9 @@ class DocumentQueryPort(Protocol):
         document_id: str,
         idempotency_key: str,
         processing_tier: str = "default",
+        operation_id: str | None = None,
+        tool_id: str | None = None,
+        arguments_hash: str | None = None,
     ) -> dict[str, Any]: ...
 
     def processing_run(self, *, document_id: str, run_id: str) -> dict[str, Any]: ...
@@ -232,6 +254,21 @@ class DocumentQueryPort(Protocol):
         document_id: str,
         field_name: str,
         proposed_value: str,
+        operation_id: str | None = None,
+        tool_id: str | None = None,
+        arguments_hash: str | None = None,
+    ) -> dict[str, Any]: ...
+
+    def tool_operation(self, *, operation_id: str) -> dict[str, Any] | None: ...
+
+    def complete_tool_operation(
+        self,
+        *,
+        operation_id: str,
+        tool_id: str,
+        arguments_hash: str,
+        target_ref: str,
+        result_ref: str,
     ) -> dict[str, Any]: ...
 
     def bind_metadata_review(

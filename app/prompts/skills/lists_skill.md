@@ -19,50 +19,6 @@ critical_level: 3
 active: true
 version: 2
 
-micro_enabled: true
-micro_functions:
-  - function_id: lists.add_item
-    intent: lists.add_item
-    regex_contract: "add item to an explicitly named existing list"
-    supported_actions:
-      - add_item_to_existing_list
-    required_entities:
-      - list_name
-      - item_text
-    unsupported_or_escalate:
-      - create_list
-      - remove_item
-      - delete_list
-      - mark_item_done
-      - deictic_without_context
-      - ambiguous_target
-  - function_id: lists.get_items
-    intent: lists.get_items
-    regex_contract: "read contents of an explicitly named or confidently resolved list"
-    supported_actions:
-      - read_list_contents
-    required_entities:
-      - list_name
-    unsupported_or_escalate:
-      - ambiguous_target
-      - create_list
-      - delete_list
-      - multi_list_comparison
-
-micro_failure_handoff:
-  baseline_context_keys:
-    - micro_intent
-    - micro_confidence
-    - micro_entities
-    - micro_ambiguity_flags
-    - required_missing_fields
-    - token_session_turn_summaries
-  capability_context_keys:
-    - last_list_name
-    - available_lists
-    - last_list_operation
-    - pending_list_confirmation
-
 main_handoff_context:
   always_pass_from_session:
     - pending_clarification
@@ -367,6 +323,292 @@ main_tools:
           items: *lists_collection_observation
         idempotent_replay:
           type: boolean
+
+  - tool_id: lists.update_item
+    contract_version: 1
+    purpose: "Update the text and/or checked state of one exact item reference in one exact authorized list. Discover the collection and item first; never infer an item reference from text."
+    interactive: true
+    effect: local_write
+    approval_rule: none
+    approval_conditions: []
+    idempotency: required
+    sensitivity: private
+    persistence: redacted
+    effect_cardinality: single
+    runtime_dependencies: []
+    transferable_observation_fields: []
+    timeout_seconds: 10
+    max_result_items: 1
+    max_observation_chars: 3000
+    legacy_intents:
+      - lists.mark_item_done
+    input_schema:
+      type: object
+      additionalProperties: false
+      required:
+        - collection_ref
+        - item_ref
+        - patch
+      properties:
+        collection_ref:
+          type: string
+          minLength: 1
+          maxLength: 255
+        collection_version:
+          type: string
+          description: "Current collection revision copied by the domain canonicalizer and rechecked at execution."
+          minLength: 1
+          maxLength: 64
+        owner_scope:
+          type: string
+          description: "Resolved ownership scope supplied by the domain canonicalizer."
+          enum:
+            - personal
+            - shared
+        item_ref:
+          type: string
+          minLength: 1
+          maxLength: 255
+        patch:
+          type: object
+          additionalProperties: false
+          required: []
+          minProperties: 1
+          maxProperties: 2
+          properties:
+            text:
+              type: string
+              minLength: 1
+              maxLength: 500
+            checked:
+              type: boolean
+    observation_schema:
+      type: object
+      additionalProperties: false
+      required:
+        - collection_ref
+        - collection_version
+        - item
+        - changed
+        - idempotent_replay
+      properties:
+        collection_ref:
+          type: string
+          minLength: 1
+          maxLength: 255
+        collection_version:
+          type: string
+          minLength: 1
+          maxLength: 64
+        item: *lists_item_observation
+        changed:
+          type: boolean
+        idempotent_replay:
+          type: boolean
+
+  - tool_id: lists.remove_items
+    contract_version: 1
+    purpose: "Atomically remove one to 50 exact item references from one exact authorized list. Discover references first; ambiguity requires another read or clarification."
+    interactive: true
+    effect: local_write
+    approval_rule: none
+    approval_conditions: []
+    idempotency: required
+    sensitivity: private
+    persistence: redacted
+    effect_cardinality: atomic_batch
+    runtime_dependencies: []
+    transferable_observation_fields: []
+    timeout_seconds: 10
+    max_result_items: 50
+    max_observation_chars: 4000
+    legacy_intents:
+      - lists.remove_item
+    input_schema:
+      type: object
+      additionalProperties: false
+      required:
+        - collection_ref
+        - item_refs
+      properties:
+        collection_ref:
+          type: string
+          minLength: 1
+          maxLength: 255
+        collection_version:
+          type: string
+          description: "Current collection revision copied by the domain canonicalizer and rechecked at execution."
+          minLength: 1
+          maxLength: 64
+        owner_scope:
+          type: string
+          description: "Resolved ownership scope supplied by the domain canonicalizer."
+          enum:
+            - personal
+            - shared
+        item_refs:
+          type: array
+          minItems: 1
+          maxItems: 50
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+            maxLength: 255
+    observation_schema:
+      type: object
+      additionalProperties: false
+      required:
+        - collection_ref
+        - collection_version
+        - removed_items
+        - remaining_item_count
+        - changed
+        - idempotent_replay
+      properties:
+        collection_ref:
+          type: string
+          minLength: 1
+          maxLength: 255
+        collection_version:
+          type: string
+          minLength: 1
+          maxLength: 64
+        owner_scope:
+          type: string
+          description: "Resolved ownership scope supplied by the domain canonicalizer."
+          enum:
+            - personal
+            - shared
+        removed_items:
+          type: array
+          minItems: 1
+          maxItems: 50
+          items: *lists_item_observation
+        remaining_item_count:
+          type: integer
+          minimum: 0
+          maximum: 1000000
+        changed:
+          type: boolean
+        idempotent_replay:
+          type: boolean
+
+  - tool_id: lists.clear_collection
+    contract_version: 1
+    purpose: "Delete every item from one exact authorized list while keeping the collection. Always requires formal approval bound to the current collection revision."
+    interactive: true
+    effect: destructive_local
+    approval_rule: always
+    approval_conditions: []
+    idempotency: required
+    sensitivity: private
+    persistence: redacted
+    effect_cardinality: atomic_batch
+    runtime_dependencies:
+      - action_approval
+    transferable_observation_fields: []
+    timeout_seconds: 10
+    max_result_items: 1
+    max_observation_chars: 3000
+    legacy_intents: []
+    input_schema: &lists_destructive_collection_input
+      type: object
+      additionalProperties: false
+      required:
+        - collection_ref
+      properties:
+        collection_ref:
+          type: string
+          minLength: 1
+          maxLength: 255
+        collection_version:
+          type: string
+          description: "Current collection revision copied by the domain canonicalizer and rechecked after approval."
+          minLength: 1
+          maxLength: 64
+        owner_scope:
+          type: string
+          description: "Resolved ownership scope supplied by the domain canonicalizer."
+          enum:
+            - personal
+            - shared
+    observation_schema:
+      type: object
+      additionalProperties: false
+      required:
+        - collection_ref
+        - collection_version
+        - removed_item_count
+        - changed
+        - idempotent_replay
+      properties:
+        collection_ref:
+          type: string
+          minLength: 1
+          maxLength: 255
+        collection_version:
+          type: string
+          minLength: 1
+          maxLength: 64
+        removed_item_count:
+          type: integer
+          minimum: 0
+          maximum: 1000000
+        changed:
+          type: boolean
+        idempotent_replay:
+          type: boolean
+
+  - tool_id: lists.delete_collection
+    contract_version: 1
+    purpose: "Delete one exact authorized list and all of its items. Always requires formal approval bound to the current collection revision."
+    interactive: true
+    effect: destructive_local
+    approval_rule: always
+    approval_conditions: []
+    idempotency: required
+    sensitivity: private
+    persistence: redacted
+    effect_cardinality: single
+    runtime_dependencies:
+      - action_approval
+    transferable_observation_fields: []
+    timeout_seconds: 10
+    max_result_items: 1
+    max_observation_chars: 3000
+    legacy_intents:
+      - lists.delete_list
+    input_schema: *lists_destructive_collection_input
+    observation_schema:
+      type: object
+      additionalProperties: false
+      required:
+        - collection_ref
+        - collection_version
+        - deleted_item_count
+        - deleted
+        - changed
+        - idempotent_replay
+      properties:
+        collection_ref:
+          type: string
+          minLength: 1
+          maxLength: 255
+        collection_version:
+          type: string
+          minLength: 1
+          maxLength: 64
+        deleted_item_count:
+          type: integer
+          minimum: 0
+          maximum: 1000000
+        deleted:
+          type: boolean
+        changed:
+          type: boolean
+        idempotent_replay:
+          type: boolean
 ---
 
 # Lists Skill
@@ -578,27 +820,9 @@ Examples:
 - For `lists.delete_list`, require explicit list target
 - For `lists.mark_item_done`, preserve history when possible instead of deleting automatically
 
-## MicroJarvis Contract
+## Execution Ownership
 
-### Allowed Directly by Micro
-- `lists.add_item`
-- `lists.get_items`
-
-### Micro May Proceed Only When
-- target list is explicit or safely resolved
-- required entities are present
-- no clarification is needed
-- request is single-step and deterministic
-
-### Escalate to Main Jarvis When
-- creating a list
-- deleting a list
-- removing an item
-- marking an item done
-- deictic reference lacks safe context
-- list match is ambiguous
-- multiple items or complex conversational phrasing need reasoning
-- user is mixing planning and execution
+Main owns every interactive Lists turn.
 
 ## Main Jarvis Responsibilities
 
@@ -664,7 +888,7 @@ User: "Add milk to groceres."
 
 - [x] Intent boundaries are explicit
 - [x] Required entities are explicit
-- [x] Micro contract completed
+- [x] Main execution contract completed
 - [x] Failure handoff contract completed
 - [x] Main handoff context completed
 - [x] Pronoun/deictic behavior documented

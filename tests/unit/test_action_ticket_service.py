@@ -3,8 +3,8 @@ from __future__ import annotations
 from app.db.sqlite_store import SQLiteStore
 from app.tickets.repository import TicketRepository
 from app.tickets.service import ActionTicketService
+from app.tickets.types import TicketStatus
 from app.core.main_jarvis import MainJarvis
-from app.core.micro_jarvis import MicroJarvis
 from tests.router_support import RegistryBackedTestRouter as JarvisRouter
 from app.core.session_store import SessionStore
 from app.core.state_machine import RuntimePowerController
@@ -128,7 +128,6 @@ def test_duplicate_external_request_replays_without_second_domain_write(tmp_path
     )
     lists = ListsService(default_list_names=["groceries"], sqlite_store=store)
     router = JarvisRouter(
-        micro_jarvis=MicroJarvis(),
         main_jarvis=MainJarvis(),
         session_store=SessionStore(persistence=store),
         runtime_power=RuntimePowerController(),
@@ -162,3 +161,82 @@ def test_duplicate_external_request_replays_without_second_domain_write(tmp_path
     finally:
         repo.close()
         store.close()
+
+
+def test_replay_ignores_assistant_success_prose_and_labels_limited_truth(tmp_path):
+    path = tmp_path / "truthful-replay.db"
+    repo = TicketRepository(database_path=str(path))
+    service = ActionTicketService(
+        repository=repo,
+        enabled=True,
+        review_delay_seconds=3600,
+        review_max_attempts=3,
+    )
+    try:
+        calendar = repo.create_ticket(
+            origin_request_id="calendar-request",
+            session_id="session",
+            user_id="user-1",
+            agent_id="jarvis",
+            source="test",
+            intent="calendar.create_event",
+            skill_id="skill.calendar.core",
+            route="micro_tool",
+            title="calendar action",
+            status=TicketStatus.UNVERIFIABLE,
+        )
+        repo.append_entry(
+            ticket_id=str(calendar["ticket_id"]),
+            request_id="calendar-request",
+            entry_type="assistant_response",
+            actor_type="assistant",
+            verbatim_text="I definitely created it.",
+            structured_payload={"result": {"status": "ok", "invented": True}},
+            dedupe_key="calendar-assistant-prose",
+        )
+        replay = service.replay_response("calendar-request")
+        assert replay["assistant_text"] == (
+            "This replay was reconstructed from durable execution records."
+        )
+        assert replay["result"]["truth_scope"] == "local_calendar_unverifiable"
+        assert "invented" not in replay["result"]
+        assert replay["result"]["receipt_refs"] == []
+
+        home = repo.create_ticket(
+            origin_request_id="home-request",
+            session_id="session",
+            user_id="user-1",
+            agent_id="jarvis",
+            source="test",
+            intent="home.set_switch",
+            skill_id="skill.home.core",
+            route="micro_tool",
+            title="home action",
+            status=TicketStatus.UNVERIFIABLE,
+        )
+        receipt = repo.record_operation_receipt(
+            ticket_id=str(home["ticket_id"]),
+            receipt={
+                "operation_id": "home-operation",
+                "idempotency_key": "home-receipt",
+                "capability": "home.set_switch",
+                "action": "set_switch",
+                "resource_key": "home:office-light",
+                "status": "committed",
+                "committed_at": "2026-09-06T00:00:00+00:00",
+                "expected_effect": {"switch_state": "on"},
+                "validator_name": "home.sqlite_simulated",
+                "validator_version": "1",
+                "resource_locator": {"switch": "office-light"},
+                "execution_observation": {},
+                "result": {"status": "ok"},
+            },
+        )
+        assert receipt["operation_id"] == "home-operation"
+        replay = service.replay_response("home-request")
+        assert replay["result"]["truth_scope"] == (
+            "simulated_state_only_not_physical_device_truth"
+        )
+        assert replay["result"]["receipt_refs"] == ["home-operation"]
+    finally:
+        repo.close()

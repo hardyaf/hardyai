@@ -5,19 +5,10 @@ Define available agents and when to use them.
 
 ## Agents
 
-### Micro Jarvis
-- Purpose: Fast, deterministic execution
-- Handles:
-  - lights
-  - lists (simple)
-- Limitations:
-  - no reasoning
-  - no ambiguity handling
-
 ### Main Jarvis
-- Purpose: Reasoning and orchestration
+- Purpose: Semantic interpretation, reasoning, and bounded orchestration
 - Handles:
-  - complex tasks
+  - authorized typed tools
   - ambiguous input
   - multi-step workflows
 
@@ -27,6 +18,6 @@ Define available agents and when to use them.
 - Finance Agent
 
 ## Rules
-- Use micro when safe and deterministic
-- Use main when ambiguity exists
+- Use Main for every accepted semantic turn
+- Deterministic policy remains authoritative for authorization and effects
 - Jarvis remains responsible for final outcome

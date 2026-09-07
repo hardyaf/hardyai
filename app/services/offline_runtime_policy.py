@@ -34,17 +34,17 @@ def validate_offline_runtime(settings: Any, *, entrypoint: str) -> None:
         "email_agent_sync_enabled",
         "plane_enabled",
         "web_research_enabled",
+        "action_approval_worker_enabled",
     ):
         if bool(getattr(settings, attribute, False)):
             violations.append(attribute)
     local_model_needed = any(
         bool(getattr(settings, attribute, False))
-        for attribute in ("micro_model_enabled", "main_repair_model_enabled", "action_ticket_review_enabled")
+        for attribute in ("main_repair_model_enabled", "action_ticket_review_enabled")
     )
     if local_model_needed and not _local_url(str(getattr(settings, "local_model_url", ""))):
         violations.append("local_model_url")
     for enabled_attribute, provider_attribute in (
-        ("micro_model_enabled", "micro_model_provider"),
         ("main_repair_model_enabled", "main_repair_model_provider"),
         ("action_ticket_review_enabled", "action_ticket_review_model_provider"),
     ):

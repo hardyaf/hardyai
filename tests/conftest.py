@@ -27,7 +27,6 @@ if os.getenv("JARVIS_TEST_ALLOW_EXTERNAL_SERVICES", "").strip().lower() not in {
     "yes",
     "on",
 }:
-    os.environ["MICRO_MODEL_ENABLED"] = "false"
     os.environ["MAIN_REPAIR_MODEL_ENABLED"] = "false"
     os.environ["CALENDAR_GOOGLE_ENABLED"] = "false"
     os.environ["DISCORD_ENABLED"] = "false"

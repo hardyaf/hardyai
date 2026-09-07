@@ -87,7 +87,9 @@ class CoreSchemaMigration:
                     action TEXT NOT NULL,
                     state_after TEXT NOT NULL,
                     source_interface TEXT,
-                    requested_by_user_id TEXT
+                    requested_by_user_id TEXT,
+                    operation_id TEXT,
+                    arguments_hash TEXT
                 )
                 """
             )
@@ -356,6 +358,11 @@ class CoreSchemaMigration:
             cur.execute(
                 "CREATE INDEX IF NOT EXISTS idx_switch_actions_switch ON switch_actions_log(switch_name)"
             )
+            if fresh_database:
+                cur.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_switch_actions_operation_id "
+                    "ON switch_actions_log(operation_id) WHERE operation_id IS NOT NULL"
+                )
             cur.execute(
                 "CREATE INDEX IF NOT EXISTS idx_model_boot_memory_model_priority "
                 "ON model_boot_memory(model_name, priority)"

@@ -28,14 +28,12 @@ class ScheduledJobsService:
         event_log: EventLogService | None = None,
         critical_skills_output_path: str = "app/prompts/skills/critical_skills.md",
         critical_skills_min_level: int = 1,
-        micro_skills_output_path: str = "app/prompts/micro_jarvis_skills.md",
     ) -> None:
         self._sqlite_store = sqlite_store
         self._skill_registry = skill_registry
         self._event_log = event_log
         self._critical_skills_output_path = str(critical_skills_output_path).strip() or "app/prompts/skills/critical_skills.md"
         self._critical_skills_min_level = max(0, int(critical_skills_min_level))
-        self._micro_skills_output_path = str(micro_skills_output_path).strip() or "app/prompts/micro_jarvis_skills.md"
 
     def seed_defaults(self, *, ensure_compiled_artifacts: bool = True) -> None:
         now = _utc_now()
@@ -47,7 +45,6 @@ class ScheduledJobsService:
             payload={
                 "output_path": self._critical_skills_output_path,
                 "min_critical_level": self._critical_skills_min_level,
-                "micro_output_path": self._micro_skills_output_path,
             },
             enabled=True,
             created_by="jarvis",
@@ -106,23 +103,11 @@ class ScheduledJobsService:
                     min_critical_level=min_critical_level,
                     compile_if_stale=True,
                 )
-                micro_output_path = str(payload.get("micro_output_path") or self._micro_skills_output_path).strip()
-                micro_compiled = self._skill_registry.compile_micro_skills_markdown(
-                    output_path=micro_output_path,
-                    compile_if_stale=True,
-                )
-                compile_statuses = {
-                    str(compiled.get("status") or "").strip().lower(),
-                    str(micro_compiled.get("status") or "").strip().lower(),
-                }
-                status = "skipped" if compile_statuses == {"skipped"} else "ok"
+                status = "skipped" if str(compiled.get("status") or "").strip().lower() == "skipped" else "ok"
                 result = {
                     "status": status,
                     "sync": sync_result,
-                    "compiled": {
-                        "critical": compiled,
-                        "micro": micro_compiled,
-                    },
+                    "compiled": {"critical": compiled},
                 }
             else:
                 status = "failed"
@@ -174,14 +159,10 @@ class ScheduledJobsService:
         if not isinstance(payload, dict):
             payload = {}
         critical_path_value = str(payload.get("output_path") or self._critical_skills_output_path).strip()
-        micro_path_value = str(payload.get("micro_output_path") or self._micro_skills_output_path).strip()
         critical_path = Path(critical_path_value)
-        micro_path = Path(micro_path_value)
         if not critical_path.is_absolute():
             critical_path = (Path.cwd() / critical_path).resolve()
-        if not micro_path.is_absolute():
-            micro_path = (Path.cwd() / micro_path).resolve()
-        if critical_path.exists() and micro_path.exists():
+        if critical_path.exists():
             return
         self._run_job(
             job=critical_job

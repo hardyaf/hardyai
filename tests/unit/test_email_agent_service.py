@@ -544,7 +544,7 @@ def test_read_and_complete_all_queues_every_current_reference_once(tmp_path):
     storage.close()
 
 
-def test_typed_email_contract_publishes_p5f_reads_and_managed_label_operations() -> None:
+def test_typed_email_contract_publishes_p5f_and_p8d_operations() -> None:
     descriptors = email_tool_descriptors()
 
     assert list(descriptors) == [
@@ -561,6 +561,9 @@ def test_typed_email_contract_publishes_p5f_reads_and_managed_label_operations()
         "email.set_read_state",
         "email.archive_messages",
         "email.restore_to_inbox",
+        "email.set_review_state",
+        "email.correct_local_category",
+        "email.move_to_spam",
     ]
     assert all(
         descriptors[tool_id].effect == "read"
@@ -580,7 +583,15 @@ def test_typed_email_contract_publishes_p5f_reads_and_managed_label_operations()
     assert descriptors["email.set_read_state"].effect == "external_write"
     assert descriptors["email.archive_messages"].effect == "external_write"
     assert descriptors["email.restore_to_inbox"].effect == "external_write"
-    assert all(item.approval_rule == "none" for item in descriptors.values())
+    assert descriptors["email.set_review_state"].effect == "local_write"
+    assert descriptors["email.correct_local_category"].effect == "local_write"
+    assert descriptors["email.move_to_spam"].effect == "destructive_external"
+    assert descriptors["email.move_to_spam"].approval_rule == "always"
+    assert all(
+        item.approval_rule == "none"
+        for tool_id, item in descriptors.items()
+        if tool_id != "email.move_to_spam"
+    )
     assert descriptors["email.query_messages"].persistence == "no_store"
     assert descriptors["email.status"].persistence == "redacted"
     assert descriptors["email.query_messages"].legacy_intents == (

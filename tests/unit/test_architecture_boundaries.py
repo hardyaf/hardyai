@@ -7,6 +7,7 @@ from pathlib import Path
 import yaml
 
 from app.skills.registry_service import SkillRegistryService
+from app.skills.tool_contracts import ToolDescriptor
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -204,8 +205,6 @@ def test_runtime_capability_projection_excludes_implementation_and_storage_refer
                     "intents": ["lists.get_items"],
                     "execution_ref": "app.skills.domains.lists.handler:run",
                     "storage_ref": "must-not-project",
-                    "micro_enabled": False,
-                    "micro_functions": [],
                 }
             ]
 
@@ -260,3 +259,62 @@ def test_p2_typed_tool_seam_is_not_reachable_from_main_or_router() -> None:
     assert ".effective_tools(" not in source
     assert ".discovery_cards(" not in source
     assert "ToolCallEnvelope" not in source
+
+
+def test_p9_composition_stays_in_core_and_compiles_only_reviewed_transfer_fields() -> None:
+    loop_path = APP_ROOT / "core" / "main_tool_loop.py"
+    assert not _imports_module(loop_path, "app.skills.domains")
+    source = loop_path.read_text(encoding="utf-8").casefold()
+    assert "composition_allowlist" not in source
+    assert "auto_compens" not in source
+
+    descriptor = ToolDescriptor.from_mapping(
+        {
+            "tool_id": "email.summarize",
+            "skill_id": "skill.email.fixture",
+            "contract_version": 1,
+            "purpose": "Compile the reviewed Email summary transfer surface.",
+            "input_schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [],
+                "properties": {},
+            },
+            "observation_schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["summary", "message_refs", "source"],
+                "properties": {
+                    "summary": {"type": "string", "minLength": 1, "maxLength": 500},
+                    "message_refs": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 4,
+                        "items": {"type": "string", "minLength": 1, "maxLength": 20},
+                    },
+                    "source": {"type": "string", "minLength": 1, "maxLength": 40},
+                },
+            },
+            "effect": "read",
+            "approval_rule": "none",
+            "approval_conditions": [],
+            "sensitivity": "private",
+            "persistence": "no_store",
+            "idempotency": "not_applicable",
+            "effect_cardinality": "single",
+            "transferable_observation_fields": [],
+            "runtime_dependencies": [],
+            "timeout_seconds": 10,
+            "max_result_items": 4,
+            "max_observation_chars": 1_000,
+            "legacy_intents": [],
+            "interactive": True,
+        }
+    )
+    assert [
+        field.to_dict() for field in descriptor.transferable_observation_fields
+    ] == [
+        {"pattern": "/summary", "scope": "cross_domain"},
+        {"pattern": "/message_refs", "scope": "cross_domain"},
+        {"pattern": "/source", "scope": "same_domain"},
+    ]

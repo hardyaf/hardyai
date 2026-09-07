@@ -97,23 +97,12 @@ async def dashboard_status(
     main_runtime_active = bool(model_runtime.get("larger_models_active") is True)
     if main_runtime_active:
         active_model_lane = "main"
-        active_model_name = settings.main_repair_model_name or settings.micro_model_name
-    elif owner == "main_jarvis" or route.startswith("main_jarvis"):
-        # Main handled the latest turn but runtime has cooled down; micro is now active lane.
-        active_model_lane = "micro"
-        active_model_name = settings.micro_model_name
+        active_model_name = settings.main_repair_model_name
     else:
-        active_model_lane = "micro"
-        active_model_name = settings.micro_model_name
+        active_model_lane = "idle"
+        active_model_name = None
 
-    if owner == "main_jarvis" and main_runtime_active:
-        effective_owner = "main_jarvis"
-    elif owner == "main_jarvis" and not main_runtime_active:
-        effective_owner = "micro_jarvis"
-    elif owner:
-        effective_owner = owner
-    else:
-        effective_owner = "micro_jarvis" if not main_runtime_active else "main_jarvis"
+    effective_owner = owner or "main_jarvis"
 
     if owner == "main_jarvis" or route.startswith("main_jarvis"):
         owner_note = "latest turn was main-owned"
@@ -133,7 +122,6 @@ async def dashboard_status(
         "active_model_lane": active_model_lane,
         "active_model_name": active_model_name,
         "configured_models": {
-            "micro_model_name": settings.micro_model_name,
             "main_model_name": settings.main_repair_model_name,
         },
         "adaptive_compute_budget": {

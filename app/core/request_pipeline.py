@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Iterable
 
-from app.core.types import EMAIL_AGENT_INTENTS, FAST_COMMAND_INTENTS, Intent, SessionOwner
+from app.core.types import EMAIL_AGENT_INTENTS, LEGACY_ACTION_INTENTS, Intent, SessionOwner
 
 
 NON_BLOCKING_AMBIGUITY_FLAGS = {
@@ -81,15 +81,7 @@ class JarvisRequestPipeline:
                 reason="informational_or_unstructured_request",
             )
 
-        if intent in FAST_COMMAND_INTENTS and owner == SessionOwner.MICRO:
-            return PipelineDecision(
-                request_classification=RequestClassification.ACTIONABLE,
-                execution_path=ExecutionPath.SKILL,
-                requires_validation=True,
-                reason="micro_deterministic_skill_execution",
-            )
-
-        if intent in FAST_COMMAND_INTENTS and owner == SessionOwner.MAIN:
+        if intent in LEGACY_ACTION_INTENTS:
             if normalized_missing_fields or blocking_ambiguity:
                 return PipelineDecision(
                     request_classification=RequestClassification.ORCHESTRATION_REQUIRED,
@@ -101,7 +93,7 @@ class JarvisRequestPipeline:
                 request_classification=RequestClassification.ACTIONABLE,
                 execution_path=ExecutionPath.SKILL,
                 requires_validation=True,
-                reason="main_skill_execution",
+                reason="main_legacy_compatibility_skill",
             )
 
         if intent in EMAIL_AGENT_INTENTS and owner == SessionOwner.MAIN:

@@ -375,13 +375,103 @@ class SQLiteStore:
             )
             self._conn.commit()
 
+    def set_switch_state_with_operation(
+        self,
+        *,
+        name: str,
+        state: str,
+        timestamp: str,
+        source_interface: str | None,
+        requested_by_user_id: str | None,
+        operation_id: str,
+        arguments_hash: str,
+    ) -> dict[str, Any]:
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute("BEGIN IMMEDIATE")
+            try:
+                existing = cur.execute(
+                    """
+                    SELECT timestamp, switch_name, action, state_after, arguments_hash
+                    FROM switch_actions_log WHERE operation_id = ?
+                    """,
+                    (operation_id,),
+                ).fetchone()
+                if existing is not None:
+                    if (
+                        str(existing["switch_name"]) != name
+                        or str(existing["action"]) != state
+                        or str(existing["arguments_hash"] or "") != arguments_hash
+                    ):
+                        raise ValueError("home_operation_id_conflict")
+                    switch = cur.execute(
+                        "SELECT name, room_name FROM switches WHERE name = ?",
+                        (name,),
+                    ).fetchone()
+                    self._conn.commit()
+                    return {
+                        "switch": {
+                            "name": name,
+                            "room_name": switch["room_name"] if switch is not None else None,
+                            "state": str(existing["state_after"]),
+                            "updated_at": str(existing["timestamp"]),
+                        },
+                        "changed": False,
+                        "idempotent_replay": True,
+                    }
+                switch = cur.execute(
+                    "SELECT name, room_name, state, updated_at FROM switches WHERE name = ?",
+                    (name,),
+                ).fetchone()
+                if switch is None:
+                    raise ValueError("home_device_not_found")
+                changed = str(switch["state"]) != state
+                if changed:
+                    cur.execute(
+                        "UPDATE switches SET state = ?, updated_at = ? WHERE name = ?",
+                        (state, timestamp, name),
+                    )
+                cur.execute(
+                    """
+                    INSERT INTO switch_actions_log (
+                        timestamp, switch_name, action, state_after, source_interface,
+                        requested_by_user_id, operation_id, arguments_hash
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        timestamp,
+                        name,
+                        state,
+                        state,
+                        source_interface,
+                        requested_by_user_id,
+                        operation_id,
+                        arguments_hash,
+                    ),
+                )
+                self._conn.commit()
+                return {
+                    "switch": {
+                        "name": name,
+                        "room_name": switch["room_name"],
+                        "state": state,
+                        "updated_at": timestamp if changed else str(switch["updated_at"]),
+                    },
+                    "changed": changed,
+                    "idempotent_replay": False,
+                }
+            except Exception:
+                self._conn.rollback()
+                raise
+
     def recent_switch_actions(self, limit: int = 50) -> list[dict[str, Any]]:
         bounded = max(1, min(limit, 1000))
         with self._lock:
             cur = self._conn.cursor()
             cur.execute(
                 """
-                SELECT timestamp, switch_name, action, state_after, source_interface, requested_by_user_id
+                SELECT timestamp, switch_name, action, state_after, source_interface,
+                       requested_by_user_id, operation_id, arguments_hash
                 FROM switch_actions_log
                 ORDER BY id DESC
                 LIMIT ?
@@ -397,6 +487,8 @@ class SQLiteStore:
                 "state_after": row["state_after"],
                 "source_interface": row["source_interface"],
                 "requested_by_user_id": row["requested_by_user_id"],
+                "operation_id": row["operation_id"],
+                "arguments_hash": row["arguments_hash"],
             }
             for row in rows
         ]
@@ -1652,6 +1744,187 @@ class SQLiteStore:
                     "existing_item_count": existing_count,
                     "idempotent_replay": False,
                 }
+            except Exception:
+                self._conn.rollback()
+                raise
+
+    def mutate_list_with_operation(
+        self,
+        *,
+        owner_user_id: str,
+        list_id: str,
+        action: str,
+        item_ids: list[str],
+        patch: dict[str, object],
+        expected_version: str,
+        timestamp: str,
+        operation_id: str,
+        arguments_hash: str,
+    ) -> dict[str, Any]:
+        allowed = {
+            "lists.update_item",
+            "lists.remove_items",
+            "lists.clear_collection",
+            "lists.delete_collection",
+        }
+        if action not in allowed:
+            raise ValueError("list_operation_action_invalid")
+        owner = owner_user_id.strip().lower()
+        target_list_id = list_id.strip()
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute("BEGIN IMMEDIATE")
+            try:
+                existing = cur.execute(
+                    """
+                    SELECT owner_user_id, action, target_ref, arguments_hash, status, result_json
+                    FROM list_operations WHERE operation_id = ?
+                    """,
+                    (operation_id,),
+                ).fetchone()
+                if existing is not None:
+                    if (
+                        str(existing["owner_user_id"]) != owner
+                        or str(existing["action"]) != action
+                        or str(existing["target_ref"]) != target_list_id
+                        or str(existing["arguments_hash"]) != arguments_hash
+                        or str(existing["status"]) != "completed"
+                    ):
+                        raise ValueError("list_operation_id_conflict")
+                    replay = json.loads(str(existing["result_json"] or "{}"))
+                    if not isinstance(replay, dict):
+                        raise ValueError("list_operation_result_invalid")
+                    self._conn.commit()
+                    return {**replay, "idempotent_replay": True}
+
+                list_row = cur.execute(
+                    """
+                    SELECT list_id, list_name_normalized, updated_at
+                    FROM lists WHERE owner_user_id = ? AND list_id = ?
+                    """,
+                    (owner, target_list_id),
+                ).fetchone()
+                if list_row is None:
+                    raise ValueError("list_collection_not_authorized")
+                if str(list_row["updated_at"]) != expected_version:
+                    raise ValueError("list_collection_version_stale")
+                if len(item_ids) != len(set(item_ids)):
+                    raise ValueError("list_item_references_invalid")
+                rows = []
+                for item_id in item_ids:
+                    row = cur.execute(
+                        """
+                        SELECT item_id, list_id, item_name, checked, position, added_at, updated_at
+                        FROM list_items WHERE list_id = ? AND item_id = ?
+                        """,
+                        (target_list_id, item_id),
+                    ).fetchone()
+                    if row is None:
+                        raise ValueError("list_item_not_authorized")
+                    rows.append(row)
+
+                changed = False
+                result: dict[str, Any]
+                if action == "lists.update_item":
+                    if len(rows) != 1 or not patch or set(patch) - {"text", "checked"}:
+                        raise ValueError("list_item_patch_invalid")
+                    row = rows[0]
+                    item_name = str(patch.get("text", row["item_name"]))
+                    checked = int(bool(patch.get("checked", bool(row["checked"]))))
+                    changed = item_name != str(row["item_name"]) or checked != int(row["checked"])
+                    if changed:
+                        cur.execute(
+                            "UPDATE list_items SET item_name = ?, checked = ?, updated_at = ? WHERE item_id = ?",
+                            (item_name, checked, timestamp, str(row["item_id"])),
+                        )
+                    updated_item = cur.execute(
+                        """
+                        SELECT item_id, list_id, item_name, checked, position, added_at, updated_at
+                        FROM list_items WHERE item_id = ?
+                        """,
+                        (str(row["item_id"]),),
+                    ).fetchone()
+                    result = {"item": dict(updated_item), "changed": changed}
+                elif action == "lists.remove_items":
+                    if not 1 <= len(rows) <= 50:
+                        raise ValueError("list_item_references_invalid")
+                    cur.executemany("DELETE FROM list_items WHERE item_id = ?", [(item_id,) for item_id in item_ids])
+                    remaining = cur.execute(
+                        "SELECT item_id FROM list_items WHERE list_id = ? ORDER BY position, added_at, item_id",
+                        (target_list_id,),
+                    ).fetchall()
+                    for position, remaining_row in enumerate(remaining, start=1):
+                        cur.execute(
+                            "UPDATE list_items SET position = ? WHERE item_id = ?",
+                            (position, str(remaining_row["item_id"])),
+                        )
+                    changed = True
+                    result = {
+                        "removed_items": [dict(row) for row in rows],
+                        "remaining_item_count": len(remaining),
+                        "changed": True,
+                    }
+                elif action == "lists.clear_collection":
+                    count_row = cur.execute(
+                        "SELECT COUNT(*) AS item_count FROM list_items WHERE list_id = ?",
+                        (target_list_id,),
+                    ).fetchone()
+                    removed_count = int(count_row["item_count"] if count_row is not None else 0)
+                    cur.execute("DELETE FROM list_items WHERE list_id = ?", (target_list_id,))
+                    changed = removed_count > 0
+                    result = {"removed_item_count": removed_count, "changed": changed}
+                else:
+                    count_row = cur.execute(
+                        "SELECT COUNT(*) AS item_count FROM list_items WHERE list_id = ?",
+                        (target_list_id,),
+                    ).fetchone()
+                    deleted_count = int(count_row["item_count"] if count_row is not None else 0)
+                    cur.execute("DELETE FROM list_items WHERE list_id = ?", (target_list_id,))
+                    cur.execute(
+                        "DELETE FROM lists WHERE owner_user_id = ? AND list_id = ?",
+                        (owner, target_list_id),
+                    )
+                    changed = cur.rowcount == 1
+                    result = {
+                        "deleted": changed,
+                        "deleted_item_count": deleted_count,
+                        "changed": changed,
+                    }
+
+                collection_version = expected_version
+                if changed and action != "lists.delete_collection":
+                    cur.execute(
+                        "UPDATE lists SET updated_at = ? WHERE owner_user_id = ? AND list_id = ?",
+                        (timestamp, owner, target_list_id),
+                    )
+                    collection_version = timestamp
+                result["collection_version"] = collection_version
+                result_json = json.dumps(
+                    result,
+                    ensure_ascii=True,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                cur.execute(
+                    """
+                    INSERT INTO list_operations (
+                        operation_id, owner_user_id, action, target_ref, arguments_hash,
+                        status, result_json, created_at, completed_at
+                    ) VALUES (?, ?, ?, ?, ?, 'completed', ?, ?, ?)
+                    """,
+                    (
+                        operation_id,
+                        owner,
+                        action,
+                        target_list_id,
+                        arguments_hash,
+                        result_json,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+                self._conn.commit()
+                return {**result, "idempotent_replay": False}
             except Exception:
                 self._conn.rollback()
                 raise

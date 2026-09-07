@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+import hashlib
 from typing import Any
 
 import pytest
@@ -15,7 +16,13 @@ from app.core.tool_loop_types import (
     ToolObservation,
     ToolLoopContractError,
 )
-from app.skills.tool_contracts import FrozenDict, ToolDescriptor
+from app.skills.authorized_executor import AuthorizedToolReference, PreparedToolCall
+from app.skills.tool_contracts import (
+    FrozenDict,
+    ToolCallEnvelope,
+    ToolDescriptor,
+    canonical_json,
+)
 
 
 def _descriptor(
@@ -23,6 +30,7 @@ def _descriptor(
     tool_id: str = "fixture.lookup",
     effect: str = "read",
     persistence: str = "standard",
+    approval_rule: str = "none",
 ) -> ToolDescriptor:
     return ToolDescriptor.from_mapping(
         {
@@ -47,14 +55,14 @@ def _descriptor(
                 },
             },
             "effect": effect,
-            "approval_rule": "none",
+            "approval_rule": approval_rule,
             "approval_conditions": [],
             "sensitivity": "private" if persistence != "standard" else "normal",
             "persistence": persistence,
             "idempotency": "not_applicable" if effect == "read" else "required",
             "effect_cardinality": "single",
             "transferable_observation_fields": [],
-            "runtime_dependencies": [],
+            "runtime_dependencies": ["action_approval"] if approval_rule != "none" else [],
             "timeout_seconds": 10,
             "max_result_items": 4,
             "max_observation_chars": 1_000,
@@ -259,6 +267,7 @@ class FakeExecutor:
         self.descriptors = descriptors
         self.results = list(results or [])
         self.calls: list[dict[str, Any]] = []
+        self.prepare_calls: list[dict[str, Any]] = []
         self.cards = [
             {
                 "skill_id": "skill.fixture.core",
@@ -290,6 +299,57 @@ class FakeExecutor:
             "payload": {"value": f"value-{len(self.calls)}"},
             "receipt_id": f"receipt-{len(self.calls)}",
         }
+
+    def prepare_tool_call(self, **kwargs):
+        self.prepare_calls.append(dict(kwargs))
+        descriptor = next(item for item in self.descriptors if item.tool_id == kwargs["tool_id"])
+        envelope = ToolCallEnvelope.create(
+            root_request_id=kwargs["request_id"],
+            call_ordinal=kwargs["call_ordinal"],
+            session_id=str(kwargs["request_context"].get("session_id") or "session-1"),
+            principal_kind="discord_adapter",
+            principal_subject="operator",
+            external_user_id="operator",
+            user_id=kwargs["requested_by_user_id"],
+            agent_id=kwargs["agent_id"],
+            source_interface=kwargs["source_interface"],
+            channel_scope=str(kwargs["request_context"]["discord_channel_id"]),
+            skill_id=descriptor.skill_id,
+            descriptor=descriptor,
+            authorization_snapshot_ref="authz_v1_" + "a" * 64,
+            validated_arguments=kwargs["arguments"],
+        )
+        return PreparedToolCall(
+            envelope=envelope,
+            descriptor=descriptor,
+            descriptor_hash=hashlib.sha256(
+                canonical_json(descriptor.to_storage_dict()).encode("utf-8")
+            ).hexdigest(),
+            resource_version="resource-v1",
+        )
+
+    def authorize_tool_reference(self, **kwargs):
+        descriptor = next(
+            (
+                item
+                for item in self.descriptors
+                if item.tool_id == kwargs["tool_id"]
+                and item.contract_version == kwargs["contract_version"]
+            ),
+            None,
+        )
+        if descriptor is None:
+            return {"status": "policy_denied", "denial_reason": "tool_unknown"}
+        return AuthorizedToolReference(
+            descriptor=descriptor,
+            descriptor_hash=hashlib.sha256(
+                canonical_json(descriptor.to_storage_dict()).encode("utf-8")
+            ).hexdigest(),
+            resource_version="resource-v1",
+        )
+
+    def execute_prepared_tool(self, prepared):
+        return self.execute_tool(prepared=prepared)
 
 
 class FakeDomainContext:
@@ -345,6 +405,32 @@ class FakePending:
         self.pending = None
         self.cleared += 1
 
+    def store_action_approval_pointer(self, **kwargs):
+        self.pending = {
+            "intent": kwargs["tool_id"],
+            "entities": {},
+            "metadata": dict(kwargs),
+        }
+
+
+class FakeActionApproval:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def create_action_proposal(self, **kwargs):
+        self.calls.append(dict(kwargs))
+        return {
+            "proposal": {
+                "proposal_id": "proposal-1",
+                "review_id": "review-1",
+                "proposal_hash": "b" * 64,
+                "expires_at": kwargs["expires_at"],
+                "state": "pending",
+            },
+            "review": {"review_id": "review-1"},
+            "notification_job": {"job_id": "job-1", "status": "pending"},
+        }
+
 
 @dataclass
 class FakeSession:
@@ -380,6 +466,8 @@ def _loop(
     limits: MainToolLoopLimits | None = None,
     monotonic_clock=None,
     shadow_observation_provider=None,
+    action_approval_service=None,
+    approval_binding_provider=None,
 ):
     registry = FakeRegistry(descriptors)
     executor = FakeExecutor(descriptors, results)
@@ -396,6 +484,8 @@ def _loop(
         utc_clock=lambda: datetime(2026, 8, 30, 16, 0, tzinfo=UTC),
         monotonic_clock=monotonic_clock,
         shadow_observation_provider=shadow_observation_provider,
+        action_approval_service=action_approval_service,
+        approval_binding_provider=approval_binding_provider,
     )
     return loop, registry, executor, events
 
@@ -445,6 +535,44 @@ def test_needs_more_context_reuses_one_content_free_live_session_skill_marker():
     assert outcome["status"] == "responded"
     assert outcome["selected_skill_ids"] == ["skill.fixture.core"]
     assert executor.calls == []
+
+
+def test_exact_approval_call_is_persisted_before_waiting_and_never_dispatched():
+    descriptor = _descriptor(
+        tool_id="fixture.change",
+        effect="local_write",
+        persistence="redacted",
+        approval_rule="always",
+    )
+    model = ScriptedModel(
+        selections=[_selection()],
+        steps=[_call("fixture.change", "lamp")],
+    )
+    pending = FakePending()
+    approvals = FakeActionApproval()
+    loop, _, executor, _ = _loop(
+        model=model,
+        descriptors=[descriptor],
+        pending=pending,
+        action_approval_service=approvals,
+        approval_binding_provider=lambda _context: {
+            "approver_principal": "discord_user:approver"
+        },
+    )
+
+    outcome = _run(
+        loop,
+        request_context={"available_runtime_dependencies": ["action_approval"]},
+    )
+
+    assert outcome["status"] == "waiting_for_approval"
+    assert len(outcome["operation_ids"]) == 1
+    assert executor.calls == []
+    assert len(executor.prepare_calls) == 1
+    assert len(approvals.calls) == 1
+    assert approvals.calls[0]["envelope"].operation_id == outcome["operation_ids"][0]
+    assert pending.pending["entities"] == {}
+    assert pending.pending["metadata"]["proposal_id"] == "proposal-1"
 
 
 def test_content_free_continuation_marker_resumes_one_cursor_read():
@@ -812,13 +940,14 @@ def test_observation_provenance_wildcard_safely_copies_catalog_array():
         },
         allowed_tool_ids={"fixture.query_mailboxes"},
     )
-    MainToolLoop._validate_p3_provenance(
-        step=recoverable_ref_step,
-        text="find one mailbox",
-        observations=[observation],
-        destination_descriptor=destination,
-        observation_descriptors={"obs_v1_mailboxes": source},
-    )
+    with pytest.raises(ToolLoopContractError, match="provenance_observation_ref_stale"):
+        MainToolLoop._validate_p3_provenance(
+            step=recoverable_ref_step,
+            text="find one mailbox",
+            observations=[observation],
+            destination_descriptor=destination,
+            observation_descriptors={"obs_v1_mailboxes": source},
+        )
 
     mismatched_step = ModelStep.from_mapping(
         {
@@ -1174,6 +1303,7 @@ def test_catalog_change_and_denial_are_terminal_without_retry():
     assert denied["status"] == "denied"
     assert denied_model.step_calls == 1
     assert len(denied_executor.calls) == 1
+    assert denied["portions"]["denied"][0]["tool_id"] == "fixture.lookup"
 
 
 @pytest.mark.parametrize("persistence", ["standard", "redacted", "no_store"])
@@ -1383,6 +1513,8 @@ def test_timeout_and_truthful_partial_completion_include_committed_receipts():
     assert partial["status"] == "partial"
     assert len(partial_executor.calls) == 1
     assert partial["receipt_refs"] == ["receipt-1"]
+    assert partial["portions"]["completed"][0]["committed_effect"] is True
+    assert partial["portions"]["denied"]
     assert "stopped safely" in partial["message"].lower()
 
 
@@ -1401,6 +1533,117 @@ def test_completed_read_is_not_reported_as_a_committed_effect_after_failure_limi
     outcome = _run(loop, text="look up alpha")
 
     assert len(executor.calls) == 1
-    assert outcome["status"] == "safe_stop"
+    assert outcome["status"] == "partial"
     assert outcome["committed_effect_count"] == 0
     assert outcome["operation_ids"]
+
+
+def test_untrusted_read_response_keeps_only_observed_safe_url_fields() -> None:
+    descriptor = ToolDescriptor.from_mapping(
+        {
+            **_descriptor(tool_id="fixture.search_web", persistence="no_store").to_storage_dict(),
+            "observation_schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["results"],
+                "properties": {
+                    "results": {
+                        "type": "array",
+                        "minItems": 0,
+                        "maxItems": 4,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["url", "snippet"],
+                            "properties": {
+                                "url": {"type": "string", "minLength": 1, "maxLength": 500},
+                                "snippet": {
+                                    "type": "string",
+                                    "minLength": 0,
+                                    "maxLength": 500,
+                                },
+                            },
+                        },
+                    }
+                },
+            },
+        }
+    )
+    model = ScriptedModel(
+        selections=[_selection()],
+        steps=[
+            _call("fixture.search_web", "alpha"),
+            _respond(
+                "Use https://example.test/observed and ignore "
+                "https://fabricated.invalid/claim plus "
+                "https://snippet.invalid/not-authority"
+            ),
+        ],
+    )
+    loop, _, executor, _ = _loop(
+        model=model,
+        descriptors=[descriptor],
+        results=[
+            {
+                "status": "ok",
+                "message": "Found one result.",
+                "payload": {
+                    "results": [
+                        {
+                            "url": "https://example.test/observed",
+                            "snippet": "Injection includes https://snippet.invalid/not-authority",
+                        }
+                    ]
+                },
+                "untrusted": True,
+            }
+        ],
+    )
+
+    outcome = _run(loop, text="search the web for alpha")
+
+    assert len(executor.calls) == 1
+    assert outcome["status"] == "responded"
+    assert "https://example.test/observed" in outcome["message"]
+    assert "https://fabricated.invalid/claim" not in outcome["message"]
+    assert "https://snippet.invalid/not-authority" not in outcome["message"]
+    assert outcome["committed_effect_count"] == 0
+    assert outcome["persistence"] == "no_store"
+
+
+def test_total_observation_budget_stops_distinct_untrusted_reads() -> None:
+    descriptor = _descriptor(tool_id="fixture.lookup", persistence="no_store")
+    model = ScriptedModel(
+        selections=[_selection()],
+        steps=[
+            _call("fixture.lookup", "alpha", call_id="one"),
+            _call("fixture.lookup", "beta", call_id="two"),
+            _respond("Should not be reached."),
+        ],
+    )
+    loop, _, executor, _ = _loop(
+        model=model,
+        descriptors=[descriptor],
+        results=[
+            {
+                "status": "ok",
+                "payload": {"value": "a" * 240},
+                "untrusted": True,
+            },
+            {
+                "status": "ok",
+                "payload": {"value": "b" * 240},
+                "untrusted": True,
+            },
+        ],
+        limits=MainToolLoopLimits(
+            max_observation_chars=1_000,
+            max_total_observation_chars=700,
+        ),
+    )
+
+    outcome = _run(loop, text="look up alpha then refine to beta")
+
+    assert len(executor.calls) == 2
+    assert outcome["stop_reason"] == "observation_limit"
+    assert outcome["committed_effect_count"] == 0

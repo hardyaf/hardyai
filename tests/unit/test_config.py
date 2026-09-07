@@ -19,8 +19,7 @@ SETTING_NAMES = {
     "MAIN_TOOL_MAX_OBSERVATION_CHARS",
     "MAIN_TOOL_MAX_TOTAL_OBSERVATION_CHARS",
     "MAIN_TOOL_TIMEOUT_SECONDS",
-    "LEGACY_MICRO_ROUTING_ENABLED",
-    "MICRO_MODEL_NUM_PREDICT",
+    "MAIN_MODEL_KEEP_ALIVE_SECONDS",
     "MAIN_REPAIR_MODEL_NUM_PREDICT",
     "MAIN_CONVERSATION_MODEL_NUM_PREDICT",
     "MAIN_TURN_DECISION_MODEL_THINK",
@@ -58,8 +57,7 @@ def _load_config(overrides: dict[str, str] | None = None) -> subprocess.Complete
                 "'observation': settings.main_tool_max_observation_chars, "
                 "'total_observation': settings.main_tool_max_total_observation_chars, "
                 "'timeout': settings.main_tool_timeout_seconds, "
-                "'legacy_micro': settings.legacy_micro_routing_enabled, "
-                "'micro_num_predict': settings.micro_model_num_predict, "
+                "'keep_alive': settings.main_model_keep_alive_seconds, "
                 "'repair_num_predict': settings.main_repair_model_num_predict, "
                 "'conversation_num_predict': settings.main_conversation_model_num_predict, "
                 "'turn_decision_think': settings.main_turn_decision_model_think, "
@@ -82,12 +80,12 @@ def _load_config(overrides: dict[str, str] | None = None) -> subprocess.Complete
     )
 
 
-def test_main_tool_settings_have_inert_locked_defaults() -> None:
+def test_main_tool_settings_default_to_main_only_with_empty_operation_allowlists() -> None:
     completed = _load_config()
 
     assert completed.returncode == 0, completed.stderr
     assert json.loads(completed.stdout) == {
-        "mode": "off",
+        "mode": "active",
         "domains": [],
         "operations": [],
         "selected": 3,
@@ -97,8 +95,7 @@ def test_main_tool_settings_have_inert_locked_defaults() -> None:
         "observation": 8000,
         "total_observation": 24000,
         "timeout": 120,
-        "legacy_micro": True,
-        "micro_num_predict": 256,
+        "keep_alive": 180.0,
         "repair_num_predict": 1024,
         "conversation_num_predict": 1024,
         "turn_decision_think": "low",
@@ -121,7 +118,7 @@ def test_main_reasoning_settings_accept_development_headroom_profile() -> None:
             "MAIN_TOOL_MAX_STEPS": "12",
             "MAIN_TOOL_MAX_FAILURES": "4",
             "MAIN_TOOL_TIMEOUT_SECONDS": "240",
-            "MICRO_MODEL_NUM_PREDICT": "512",
+            "MAIN_MODEL_KEEP_ALIVE_SECONDS": "240",
             "MAIN_REPAIR_MODEL_NUM_PREDICT": "2048",
             "MAIN_CONVERSATION_MODEL_NUM_PREDICT": "2048",
             "MAIN_TURN_DECISION_MODEL_THINK": "high",
@@ -143,7 +140,7 @@ def test_main_reasoning_settings_accept_development_headroom_profile() -> None:
     assert settings["steps"] == 12
     assert settings["failures"] == 4
     assert settings["timeout"] == 240
-    assert settings["micro_num_predict"] == 512
+    assert settings["keep_alive"] == 240.0
     assert settings["repair_num_predict"] == 2048
     assert settings["conversation_num_predict"] == 2048
     assert settings["turn_decision_think"] == "high"
@@ -189,7 +186,6 @@ def test_main_tool_operation_allowlist_preserves_exact_identifiers() -> None:
         ("MAIN_TOOL_MAX_OBSERVATION_CHARS", "0"),
         ("MAIN_TOOL_MAX_TOTAL_OBSERVATION_CHARS", "0"),
         ("MAIN_TOOL_TIMEOUT_SECONDS", "0"),
-        ("LEGACY_MICRO_ROUTING_ENABLED", "sometimes"),
     ],
 )
 def test_main_tool_settings_reject_invalid_values(name: str, value: str) -> None:

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 from uuid import uuid4
 
 from app.reviews.service import HumanReviewService
 from app.reviews.types import ReviewKind
 from app.skills.domains.documents.ports import DocumentQueryPort
+from app.skills.domains.documents.permissions import DocumentRequestAccessPolicy
 from app.skills.domains.documents.review_corrections import DocumentFieldReviewCoordinator
 from app.skills.domains.documents.schemas import validate_field_correction
 
@@ -22,6 +24,8 @@ DOCUMENT_INTENTS = {
     "documents.propose_metadata",
     "documents.correct_field",
     "documents.confirm_fields",
+    "documents.queue_processing",
+    "documents.review_field",
 }
 
 DOCUMENT_INTENT_CONTRACTS = (
@@ -79,28 +83,11 @@ class DocumentQueryService:
 
     @staticmethod
     def _authorized(context: dict[str, Any]) -> bool:
-        principal_kind = str(context.get("principal_kind") or "").strip().casefold()
-        source = str(context.get("source") or context.get("request_source") or "dashboard").casefold()
-        operator_authorized = principal_kind in {"operator", "test"} and source in {
-            "dashboard",
-            "web",
-            "test",
-        }
-        discord_ids = DocumentQueryService._discord_document_ids(context)
-        return operator_authorized or (
-            principal_kind == "discord_adapter" and source == "discord" and bool(discord_ids)
-        )
+        return DocumentRequestAccessPolicy.authorized(context)
 
     @staticmethod
     def _discord_document_ids(context: dict[str, Any]) -> frozenset[str]:
-        raw = context.get("document_attachment_ids")
-        if not isinstance(raw, list):
-            return frozenset()
-        return frozenset(
-            str(item).strip()
-            for item in raw[:4]
-            if isinstance(item, str) and str(item).strip()
-        )
+        return DocumentRequestAccessPolicy.discord_document_ids(context)
 
     @classmethod
     def _intent_authorized(
@@ -110,20 +97,10 @@ class DocumentQueryService:
         document_id: str,
         context: dict[str, Any],
     ) -> bool:
-        principal_kind = str(context.get("principal_kind") or "").strip().casefold()
-        if principal_kind != "discord_adapter":
-            return cls._authorized(context)
-        return (
-            intent
-            in {
-                "documents.status",
-                "documents.get",
-                "documents.escalate_ocr",
-                "documents.correct_field",
-                "documents.confirm_fields",
-            }
-            and bool(document_id)
-            and document_id in cls._discord_document_ids(context)
+        return DocumentRequestAccessPolicy.operation_authorized(
+            operation=intent,
+            document_id=document_id,
+            context=context,
         )
 
     def capability_access(self, *, context: dict[str, Any]) -> dict[str, Any]:
@@ -241,14 +218,16 @@ class DocumentQueryService:
             query = " ".join(str(entities.get("query") or "").split())[:200]
             if not query:
                 return {"status": "clarify", "message": "What should I search for?"}
-            value = self.gateway.find(query=query, limit=int(entities.get("limit") or 10))
+            limit = max(1, min(int(entities.get("limit") or 10), 20))
+            value = self.gateway.find(query=query, limit=limit)
             results = value.get("results") if isinstance(value.get("results"), list) else []
             return {
                 "status": "ok",
-                "message": f"Found {len(results)} matching document result(s).",
+                "message": f"Found {min(len(results), limit)} matching document result(s).",
                 "query": query,
-                "documents": results[:20],
-                "document_context_entities": self._context_entities(results),
+                "documents": results[:limit],
+                "truncated": bool(value.get("truncated")) or len(results) > limit,
+                "document_context_entities": self._context_entities(results[:limit]),
             }
         if intent in {"documents.status", "documents.get"}:
             if not document_id:
@@ -261,7 +240,16 @@ class DocumentQueryService:
                 "document_context_entities": self._context_entities([status]),
             }
             if intent == "documents.get" and status.get("processing_state") == "complete":
-                evidence = self.gateway.evidence(document_id=document_id, limit=10)
+                evidence_limit = max(1, min(int(entities.get("limit") or 10), 20))
+                raw_page_number = entities.get("page_number")
+                page_number = int(raw_page_number) if raw_page_number is not None else None
+                block_id = str(entities.get("block_id") or "").strip()[:120] or None
+                evidence = self.gateway.evidence(
+                    document_id=document_id,
+                    block_id=block_id,
+                    page_number=page_number,
+                    limit=evidence_limit,
+                )
                 result["evidence"] = evidence
                 fields = self.gateway.fields(document_id=document_id)
                 result["structured_fields"] = (
@@ -333,18 +321,39 @@ class DocumentQueryService:
                 },
                 "document_context_entities": self._context_entities([result]),
             }
+        if intent == "documents.queue_processing":
+            if not document_id:
+                return {"status": "clarify", "message": "Which document should I process?"}
+            tier = str(entities.get("processing_tier") or "standard").strip().casefold()
+            provider_tier = "default" if tier == "standard" else tier
+            result = self.gateway.reprocess(
+                document_id=document_id,
+                idempotency_key=str(context.get("operation_id") or context.get("request_id") or uuid4()),
+                processing_tier=provider_tier,
+                operation_id=str(context.get("operation_id") or "") or None,
+                tool_id="documents.queue_processing",
+                arguments_hash=str(context.get("arguments_hash") or "") or None,
+            )
+            return {
+                "status": "queued" if result.get("enqueue_confirmed") else "processing",
+                "message": "A new immutable document-processing run was queued.",
+                **result,
+                "processing_tier": tier,
+                "document_context_entities": self._context_entities([result]),
+            }
         if intent == "documents.list_reviews":
             if self.reviews is None:
                 return {"status": "disabled", "message": "Document review controls are unavailable."}
+            limit = max(1, min(int(entities.get("limit") or 20), 20))
             rows = [
                 row
-                for row in self.reviews.list_pending(limit=50)
+                for row in self.reviews.list_pending(limit=limit)
                 if str(row.get("subject_type") or "").startswith("document_")
             ]
             return {
                 "status": "ok",
                 "message": f"There are {len(rows)} pending document review(s).",
-                "reviews": rows[:20],
+                "reviews": rows[:limit],
             }
         if intent == "documents.propose_metadata":
             if self.reviews is None:
@@ -356,10 +365,12 @@ class DocumentQueryService:
                     "status": "clarify",
                     "message": "A document, metadata field, and proposed value are required.",
                 }
+            operation_kwargs = self._operation_kwargs(context)
             proposal = self.gateway.propose_metadata(
                 document_id=document_id,
                 field_name=field_name,
                 proposed_value=proposed_value,
+                **operation_kwargs,
             )
             review = self.reviews.create_review(
                 review_kind=ReviewKind.METADATA_PROPOSAL,
@@ -388,6 +399,12 @@ class DocumentQueryService:
             }
         if intent == "documents.correct_field":
             return self._correct_field(
+                document_id=document_id,
+                entities=entities,
+                context=context,
+            )
+        if intent == "documents.review_field":
+            return self._review_field(
                 document_id=document_id,
                 entities=entities,
                 context=context,
@@ -467,6 +484,7 @@ class DocumentQueryService:
             decision_kind=decision_kind,
             corrected_value=applied_value,
             context=context,
+            **self._operation_kwargs(context),
         )
         preview = self._business_card_review_preview(document_id=document_id)
         label = _BUSINESS_CARD_FIELD_LABELS.get(field_name, field_name.replace("_", " ").title())
@@ -485,11 +503,98 @@ class DocumentQueryService:
             "document_context_entities": self._context_entities([status]),
         }
 
+    def _review_field(
+        self,
+        *,
+        document_id: str,
+        entities: dict[str, Any],
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
+        decision = str(entities.get("decision") or "").strip().casefold()
+        forwarded = dict(entities)
+        if decision == "correct":
+            return self._correct_field(
+                document_id=document_id,
+                entities=forwarded,
+                context=context,
+            )
+        if decision != "confirm" or self.field_reviews is None:
+            return {"status": "clarify", "message": "Choose confirm or correct for one field."}
+        field_name = self._canonical_field_name(entities.get("field_name"))
+        if not document_id or not field_name:
+            return {"status": "clarify", "message": "A document and field name are required."}
+        status = self.gateway.status(document_id)
+        denied = self._discord_mutation_denied(status=status, context=context)
+        if denied is not None:
+            return denied
+        document_class = str(status.get("document_class") or "").strip().casefold()
+        fields_response, rows = self._field_rows(document_id=document_id)
+        current = self._field_row(rows=rows, field_name=field_name)
+        if current is None:
+            return {"status": "clarify", "message": "That field has no current observation to confirm."}
+        if str(current.get("decision_kind") or "").strip().casefold() in {"confirm", "correct"}:
+            return {
+                "status": "ok",
+                "message": "That field is already confirmed.",
+                "document_id": document_id,
+                "field_name": field_name,
+                "decision_kind": str(current.get("decision_kind")),
+                "idempotent_replay": True,
+            }
+        applied = self.field_reviews.apply(
+            document_id=document_id,
+            document_class=document_class,
+            fields_response=fields_response,
+            current=current,
+            field_name=field_name,
+            decision_kind="confirm",
+            corrected_value=None,
+            context=context,
+            **self._operation_kwargs(context),
+        )
+        return {
+            "status": "ok",
+            "message": "I saved the field confirmation.",
+            "document_id": document_id,
+            "field_name": field_name,
+            "decision_kind": "confirm",
+            "field_decision_id": applied["field_decision_id"],
+            "idempotent_replay": bool(applied.get("idempotent_replay")),
+        }
+
     def _confirm_fields(self, *, document_id: str, context: dict[str, Any]) -> dict[str, Any]:
         if self.field_reviews is None:
             return {"status": "disabled", "message": "Document correction controls are unavailable."}
         if not document_id:
             return {"status": "clarify", "message": "Which document should I confirm?"}
+        operation_id = str(context.get("operation_id") or "").strip()
+        arguments_hash = str(context.get("arguments_hash") or "").strip().casefold()
+        if operation_id:
+            existing = self.gateway.tool_operation(operation_id=operation_id)
+            if existing is not None:
+                if (
+                    str(existing.get("tool_id") or "") != "documents.confirm_fields"
+                    or str(existing.get("arguments_hash") or "") != arguments_hash
+                    or str(existing.get("target_ref") or "") != document_id
+                    or str(existing.get("status") or "") != "completed"
+                ):
+                    raise ValueError("document_tool_operation_id_conflict")
+                recovered = self.gateway.confirmed_field_decisions(operation_id=operation_id)
+                self.field_reviews.mark_confirmation_result_applied(recovered)
+                confirmed = [
+                    str(row.get("field_name") or "")
+                    for row in recovered.get("decisions", [])[:64]
+                    if isinstance(row, dict) and str(row.get("field_name") or "")
+                ]
+                return {
+                    "status": "ok",
+                    "message": f"I confirmed {len(confirmed)} extracted field(s).",
+                    "document_id": document_id,
+                    "confirmed_fields": confirmed,
+                    "idempotent_replay": True,
+                }
+        else:
+            raise ValueError("document_tool_operation_identity_invalid")
         status = self.gateway.status(document_id)
         denied = self._discord_mutation_denied(status=status, context=context)
         if denied is not None:
@@ -505,21 +610,33 @@ class DocumentQueryService:
         if not rows:
             return {"status": "not_ready", "message": "There are no extracted fields to confirm."}
         confirmed: list[str] = []
-        for row in candidates[:64]:
-            field_name = self._canonical_field_name(row.get("field_name"))
-            if not field_name:
-                continue
-            self.field_reviews.apply(
+        if candidates:
+            applied = self.field_reviews.apply_confirmations(
                 document_id=document_id,
                 document_class=document_class,
                 fields_response=fields_response,
-                current=row,
-                field_name=field_name,
-                decision_kind="confirm",
-                corrected_value=None,
+                candidates=candidates,
                 context=context,
+                operation_id=operation_id,
+                tool_id="documents.confirm_fields",
+                arguments_hash=arguments_hash,
             )
-            confirmed.append(field_name)
+            confirmed = [
+                str(row.get("field_name") or "")
+                for row in applied.get("decisions", [])[:64]
+                if isinstance(row, dict) and str(row.get("field_name") or "")
+            ]
+        else:
+            result_ref = "confirmation_v1:" + str(len(confirmed)) + ":" + hashlib.sha256(
+                "\n".join(confirmed).encode("utf-8")
+            ).hexdigest()
+            self.gateway.complete_tool_operation(
+                operation_id=operation_id,
+                tool_id="documents.confirm_fields",
+                arguments_hash=arguments_hash,
+                target_ref=document_id,
+                result_ref=result_ref,
+            )
         preview = self._business_card_review_preview(document_id=document_id)
         message = (
             f"I confirmed {len(confirmed)} extracted field(s)."
@@ -535,6 +652,7 @@ class DocumentQueryService:
             "confirmed_fields": confirmed,
             "unverified_structured_fields": preview,
             "document_context_entities": self._context_entities([status]),
+            "idempotent_replay": False,
         }
 
     def _field_rows(self, *, document_id: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -544,6 +662,19 @@ class DocumentQueryService:
         raw_rows = response.get("fields")
         rows = [dict(row) for row in raw_rows[:64] if isinstance(row, dict)] if isinstance(raw_rows, list) else []
         return response, rows
+
+    @staticmethod
+    def _operation_kwargs(context: dict[str, Any]) -> dict[str, str]:
+        operation_id = str(context.get("operation_id") or "").strip()
+        tool_id = str(context.get("tool_id") or "").strip()
+        arguments_hash = str(context.get("arguments_hash") or "").strip().casefold()
+        if not operation_id:
+            return {}
+        return {
+            "operation_id": operation_id,
+            "tool_id": tool_id,
+            "arguments_hash": arguments_hash,
+        }
 
     @staticmethod
     def _field_row(*, rows: list[dict[str, Any]], field_name: str) -> dict[str, Any] | None:

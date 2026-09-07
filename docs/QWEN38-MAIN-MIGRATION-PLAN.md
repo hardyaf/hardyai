@@ -6,14 +6,14 @@ Last verified: 2026-08-26
 
 ## Objective
 
-Replace the Main Jarvis model `gpt-oss:20b` with `qwen3.8:27b` without changing MicroJarvis, weakening typed action boundaries, or degrading Discord and OCR/VLM service. Keep `gpt-oss:20b` installed and immediately selectable as the rollback model.
+Replace the Main Jarvis model `gpt-oss:20b` with `qwen3.8:27b` without weakening typed action boundaries or degrading Discord and OCR/VLM service. Keep `gpt-oss:20b` installed and immediately selectable as the rollback model.
 
 The candidate uses a 32,768-token Jarvis context even though the upstream model supports a larger native window. That bounded context matches the current deployed Main lanes and prevents context growth from becoming an unmeasured GPU-memory change.
 
 ## Current verified baseline
 
 - HardyAI is the canonical source checkout; `the protected authoritative deployment checkout` on Hardybot is the only build, test, model, GPU, and deployment location.
-- Production currently selects `gpt-oss:20b` for Main and `qwen2.5:7b` for Micro.
+- Production currently selects `gpt-oss:20b` as Jarvis's only semantic model.
 - Main conversation, repair, web-research decision, email semantic work, and action-ticket review all derive from the configured Main model.
 - Production Main contexts are already 32,768; some source/example defaults were stale at 12,288 and are corrected by this migration.
 - Accelerator admission is the only application path to Ollama and PaddleOCR-VL.
@@ -56,7 +56,7 @@ Thinking is a workload property, not a model-wide switch:
 | Research decision | `false` | Small structured routing decision. |
 | Email classifier | `false` | Small constrained classification. |
 | Action-ticket review | `false` initially | Structured validation; increase only if acceptance evidence warrants it. |
-| MicroJarvis | unchanged | Remains `qwen2.5:7b`, 4,096 context, explicit `!` command boundary. |
+| Main-only routing | unchanged | Prefix provenance remains audit-only; every accepted semantic turn enters Main. |
 
 Only the separate Ollama `thinking` response field may contain reasoning. Jarvis does not place it in replies, events, traces, sessions, or durable memory.
 
@@ -126,7 +126,7 @@ Gate: all live probes pass before declaring the cutover complete.
 - The content-free benchmark has no failed token-exhaustion loop.
 - Discord conversation and OCR/VLM coexistence pass with no OOM or container restart.
 - The active model, exact model digest, context, thinking policy, GPU assignment, and rollback are operator-inspectable.
-- MicroJarvis behavior and explicit Discord command semantics are unchanged.
+- Main-only routing and audit-only Discord prefix semantics are unchanged.
 
 ## Rollback
 

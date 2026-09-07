@@ -10,7 +10,13 @@ from uuid import uuid4
 from app.db.connection import open_sqlite_connection
 from app.db.migrations import initialize_schema
 from app.db.transaction import sqlite_transaction
-from app.jobs.types import JobStatus, ResourceClass
+from app.jobs.types import (
+    REVIEW_ACTION_EXECUTION_JOB,
+    REVIEW_NOTIFICATION_DISCORD_JOB,
+    REVIEW_OUTCOME_DISCORD_JOB,
+    JobStatus,
+    ResourceClass,
+)
 
 
 def _utc_now() -> datetime:
@@ -37,6 +43,85 @@ def _json_load(value: Any, fallback: Any) -> Any:
         return fallback
 
 
+_APPROVAL_JOB_FIELDS = {
+    REVIEW_NOTIFICATION_DISCORD_JOB: {
+        "proposal_id",
+        "review_id",
+        "operation_id",
+        "authorization_binding",
+        "batch_manifest_hash",
+        "transfer_binding_hash",
+        "destination_purpose",
+    },
+    REVIEW_ACTION_EXECUTION_JOB: {
+        "proposal_id",
+        "review_id",
+        "operation_id",
+        "authorization_binding",
+        "batch_manifest_hash",
+        "transfer_binding_hash",
+    },
+    REVIEW_OUTCOME_DISCORD_JOB: {
+        "proposal_id",
+        "review_id",
+        "operation_id",
+        "authorization_binding",
+        "state",
+        "destination_purpose",
+    },
+}
+
+
+def _validate_approval_job(
+    *,
+    job_type: str,
+    aggregate_id: str,
+    idempotency_key: str,
+    payload: dict[str, Any],
+) -> None:
+    fields = _APPROVAL_JOB_FIELDS.get(job_type)
+    protected_prefix = idempotency_key.startswith(
+        (
+            "review-notification-discord:v1:",
+            "review-action-execution:v1:",
+            "review-outcome-discord:v1:",
+        )
+    )
+    if fields is None:
+        if protected_prefix:
+            raise ValueError("approval_job_idempotency_key_reserved")
+        return
+    if set(payload) != fields:
+        raise ValueError("approval_job_payload_shape_invalid")
+    proposal_id = str(payload.get("proposal_id") or "").strip()
+    review_id = str(payload.get("review_id") or "").strip()
+    operation_id = str(payload.get("operation_id") or "").strip()
+    authorization_binding = str(payload.get("authorization_binding") or "").strip()
+    if not all((proposal_id, review_id, operation_id, authorization_binding)):
+        raise ValueError("approval_job_payload_binding_invalid")
+    if aggregate_id != proposal_id:
+        raise ValueError("approval_job_aggregate_mismatch")
+    if job_type == REVIEW_NOTIFICATION_DISCORD_JOB:
+        destination = str(payload.get("destination_purpose") or "").strip()
+        expected = f"review-notification-discord:v1:{proposal_id}:{review_id}:{destination}"
+    elif job_type == REVIEW_OUTCOME_DISCORD_JOB:
+        state = str(payload.get("state") or "").strip()
+        destination = str(payload.get("destination_purpose") or "").strip()
+        if state not in {"executed", "denied", "failed_terminal"} or not destination:
+            raise ValueError("approval_job_outcome_invalid")
+        expected = f"review-outcome-discord:v1:{proposal_id}:{state}"
+    else:
+        expected = f"review-action-execution:v1:{proposal_id}:{operation_id}"
+    if idempotency_key != expected:
+        raise ValueError("approval_job_idempotency_key_invalid")
+    for optional_hash in ("batch_manifest_hash", "transfer_binding_hash"):
+        value = payload.get(optional_hash)
+        if value is not None and (
+            not isinstance(value, str)
+            or len(value) != 64
+            or any(char not in "0123456789abcdef" for char in value)
+        ):
+            raise ValueError("approval_job_manifest_hash_invalid")
 class DurableJobRepository:
     """Generic leased job ledger backed by the existing core SQLite schema."""
 
@@ -87,6 +172,17 @@ class DurableJobRepository:
         total_deadline_at: str | None = None,
         cursor: sqlite3.Cursor | None = None,
     ) -> dict[str, Any]:
+        job_type = str(job_type or "").strip()
+        aggregate_id = str(aggregate_id or "").strip()
+        idempotency_key = str(idempotency_key or "").strip()
+        if not isinstance(payload, dict):
+            raise ValueError("job_payload_invalid")
+        _validate_approval_job(
+            job_type=job_type,
+            aggregate_id=aggregate_id,
+            idempotency_key=idempotency_key,
+            payload=payload,
+        )
         now = _iso_utc()
         values = (
             str(uuid4()),
@@ -119,6 +215,13 @@ class DurableJobRepository:
             ).fetchone()
             if row is None:
                 raise RuntimeError("durable job enqueue did not produce a row")
+            self._reject_approval_job_conflict(
+                row=row,
+                job_type=job_type,
+                aggregate_id=aggregate_id,
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
             return self._job_row(row)
         with self._transaction(immediate=True) as cur:
             cur.execute(sql, values)
@@ -128,7 +231,33 @@ class DurableJobRepository:
             ).fetchone()
         if row is None:
             raise RuntimeError("durable job enqueue did not produce a row")
+        self._reject_approval_job_conflict(
+            row=row,
+            job_type=job_type,
+            aggregate_id=aggregate_id,
+            idempotency_key=idempotency_key,
+            payload=payload,
+        )
         return self._job_row(row)
+
+    @staticmethod
+    def _reject_approval_job_conflict(
+        *,
+        row: sqlite3.Row,
+        job_type: str,
+        aggregate_id: str,
+        idempotency_key: str,
+        payload: dict[str, Any],
+    ) -> None:
+        if job_type not in _APPROVAL_JOB_FIELDS and str(row["job_type"]) not in _APPROVAL_JOB_FIELDS:
+            return
+        if (
+            str(row["job_type"]) != job_type
+            or str(row["aggregate_id"]) != aggregate_id
+            or str(row["idempotency_key"]) != idempotency_key
+            or str(row["payload_json"]) != _json_dump(payload)
+        ):
+            raise ValueError("approval_job_idempotency_conflict")
 
     def claim_jobs(
         self,
@@ -740,6 +869,30 @@ class DurableJobRepository:
                     _json_dump(metadata or {}),
                 ),
             )
+
+    def get_worker_heartbeat(
+        self,
+        worker_type: str,
+        *,
+        worker_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        clauses = ["worker_type=?"]
+        values: list[Any] = [str(worker_type)]
+        if worker_id is not None:
+            clauses.append("worker_id=?")
+            values.append(str(worker_id))
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM worker_heartbeats WHERE "
+                + " AND ".join(clauses)
+                + " ORDER BY last_seen_at DESC LIMIT 1",
+                values,
+            ).fetchone()
+        if row is None:
+            return None
+        value = dict(row)
+        value["metadata"] = _json_load(value.pop("metadata_json"), {})
+        return value
 
     def close(self) -> None:
         if not self._owns_connection:

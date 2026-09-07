@@ -104,6 +104,41 @@ class PendingInteractionCoordinator:
             reason="main_tool_loop_clarification_stored",
         )
 
+    def store_action_approval_pointer(
+        self,
+        *,
+        session: SessionRecord,
+        tool_id: str,
+        skill_id: str,
+        proposal_id: str,
+        review_id: str,
+        operation_id: str,
+        proposal_hash: str,
+        expires_at: str,
+        persistence: str,
+    ) -> None:
+        """Persist only opaque correlation for a call paused in Human Review."""
+
+        self.store(
+            session=session,
+            intent=str(tool_id),
+            entities={},
+            missing_fields=[],
+            question=None,
+            kind="action_approval_v1",
+            skill_id=str(skill_id),
+            metadata={
+                "pending_type": "action_approval_v1",
+                "proposal_id": str(proposal_id),
+                "review_id": str(review_id),
+                "operation_id": str(operation_id),
+                "proposal_hash": str(proposal_hash),
+                "expires_at": str(expires_at),
+                "persistence": str(persistence),
+            },
+            reason="main_tool_loop_waiting_for_approval",
+        )
+
     def store_generic_action_clarification(
         self,
         *,

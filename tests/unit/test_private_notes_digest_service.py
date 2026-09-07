@@ -95,7 +95,7 @@ def test_private_notes_capture_is_silent_idempotent_and_digest_is_once_per_local
         assert backend.calls[0]["context"] == {
             "agent_id": "catparty",
             "requested_by_user_id": "taylor",
-            "micro_intent": "private_notes.compile_digest",
+            "initial_intent": "private_notes.compile_digest",
             "runtime_skill_intents": ["private_notes.compile_digest"],
             "web_research": None,
         }

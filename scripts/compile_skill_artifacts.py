@@ -22,11 +22,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Output path for compiled critical skills markdown.",
     )
     parser.add_argument(
-        "--micro-output",
-        default="app/prompts/micro_jarvis_skills.md",
-        help="Output path for compiled micro allowlist markdown.",
-    )
-    parser.add_argument(
         "--min-critical-level",
         type=int,
         default=1,
@@ -64,18 +59,12 @@ def main() -> int:
         min_critical_level=max(0, int(args.min_critical_level)),
         compile_if_stale=compile_if_stale,
     )
-    micro = registry.compile_micro_skills_markdown(
-        output_path=args.micro_output,
-        compile_if_stale=compile_if_stale,
-    )
-
     print(
         json.dumps(
             {
                 "status": "ok",
                 "sync": sync_result,
                 "critical": critical,
-                "micro": micro,
             },
             indent=2,
             sort_keys=True,

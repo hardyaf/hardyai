@@ -6,7 +6,8 @@ from typing import Any
 from uuid import uuid4
 
 from app.config import settings
-from app.tickets.repository import TicketRepository
+from app.tickets.async_receipts import reduce_ticket_effects
+from app.tickets.repository import TicketRepository, content_hash
 from app.tickets.review_service import TicketReviewService
 from app.tickets.types import TicketStatus
 from app.services.offline_runtime_policy import validate_offline_runtime
@@ -23,6 +24,8 @@ class TicketReviewWorker:
         lease_seconds: float = 300.0,
         poll_seconds: float = 10.0,
         live_idle_seconds: float = 15.0,
+        review_delay_seconds: float | None = None,
+        review_max_attempts: int | None = None,
     ) -> None:
         self._repository = repository
         self._review_service = review_service
@@ -31,10 +34,139 @@ class TicketReviewWorker:
         self._lease_seconds = max(10.0, float(lease_seconds))
         self._poll_seconds = max(1.0, min(float(poll_seconds), 60.0))
         self._live_idle_seconds = max(0.0, float(live_idle_seconds))
+        self._review_delay_seconds = max(
+            0.0,
+            float(
+                settings.action_ticket_review_delay_seconds
+                if review_delay_seconds is None
+                else review_delay_seconds
+            ),
+        )
+        self._review_max_attempts = max(
+            1,
+            int(
+                settings.action_ticket_review_max_attempts
+                if review_max_attempts is None
+                else review_max_attempts
+            ),
+        )
         self._stop = Event()
 
     def request_stop(self) -> None:
         self._stop.set()
+
+    def _reduce_manifest_watchdog(
+        self,
+        *,
+        ticket_id: str,
+    ) -> dict[str, Any] | None:
+        if not self._repository.list_execution_manifests(ticket_id):
+            return None
+        try:
+            aggregate = reduce_ticket_effects(self._repository, ticket_id)
+        except (KeyError, TypeError, ValueError):
+            self._repository.transition_ticket(
+                ticket_id=ticket_id,
+                status=TicketStatus.RECONCILIATION_REQUIRED,
+                terminal_reason="effect_reducer_conflict",
+            )
+            return {"status": "reconciliation_required", "ticket_id": ticket_id}
+
+        aggregate_status = str(aggregate["status"])
+        if aggregate_status == "completed":
+            return self._schedule_verification_from_receipts(
+                ticket_id,
+                repair_legacy_completion=False,
+            )
+
+        target = (
+            TicketStatus.ESCALATED
+            if aggregate_status == "failed"
+            else TicketStatus.RECONCILIATION_REQUIRED
+        )
+        self._repository.transition_ticket(
+            ticket_id=ticket_id,
+            status=target,
+            terminal_reason=str(aggregate["reason"]),
+        )
+        return {
+            "status": target.value,
+            "ticket_id": ticket_id,
+            "effect_status": aggregate_status,
+        }
+
+    def _schedule_verification_from_receipts(
+        self,
+        ticket_id: str,
+        *,
+        repair_legacy_completion: bool,
+    ) -> dict[str, Any]:
+        receipts = self._repository.list_receipts(ticket_id)
+        if repair_legacy_completion:
+            ticket = self._repository.get_ticket(ticket_id) or {}
+            request_id = str(ticket.get("origin_request_id") or f"watchdog:{ticket_id}")
+            try:
+                for receipt in receipts:
+                    receipt_payload = dict(receipt)
+                    receipt_payload["status"] = receipt_payload.pop("outcome")
+                    receipt_payload.pop("ticket_id", None)
+                    self._repository.record_operation_completion_atomic(
+                        ticket_id=ticket_id,
+                        request_id=request_id,
+                        receipt=receipt_payload,
+                    )
+            except (KeyError, TypeError, ValueError):
+                self._repository.transition_ticket(
+                    ticket_id=ticket_id,
+                    status=TicketStatus.RECONCILIATION_REQUIRED,
+                    terminal_reason="effect_receipt_finalization_conflict",
+                )
+                return {"status": "reconciliation_required", "ticket_id": ticket_id}
+        expectations = self._repository.list_expectations(ticket_id)
+        receipt_ids = {str(item.get("operation_id") or "") for item in receipts}
+        expectation_ids = {
+            str(item.get("operation_id") or "") for item in expectations
+        }
+        if not receipts or receipt_ids != expectation_ids:
+            self._repository.transition_ticket(
+                ticket_id=ticket_id,
+                status=TicketStatus.RECONCILIATION_REQUIRED,
+                terminal_reason="effect_receipt_finalization_incomplete",
+            )
+            return {"status": "reconciliation_required", "ticket_id": ticket_id}
+
+        resource_keys = sorted({str(item["resource_key"]) for item in receipts})
+        source_revision = content_hash(
+            [
+                {
+                    "operation_id": item["operation_id"],
+                    "provider_revision": item.get("provider_revision"),
+                    "expected_effect": item.get("expected_effect"),
+                }
+                for item in receipts
+            ]
+        )
+        expected_hash = content_hash(
+            [item.get("expected_effect") for item in receipts]
+        )
+        self._repository.transition_ticket(
+            ticket_id=ticket_id,
+            status=TicketStatus.EXECUTING,
+            resource_key=(
+                resource_keys[0]
+                if len(resource_keys) == 1
+                else f"multi:{ticket_id}"
+            ),
+            source_action_revision=source_revision,
+            expected_effect_hash=expected_hash,
+        )
+        self._repository.schedule_verification(
+            ticket_id=ticket_id,
+            source_action_revision=source_revision,
+            delay_seconds=self._review_delay_seconds,
+            max_attempts=self._review_max_attempts,
+        )
+        return {"status": "verification_pending", "ticket_id": ticket_id}
 
     def run_once(self) -> list[dict[str, Any]]:
         self._repository.record_worker_heartbeat(
@@ -64,16 +196,39 @@ class TicketReviewWorker:
                 or ""
             )
             ticket = self._repository.get_ticket(ticket_id)
-            if ticket and str(ticket.get("status") or "") in {
+            manifest_result = (
+                self._reduce_manifest_watchdog(ticket_id=ticket_id)
+                if ticket is not None
+                and str(ticket.get("status") or "")
+                in {
+                    TicketStatus.CAPTURED.value,
+                    TicketStatus.EXECUTING.value,
+                    TicketStatus.RECONCILIATION_REQUIRED.value,
+                }
+                else None
+            )
+            if manifest_result is not None:
+                results.append(manifest_result)
+            elif ticket and str(ticket.get("status") or "") in {
                 TicketStatus.CAPTURED.value,
                 TicketStatus.EXECUTING.value,
-            } and not self._repository.list_receipts(ticket_id):
-                self._repository.transition_ticket(
-                    ticket_id=ticket_id,
-                    status=TicketStatus.RECONCILIATION_REQUIRED,
-                    terminal_reason="execution_interrupted_before_receipt",
-                )
-                results.append({"status": "reconciliation_required", "ticket_id": ticket_id})
+            }:
+                if self._repository.list_receipts(ticket_id):
+                    results.append(
+                        self._schedule_verification_from_receipts(
+                            ticket_id,
+                            repair_legacy_completion=True,
+                        )
+                    )
+                else:
+                    self._repository.transition_ticket(
+                        ticket_id=ticket_id,
+                        status=TicketStatus.RECONCILIATION_REQUIRED,
+                        terminal_reason="execution_interrupted_before_receipt",
+                    )
+                    results.append(
+                        {"status": "reconciliation_required", "ticket_id": ticket_id}
+                    )
             else:
                 results.append({"status": "watchdog_cleared", "ticket_id": ticket_id})
             self._repository.complete_job(

@@ -72,6 +72,114 @@ def test_discord_bot_denies_role_only_scope_in_direct_messages(tmp_path):
     channel.send.assert_not_awaited()
 
 
+def test_discord_bot_accepts_action_decision_only_from_bound_protected_scope(tmp_path):
+    permissions = tmp_path / "discord_permissions.yaml"
+    permissions.write_text(
+        (
+            "version: 1\n"
+            "defaults:\n"
+            "  command_prefix: \"!jarvis\"\n"
+            "  require_prefix: true\n"
+            "  allowed_guild_ids: [111]\n"
+            "protected_destinations:\n"
+            "  human_reviews:\n"
+            "    guild_id: 111\n"
+            "    channel_id: 222\n"
+            "    approver_user_id: 333\n"
+        ),
+        encoding="utf-8",
+    )
+
+    class ReviewRepository:
+        @staticmethod
+        def action_proposal_for_review(review_id):
+            assert review_id == "review-1"
+            return {
+                "proposal_id": "proposal-1",
+                "review_id": review_id,
+                "proposal_hash": "a" * 64,
+            }
+
+    class ReviewService:
+        repository = ReviewRepository()
+
+        def __init__(self):
+            self.decisions = []
+
+        def decide_action_proposal(self, **kwargs):
+            self.decisions.append(dict(kwargs))
+            return {"proposal": {"state": "approved"}}
+
+    reviews = ReviewService()
+    bot = DiscordJarvisBot(
+        command_prefix="!jarvis",
+        permissions_path=str(permissions),
+        human_review_service=reviews,
+    )
+    channel = SimpleNamespace(id=222, send=AsyncMock())
+    message = SimpleNamespace(
+        id=444,
+        author=SimpleNamespace(bot=False, id=333, roles=[]),
+        guild=SimpleNamespace(id=111),
+        channel=channel,
+        content="approve review-1",
+    )
+
+    asyncio.run(bot.on_message(message))
+
+    assert len(reviews.decisions) == 1
+    assert reviews.decisions[0]["actor_principal"] == "discord_user:333"
+    assert reviews.decisions[0]["guild_id"] == "111"
+    assert reviews.decisions[0]["channel_id"] == "222"
+    assert reviews.decisions[0]["message_id"] == "444"
+    channel.send.assert_awaited_once()
+
+
+def test_discord_bot_denies_action_decision_from_wrong_channel(tmp_path):
+    permissions = tmp_path / "discord_permissions.yaml"
+    permissions.write_text(
+        (
+            "version: 1\n"
+            "defaults:\n"
+            "  command_prefix: \"!jarvis\"\n"
+            "  require_prefix: true\n"
+            "  allowed_guild_ids: [111]\n"
+            "protected_destinations:\n"
+            "  human_reviews:\n"
+            "    guild_id: 111\n"
+            "    channel_id: 222\n"
+            "    approver_user_id: 333\n"
+        ),
+        encoding="utf-8",
+    )
+
+    class ReviewService:
+        repository = SimpleNamespace()
+
+        @staticmethod
+        def decide_action_proposal(**kwargs):
+            raise AssertionError(kwargs)
+
+    bot = DiscordJarvisBot(
+        command_prefix="!jarvis",
+        permissions_path=str(permissions),
+        human_review_service=ReviewService(),
+    )
+    channel = SimpleNamespace(id=999, send=AsyncMock())
+    message = SimpleNamespace(
+        id=444,
+        author=SimpleNamespace(bot=False, id=333, roles=[]),
+        guild=SimpleNamespace(id=111),
+        channel=channel,
+        content="approve review-1",
+    )
+
+    asyncio.run(bot.on_message(message))
+
+    channel.send.assert_awaited_once()
+    assert "denied" in channel.send.await_args.args[0].casefold()
+
+
 def test_parse_discord_channel_id():
     assert parse_discord_channel_id(12345) == 12345
     assert parse_discord_channel_id("12345") == 12345
@@ -108,7 +216,7 @@ def test_parse_discord_message_text_supports_channel_listener_mode():
     )
 
 
-def test_parse_discord_message_envelope_preserves_explicit_micro_boundary():
+def test_parse_discord_message_envelope_preserves_prefix_provenance_on_main_boundary():
     prefixed = parse_discord_message_envelope(
         content="!what is on my calendar tomorrow",
         prefix="!",
@@ -124,12 +232,12 @@ def test_parse_discord_message_envelope_preserves_explicit_micro_boundary():
 
     assert prefixed is not None
     assert prefixed.text == "what is on my calendar tomorrow"
-    assert prefixed.lane == "micro"
-    assert prefixed.micro_command_explicit is True
+    assert prefixed.command_prefix_explicit is True
+    assert prefixed.lane == "main"
     assert unprefixed is not None
     assert unprefixed.text == "what is on my calendar tomorrow"
     assert unprefixed.lane == "main"
-    assert unprefixed.micro_command_explicit is False
+    assert unprefixed.command_prefix_explicit is False
 
 
 def test_parse_discord_message_text_respects_prefix_requirement_and_guild_scope():
@@ -277,6 +385,10 @@ def test_private_notes_channel_captures_silently_before_command_routing(tmp_path
             "  command_prefix: \"!\"\n"
             "  require_prefix: false\n"
             "  allowed_guild_ids: [100]\n"
+            "protected_destinations:\n"
+            "  operator_notices:\n"
+            "    guild_id: 100\n"
+            "    channel_id: 202\n"
             "guilds:\n"
             "  - guild_id: 100\n"
             "    allowed_channel_ids: [200]\n"
@@ -324,9 +436,87 @@ def test_private_notes_channel_captures_silently_before_command_routing(tmp_path
     assert service.captures[0]["content"] == "maybe move the table; ask Jordan about Friday"
     assert service.captures[0]["config"].owner_user_id == "taylor"
     assert service.captures[0]["config"].raw_note_retention_days == 30
-    assert bot._compute_budget_notice_config is not None
-    assert bot._compute_budget_notice_config.compute_budget_notices is True
+    assert bot._operator_notice_destination == {
+        "purpose": "operator_notices",
+        "guild_id": "100",
+        "channel_id": "202",
+    }
     channel.send.assert_not_awaited()
+
+
+def test_model_compute_notice_uses_symbolic_operator_destination_at_send_time(
+    tmp_path,
+    monkeypatch,
+):
+    class NoticeService:
+        def __init__(self) -> None:
+            self.recorded = []
+            self.completed = []
+
+        def claim(self):
+            return [{"job_id": "notice-job", "payload": {"schema_version": 1}}]
+
+        @staticmethod
+        def already_delivered(job):
+            del job
+            return False
+
+        @staticmethod
+        def message(job):
+            del job
+            return "Content-free operator notice."
+
+        @staticmethod
+        def delivery_nonce(job):
+            del job
+            return 42
+
+        def record_delivery(self, job, *, message_id):
+            self.recorded.append((job["job_id"], message_id))
+            return True
+
+        def complete(self, job):
+            self.completed.append(job["job_id"])
+            return True
+
+        @staticmethod
+        def retry(job, *, error_code):
+            raise AssertionError((job, error_code))
+
+    permissions = tmp_path / "discord_permissions.yaml"
+    permissions.write_text(
+        (
+            "version: 1\n"
+            "defaults:\n"
+            "  command_prefix: \"!\"\n"
+            "  require_prefix: false\n"
+            "  allowed_guild_ids: [100]\n"
+            "protected_destinations:\n"
+            "  operator_notices:\n"
+            "    guild_id: 100\n"
+            "    channel_id: 202\n"
+            "guilds: []\n"
+        ),
+        encoding="utf-8",
+    )
+    service = NoticeService()
+    bot = DiscordJarvisBot(
+        command_prefix="!",
+        permissions_path=str(permissions),
+        model_compute_budget_notifications=service,
+    )
+    channel = SimpleNamespace(send=AsyncMock(return_value=SimpleNamespace(id=999)))
+    requested_channels = []
+
+    def get_channel(channel_id):
+        requested_channels.append(channel_id)
+        return channel
+
+    monkeypatch.setattr(bot, "get_channel", get_channel)
+    assert asyncio.run(bot._run_model_compute_budget_notifications_once()) == 1
+    assert requested_channels == [202]
+    assert service.recorded == [("notice-job", "999")]
+    assert service.completed == ["notice-job"]
 
 
 def test_private_notes_channel_silently_ignores_unlisted_author(tmp_path):
@@ -461,22 +651,22 @@ def test_build_ask_request_payload_uses_channel_session_contract():
     assert payload["context"]["session_channel"] == "discord.guild.123.channel.456"
     assert payload["context"]["discord_channel_id"] == "456"
     assert payload["context"]["discord_guild_id"] == "123"
-    assert payload["context"]["micro_command_explicit"] is False
+    assert payload["context"]["command_prefix_explicit"] is False
     assert payload["context"]["discord_routing_lane"] == "main"
 
 
-def test_build_ask_request_payload_marks_explicit_micro_command():
+def test_build_ask_request_payload_marks_explicit_prefix_without_changing_authority():
     payload = build_ask_request_payload(
         command_text="what is on my calendar tomorrow",
         guild_id=123,
         channel_id=456,
         user_id=789,
-        micro_command_explicit=True,
+        command_prefix_explicit=True,
     )
 
-    assert payload["context"]["micro_command_explicit"] is True
-    assert payload["context"]["discord_routing_lane"] == "micro"
-    assert payload["context"]["force_main_owner"] is False
+    assert payload["context"]["command_prefix_explicit"] is True
+    assert payload["context"]["discord_routing_lane"] == "main"
+    assert payload["context"]["force_main_owner"] is True
 
 
 def test_summarize_ask_response_prefers_assistant_text():

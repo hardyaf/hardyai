@@ -1,6 +1,11 @@
+from pathlib import Path
+
+import yaml
+
 from app.tools.calendar_service import CalendarService
 from app.skills.domains.calendar.handler import CalendarToolHandler
 from app.skills.domains.calendar.storage import InMemoryCalendarStorage
+from app.skills.tool_contracts import compile_tool_descriptors
 
 
 def test_calendar_service_add_event_uses_local_stub_when_google_live_missing():
@@ -362,3 +367,63 @@ def test_calendar_local_time_basis_corrects_dst_offsets_from_server_timezone():
     assert result["status"] == "ok"
     assert google.calls[0]["start"] == "2026-03-08T00:00:00-05:00"
     assert google.calls[0]["end"] == "2026-03-09T00:00:00-04:00"
+
+
+def test_calendar_write_descriptors_lock_invite_and_delete_approval_policy():
+    skill = Path("app/prompts/skills/calendar_skill.md").read_text(encoding="utf-8")
+    frontmatter = yaml.safe_load(skill.split("---", 2)[1])
+    descriptors, diagnostics = compile_tool_descriptors(
+        skill_id=frontmatter["skill_id"],
+        contract_version=frontmatter["main_tools_contract_version"],
+        declarations=frontmatter["main_tools"],
+    )
+    by_id = {item.tool_id: item for item in descriptors}
+
+    assert diagnostics == ()
+    assert set(by_id) >= {
+        "calendar.create_event",
+        "calendar.create_event_with_invites",
+        "calendar.update_event",
+        "calendar.delete_event",
+    }
+    assert "invitee_emails" not in by_id["calendar.create_event"].input_schema["properties"]
+    assert by_id["calendar.create_event"].approval_rule == "none"
+    assert by_id["calendar.update_event"].approval_rule == "none"
+    assert by_id["calendar.create_event_with_invites"].approval_rule == "always"
+    assert by_id["calendar.delete_event"].approval_rule == "always"
+
+
+def test_typed_local_create_is_truthful_and_idempotent_for_process_lifetime():
+    storage = InMemoryCalendarStorage()
+    service = CalendarService(google_live=None, storage=storage)
+    handler = CalendarToolHandler(calendar_service=service)
+    canonical = handler.canonicalize_tool_arguments(
+        tool_id="calendar.create_event",
+        validated_arguments={
+            "title": "Local canary",
+            "start": "2026-09-06T12:00:00+00:00",
+            "end": "2026-09-06T13:00:00+00:00",
+            "all_day": False,
+            "timezone": "UTC",
+            "calendar_scope": "default",
+        },
+        request_context={},
+    )
+
+    first = service.execute_typed_write(
+        tool_id="calendar.create_event",
+        operation_id="toolop_v1_" + "5" * 64,
+        arguments_hash="6" * 64,
+        arguments=canonical,
+    )
+    replay = service.execute_typed_write(
+        tool_id="calendar.create_event",
+        operation_id="toolop_v1_" + "5" * 64,
+        arguments_hash="6" * 64,
+        arguments=canonical,
+    )
+
+    assert first["payload"]["sync_status"] == "not_synced"
+    assert first["payload"]["provider_event_id"] == ""
+    assert replay["payload"]["idempotent_replay"] is True
+    assert len(storage.list_events()) == 1

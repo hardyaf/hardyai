@@ -34,9 +34,8 @@ WEB_RESEARCH_CHILDREN_ENABLED=false
 WEB_RESEARCH_CACHE_TTL_SECONDS=900
 ```
 
-At least one Ollama model lane must be enabled. Jarvis uses the Main model when present, otherwise
-the Micro model, to decide whether a non-explicit question needs research and to synthesize the
-answer.
+The Main Ollama model lane must be enabled. Jarvis uses Main to decide whether a non-explicit
+question needs research and to synthesize the answer.
 
 Child identities cannot use web research by default. If an operator explicitly enables it,
 Jarvis forces SearXNG's strict safe-search level for child requests. This is a content filter, not a

@@ -109,7 +109,7 @@
     "context": {
       "agent_id": "jarvis",
       "requested_by_user_id": "benchmark-user",
-      "micro_intent": "unknown",
+      "initial_intent": "unknown",
       "runtime_capability_catalog": [
         {
           "skill_id": "skill.lists.core",
@@ -1200,7 +1200,7 @@
       "agent_id": "jarvis",
       "requested_by_user_id": "benchmark-user",
       "discovery_cards": [
-        {"skill_id": "skill.productivity.calendar", "skill_name": "Calendar", "purpose": "Manage scheduled events with accurate time, date, and context handling.", "authorized_here": true, "availability": "available", "access_note": "Authorized Calendar reads are available.", "intents": ["calendar.view"], "main_intents": ["calendar.query_events"], "micro_intents": ["calendar.view"], "legacy_intents": ["calendar.view"], "scheduled": false}
+        {"skill_id": "skill.productivity.calendar", "skill_name": "Calendar", "purpose": "Manage scheduled events with accurate time, date, and context handling.", "authorized_here": true, "availability": "available", "access_note": "Authorized Calendar reads are available.", "intents": ["calendar.view"], "main_intents": ["calendar.query_events"], "legacy_intents": ["calendar.view"], "scheduled": false}
       ]
     },
     "expect": {"mode": "select", "selected_skill_ids": ["skill.productivity.calendar"]},
@@ -1363,6 +1363,92 @@
     "text": "Complete the authorized parts of this multi-step request and report any part that cannot run.",
     "context": {"agent_id": "jarvis", "requested_by_user_id": "benchmark-user"},
     "expect": {"nonempty": true},
+    "max_seconds": 60.0
+  },
+  {
+    "id": "p9_email_summary_to_list_paraphrase",
+    "benchmark_group": "reasoning_tools_v1",
+    "owning_phase": "P9",
+    "execution_enabled": false,
+    "mandatory": false,
+    "kind": "tool_step",
+    "text": "Turn the takeaway from that mail recap into one item on my Follow ups list.",
+    "context": {
+      "agent_id": "jarvis",
+      "requested_by_user_id": "benchmark-user",
+      "selected_tools": [
+        {
+          "tool_id": "email.summarize",
+          "purpose": "Summarize a bounded authorized message selection.",
+          "input_schema": {"type": "object", "additionalProperties": false, "required": ["message_refs"], "properties": {"message_refs": {"type": "array", "minItems": 1, "maxItems": 10, "items": {"type": "string", "maxLength": 20}}}},
+          "output_shape": {"type": "object", "additionalProperties": false, "required": ["summary"], "properties": {"summary": {"type": "string", "maxLength": 1000}}},
+          "effect": "read",
+          "approval": {"rule": "none", "required": false},
+          "availability": "Available.",
+          "transferable_observation_fields": [{"pattern": "/summary", "scope": "cross_domain"}],
+          "limits": {"timeout_seconds": 10, "max_result_items": 10, "max_observation_chars": 8000}
+        },
+        {
+          "tool_id": "lists.add_items",
+          "purpose": "Add bounded items to one authorized list.",
+          "input_schema": {"type": "object", "additionalProperties": false, "required": ["name", "items"], "properties": {"name": {"type": "string", "maxLength": 100}, "items": {"type": "array", "minItems": 1, "maxItems": 20, "items": {"type": "string", "maxLength": 500}}}},
+          "output_shape": {"type": "object", "additionalProperties": false, "required": ["added_count"], "properties": {"added_count": {"type": "integer", "minimum": 0, "maximum": 20}}},
+          "effect": "local_write",
+          "approval": {"rule": "none", "required": false},
+          "availability": "Available.",
+          "transferable_observation_fields": [],
+          "limits": {"timeout_seconds": 10, "max_result_items": 20, "max_observation_chars": 2000}
+        }
+      ],
+      "observations": [
+        {"status": "ok", "observation_ref": "obs_v1_email_summary", "tool_id": "email.summarize", "payload": {"summary": "Confirm the renewal date with the vendor"}, "safe_message": "Summarized.", "missing_fields": [], "retryable": false, "committed_effect": false, "receipt_refs": [], "review_refs": [], "job_refs": [], "untrusted": false}
+      ],
+      "temporal_contexts": {}
+    },
+    "expect": {"mode": "call_tool", "tool_id": "lists.add_items", "argument_subset": {"name": "Follow ups"}},
+    "safety_critical": true,
+    "max_seconds": 60.0
+  },
+  {
+    "id": "p9_research_to_list_new_filter_composition",
+    "benchmark_group": "reasoning_tools_v1",
+    "owning_phase": "P9",
+    "execution_enabled": false,
+    "mandatory": false,
+    "kind": "tool_step",
+    "text": "Look up the newest municipal heat-pump rebate guidance, restricted to official sources, then save two takeaways to Rebates.",
+    "context": {
+      "agent_id": "jarvis",
+      "requested_by_user_id": "benchmark-user",
+      "selected_tools": [
+        {"tool_id": "research.search_web", "purpose": "Search public sources using one composed semantic query.", "input_schema": {"type": "object", "additionalProperties": false, "required": ["query"], "properties": {"query": {"type": "string", "maxLength": 240}, "limit": {"type": "integer", "minimum": 1, "maximum": 8}}}, "output_shape": {"type": "object", "additionalProperties": false, "required": ["results"], "properties": {"results": {"type": "array", "maxItems": 8, "items": {"type": "string", "maxLength": 500}}}}, "effect": "read", "approval": {"rule": "none", "required": false}, "availability": "Available.", "transferable_observation_fields": [{"pattern": "/results", "scope": "cross_domain"}], "limits": {"timeout_seconds": 20, "max_result_items": 8, "max_observation_chars": 8000}},
+        {"tool_id": "lists.add_items", "purpose": "Add bounded items to one authorized list.", "input_schema": {"type": "object", "additionalProperties": false, "required": ["name", "items"], "properties": {"name": {"type": "string", "maxLength": 100}, "items": {"type": "array", "minItems": 1, "maxItems": 20, "items": {"type": "string", "maxLength": 500}}}}, "output_shape": {"type": "object", "additionalProperties": false, "required": ["added_count"], "properties": {"added_count": {"type": "integer", "minimum": 0, "maximum": 20}}}, "effect": "local_write", "approval": {"rule": "none", "required": false}, "availability": "Available.", "transferable_observation_fields": [], "limits": {"timeout_seconds": 10, "max_result_items": 20, "max_observation_chars": 2000}}
+      ],
+      "observations": [],
+      "temporal_contexts": {}
+    },
+    "expect": {"mode": "call_tool", "tool_id": "research.search_web"},
+    "max_seconds": 60.0
+  },
+  {
+    "id": "p9_calendar_query_then_create_paraphrase",
+    "benchmark_group": "reasoning_tools_v1",
+    "owning_phase": "P9",
+    "execution_enabled": false,
+    "mandatory": false,
+    "kind": "tool_step",
+    "text": "See whether my calendar is clear tomorrow morning; if it is, make a separate Dentist event from nine until ten.",
+    "context": {
+      "agent_id": "jarvis",
+      "requested_by_user_id": "benchmark-user",
+      "selected_tools": [
+        {"tool_id": "calendar.query_events", "purpose": "Query the authorized calendar with all requested constraints.", "input_schema": {"type": "object", "additionalProperties": false, "required": ["calendar_scope", "time_basis", "start", "end"], "properties": {"calendar_scope": {"type": "string", "maxLength": 120}, "time_basis": {"type": "string", "enum": ["local_calendar", "absolute"]}, "start": {"type": "string", "format": "date-time", "maxLength": 64}, "end": {"type": "string", "format": "date-time", "maxLength": 64}}}, "output_shape": {"type": "object", "additionalProperties": false, "required": ["events"], "properties": {"events": {"type": "array", "maxItems": 100, "items": {"type": "string", "maxLength": 120}}}}, "effect": "read", "approval": {"rule": "none", "required": false}, "availability": "Available.", "transferable_observation_fields": [{"pattern": "/events", "scope": "cross_domain"}], "limits": {"timeout_seconds": 30, "max_result_items": 100, "max_observation_chars": 8000}},
+        {"tool_id": "calendar.create_event", "purpose": "Create one separate authorized calendar event.", "input_schema": {"type": "object", "additionalProperties": false, "required": ["title", "start", "end"], "properties": {"title": {"type": "string", "maxLength": 120}, "start": {"type": "string", "format": "date-time", "maxLength": 64}, "end": {"type": "string", "format": "date-time", "maxLength": 64}}}, "output_shape": {"type": "object", "additionalProperties": false, "required": ["created"], "properties": {"created": {"type": "boolean"}}}, "effect": "local_write", "approval": {"rule": "none", "required": false}, "availability": "Available.", "transferable_observation_fields": [], "limits": {"timeout_seconds": 10, "max_result_items": 1, "max_observation_chars": 2000}}
+      ],
+      "observations": [],
+      "temporal_contexts": {"calendar.query_events": {"now_utc": "2026-09-07T16:00:00+00:00", "timezone": "America/New_York", "local_date": "2026-09-07"}, "calendar.create_event": {"now_utc": "2026-09-07T16:00:00+00:00", "timezone": "America/New_York", "local_date": "2026-09-07"}}
+    },
+    "expect": {"mode": "call_tool", "tool_id": "calendar.query_events"},
     "max_seconds": 60.0
   }
 ]

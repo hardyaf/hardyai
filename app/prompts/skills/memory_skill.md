@@ -20,18 +20,6 @@ interactive: false
 operation_disposition: deactivate_stale
 version: 1
 
-micro_enabled: false
-micro_functions: []
-micro_failure_handoff:
-  baseline_context_keys:
-    - micro_intent
-    - micro_confidence
-    - micro_entities
-    - micro_ambiguity_flags
-    - required_missing_fields
-    - token_session_turn_summaries
-  capability_context_keys: []
-
 main_handoff_context:
   always_pass_from_session:
     - pending_clarification
@@ -329,24 +317,13 @@ On update:
 - do not claim something is remembered unless storage confirms success
 - prefer concise normalized memory text over raw user wording when meaning is preserved
 
-## MicroJarvis Contract
+## Execution Ownership
 
-### Micro functions that are allowed
-
-- None.
-
-### Escalation triggers to Main Jarvis
-
-- All memory requests route to Main Jarvis.
-
-### Failure handoff payload to Main Jarvis
-
-- Include baseline micro decision context for interpretability.
-- Include `required_missing_fields` when micro classification indicates missing required inputs.
+Main owns Memory interpretation.
 
 ## Main Jarvis Responsibilities
 
-Since micro is disabled, all memory requests go through Main Jarvis.
+All interactive Memory requests go through Main Jarvis.
 
 Main Jarvis must:
 - judge whether information is worth storing

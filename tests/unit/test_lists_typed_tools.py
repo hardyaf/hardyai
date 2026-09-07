@@ -83,7 +83,7 @@ def _execute(handler: ListsToolHandler, envelope: ToolCallEnvelope, descriptor: 
     return result
 
 
-def test_lists_markdown_publishes_only_the_accelerated_four_tools(tmp_path: Path) -> None:
+def test_lists_markdown_publishes_the_closed_p8a_tool_set(tmp_path: Path) -> None:
     _store, _storage, _handler, descriptors = _runtime(tmp_path)
 
     assert set(descriptors) == {
@@ -91,6 +91,10 @@ def test_lists_markdown_publishes_only_the_accelerated_four_tools(tmp_path: Path
         "lists.get_collection",
         "lists.create_collection",
         "lists.add_items",
+        "lists.update_item",
+        "lists.remove_items",
+        "lists.clear_collection",
+        "lists.delete_collection",
     }
     assert descriptors["lists.add_items"].effect_cardinality == "atomic_batch"
     assert descriptors["lists.add_items"].input_schema["properties"]["items"]["maxItems"] == 50
@@ -100,6 +104,10 @@ def test_lists_markdown_publishes_only_the_accelerated_four_tools(tmp_path: Path
     assert "Human-supplied list name" in add_properties["name"]["description"]
     assert descriptors["lists.add_items"].input_schema["minProperties"] == 2
     assert descriptors["lists.add_items"].input_schema["maxProperties"] == 2
+    assert descriptors["lists.update_item"].effect == "local_write"
+    assert descriptors["lists.remove_items"].effect_cardinality == "atomic_batch"
+    assert descriptors["lists.clear_collection"].approval_rule == "always"
+    assert descriptors["lists.delete_collection"].approval_rule == "always"
 
 
 def test_list_collection_discovery_has_no_model_selected_parameters(tmp_path: Path) -> None:
@@ -265,3 +273,131 @@ def test_foreign_collection_reference_is_rejected_before_envelope_creation(tmp_p
             validated_arguments=validated,
             request_context={"requested_by_user_id": "natasha"},
         )
+
+
+def _seed_items(tmp_path: Path):
+    store, storage, handler, descriptors = _runtime(tmp_path)
+    create = _envelope(
+        handler=handler,
+        descriptor=descriptors["lists.create_collection"],
+        arguments={"name": "P8A Canary"},
+        root_request_id="request-p8a-seed",
+        call_ordinal=1,
+    )
+    created = _execute(handler, create, descriptors["lists.create_collection"])
+    collection_ref = created["payload"]["collection"]["collection_ref"]
+    add = _envelope(
+        handler=handler,
+        descriptor=descriptors["lists.add_items"],
+        arguments={"collection_ref": collection_ref, "items": ["alpha", "beta", "gamma"]},
+        root_request_id="request-p8a-seed",
+        call_ordinal=2,
+    )
+    _execute(handler, add, descriptors["lists.add_items"])
+    get = _envelope(
+        handler=handler,
+        descriptor=descriptors["lists.get_collection"],
+        arguments={"collection_ref": collection_ref},
+        root_request_id="request-p8a-read",
+        call_ordinal=1,
+    )
+    snapshot = _execute(handler, get, descriptors["lists.get_collection"])["payload"]
+    return store, storage, handler, descriptors, collection_ref, snapshot
+
+
+def test_update_item_uses_exact_refs_and_replays_without_duplicate_mutation(tmp_path: Path) -> None:
+    store, _storage, handler, descriptors, collection_ref, snapshot = _seed_items(tmp_path)
+    item_ref = snapshot["items"][0]["item_ref"]
+    envelope = _envelope(
+        handler=handler,
+        descriptor=descriptors["lists.update_item"],
+        arguments={
+            "collection_ref": collection_ref,
+            "item_ref": item_ref,
+            "patch": {"text": "alpha updated", "checked": True},
+        },
+        root_request_id="request-p8a-update",
+        call_ordinal=1,
+    )
+
+    first = _execute(handler, envelope, descriptors["lists.update_item"])
+    replay = _execute(handler, envelope, descriptors["lists.update_item"])
+
+    assert first["payload"]["item"]["text"] == "alpha updated"
+    assert first["payload"]["item"]["checked"] is True
+    assert replay["payload"]["idempotent_replay"] is True
+    with store._lock:
+        assert store._conn.execute(
+            "SELECT COUNT(*) FROM list_operations WHERE operation_id = ?",
+            (envelope.operation_id,),
+        ).fetchone()[0] == 1
+
+
+def test_remove_items_is_all_or_nothing_and_replays_stored_result(tmp_path: Path) -> None:
+    store, _storage, handler, descriptors, collection_ref, snapshot = _seed_items(tmp_path)
+    refs = [snapshot["items"][0]["item_ref"], snapshot["items"][2]["item_ref"]]
+    envelope = _envelope(
+        handler=handler,
+        descriptor=descriptors["lists.remove_items"],
+        arguments={"collection_ref": collection_ref, "item_refs": refs},
+        root_request_id="request-p8a-remove",
+        call_ordinal=1,
+    )
+
+    first = _execute(handler, envelope, descriptors["lists.remove_items"])
+    replay = _execute(handler, envelope, descriptors["lists.remove_items"])
+
+    assert {item["text"] for item in first["payload"]["removed_items"]} == {"alpha", "gamma"}
+    assert replay["payload"]["idempotent_replay"] is True
+    assert [row["item_name"] for row in store.list_list_items(collection_ref.removeprefix("collection_v1:"))] == ["beta"]
+
+
+def test_mutation_rejects_stale_version_and_wrong_hash(tmp_path: Path) -> None:
+    _store, _storage, handler, descriptors, collection_ref, snapshot = _seed_items(tmp_path)
+    item_ref = snapshot["items"][0]["item_ref"]
+    prepared = _envelope(
+        handler=handler,
+        descriptor=descriptors["lists.update_item"],
+        arguments={"collection_ref": collection_ref, "item_ref": item_ref, "patch": {"checked": True}},
+        root_request_id="request-p8a-stale",
+        call_ordinal=1,
+    )
+    other = _envelope(
+        handler=handler,
+        descriptor=descriptors["lists.update_item"],
+        arguments={"collection_ref": collection_ref, "item_ref": item_ref, "patch": {"text": "changed"}},
+        root_request_id="request-p8a-other",
+        call_ordinal=1,
+    )
+    assert _execute(handler, other, descriptors["lists.update_item"])["status"] == "ok"
+
+    stale = _execute(handler, prepared, descriptors["lists.update_item"])
+    assert stale["status"] == "policy_denied"
+    assert stale["denial_reason"] == "list_collection_version_stale"
+
+
+@pytest.mark.parametrize("tool_id", ["lists.clear_collection", "lists.delete_collection"])
+def test_destructive_collection_mutations_bind_version_and_replay(tmp_path: Path, tool_id: str) -> None:
+    store, _storage, handler, descriptors, collection_ref, _snapshot = _seed_items(tmp_path)
+    descriptor = descriptors[tool_id]
+    envelope = _envelope(
+        handler=handler,
+        descriptor=descriptor,
+        arguments={"collection_ref": collection_ref},
+        root_request_id=f"request-p8a-{tool_id}",
+        call_ordinal=1,
+    )
+
+    first = _execute(handler, envelope, descriptor)
+    replay = _execute(handler, envelope, descriptor)
+
+    assert first["status"] == "ok"
+    assert first["payload"]["changed"] is True
+    assert replay["payload"]["idempotent_replay"] is True
+    list_id = collection_ref.removeprefix("collection_v1:")
+    persisted = store.get_list_by_id("natasha", list_id)
+    if tool_id.endswith("delete_collection"):
+        assert persisted is None
+    else:
+        assert persisted is not None
+        assert store.list_list_items(list_id) == []

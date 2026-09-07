@@ -569,10 +569,10 @@
     const voiceModeTags = document.getElementById("voice-mode-tags");
     const micToggle = document.getElementById("mic-toggle");
     const micStatus = document.getElementById("mic-status");
-    const pipelinePillMicro = document.getElementById("pipeline-pill-micro");
+    const pipelinePillIdle = document.getElementById("pipeline-pill-idle");
     const pipelinePillMain = document.getElementById("pipeline-pill-main");
     const pipelineNote = document.getElementById("pipeline-note");
-    const runtimePillMicro = document.getElementById("runtime-pill-micro");
+    const runtimePillIdle = document.getElementById("runtime-pill-idle");
     const runtimePillMain = document.getElementById("runtime-pill-main");
     const runtimePillJarvis = document.getElementById("runtime-pill-jarvis");
     const runtimeNote = document.getElementById("runtime-note");
@@ -713,17 +713,13 @@
 
     function resolveActivePipeline(data) {
       const owner = String(data?.owner || "").toLowerCase();
-      if (owner === "micro_jarvis") {
-        return "micro";
-      }
+      if (owner === "micro_jarvis") return "historical";
       if (owner === "main_jarvis") {
         return "main";
       }
 
       const route = String(data?.route || "").toLowerCase();
-      if (route === "micro_tool") {
-        return "micro";
-      }
+      if (route === "micro_tool") return "historical";
       if (route.startsWith("main_jarvis")) {
         return "main";
       }
@@ -732,22 +728,22 @@
       if (runtime.larger_models_active === true) {
         return "main";
       }
-      if (runtime.main_labeled_count > runtime.micro_labeled_count) {
+      if (runtime.main_labeled_count > 0) {
         return "main";
       }
-      return "micro";
+      return "idle";
     }
 
     function updatePipelineIndicator(data) {
-      if (!pipelinePillMicro || !pipelinePillMain || !pipelineNote) {
+      if (!pipelinePillIdle || !pipelinePillMain || !pipelineNote) {
         return;
       }
       const activePipeline = resolveActivePipeline(data);
-      const microActive = activePipeline === "micro";
+      const idleActive = activePipeline === "idle";
       const mainActive = activePipeline === "main";
-      pipelinePillMicro.classList.toggle("active", microActive);
+      pipelinePillIdle.classList.toggle("active", idleActive);
       pipelinePillMain.classList.toggle("active", mainActive);
-      pipelinePillMicro.setAttribute("aria-pressed", String(microActive));
+      pipelinePillIdle.setAttribute("aria-pressed", String(idleActive));
       pipelinePillMain.setAttribute("aria-pressed", String(mainActive));
 
       const owner = String(data?.owner || "unknown");
@@ -777,7 +773,7 @@
     }
 
     function updateModelRuntimeIndicator(data) {
-      if (!runtimePillMicro || !runtimePillMain || !runtimePillJarvis || !runtimeNote) {
+      if (!runtimePillIdle || !runtimePillMain || !runtimePillJarvis || !runtimeNote) {
         return;
       }
       const runtime = data?.model_runtime || {};
@@ -785,21 +781,21 @@
       const route = String(data?.route || "").toLowerCase();
       const jarvisActive = owner === "main_jarvis" || route.startsWith("main_jarvis");
       const mainWarm = runtime.larger_models_active === true;
-      const microOnly = !mainWarm && !jarvisActive;
-      runtimePillMicro.classList.toggle("active", microOnly);
+      const idle = !mainWarm && !jarvisActive;
+      runtimePillIdle.classList.toggle("active", idle);
       runtimePillMain.classList.toggle("active", mainWarm);
       runtimePillJarvis.classList.toggle("active", jarvisActive);
-      runtimePillMicro.setAttribute("aria-pressed", String(microOnly));
+      runtimePillIdle.setAttribute("aria-pressed", String(idle));
       runtimePillMain.setAttribute("aria-pressed", String(mainWarm));
       runtimePillJarvis.setAttribute("aria-pressed", String(jarvisActive));
 
       const taskCount = Number(runtime.task_count || 0);
       const windowSeconds = Number(runtime.window_seconds || 0);
-      const microCount = Number(runtime.micro_labeled_count || 0);
+      const historicalCount = Number(runtime.historical_labeled_count || 0);
       const mainCount = Number(runtime.main_labeled_count || 0);
-      const modeText = jarvisActive ? "jarvis active" : (mainWarm ? "main warm" : "micro-only");
+      const modeText = jarvisActive ? "jarvis active" : (mainWarm ? "main warm" : "idle");
       const channelSession = summarizeChannelSession(data);
-      runtimeNote.textContent = `${modeText} | tasks: ${taskCount} | micro/main: ${microCount}/${mainCount} | window: ${windowSeconds}s | ${channelSession}`;
+      runtimeNote.textContent = `${modeText} | tasks: ${taskCount} | historical/main: ${historicalCount}/${mainCount} | window: ${windowSeconds}s | ${channelSession}`;
     }
 
     function updateStatusIndicators(data) {
@@ -861,7 +857,7 @@
           model_runtime_active: modelRuntime.larger_models_active === true,
           model_runtime_task_count: Number(modelRuntime.task_count || 0),
           model_runtime_main_labeled_count: Number(modelRuntime.main_labeled_count || 0),
-          model_runtime_micro_labeled_count: Number(modelRuntime.micro_labeled_count || 0)
+          model_runtime_historical_labeled_count: Number(modelRuntime.historical_labeled_count || 0)
         }
       };
       sessionTurnLogs.push(turn);
@@ -1731,7 +1727,7 @@
           larger_models_active: false,
           task_count: 0,
           main_labeled_count: 0,
-          micro_labeled_count: 0,
+          historical_labeled_count: 0,
           window_seconds: 0
         }
       });

@@ -21,7 +21,6 @@ def test_compose_makes_admission_the_only_ollama_network_peer() -> None:
 
 def test_every_production_ollama_caller_attaches_accelerator_headers() -> None:
     expected = {
-        "app/core/micro_backend.py": "micro",
         "app/core/main_backend.py": "main_conversation",
         "app/research/decision_backend.py": "research_decision",
         "app/tickets/review_backend.py": "action_ticket_review",

@@ -72,6 +72,64 @@ class WebResearchService:
                 provider=self._provider.provider_name,
                 reason="empty_research_query",
             )
+        return self._execute_search(
+            query=query,
+            context=context,
+            reason=decision.reason,
+            limit=self._max_results,
+        )
+
+    def request_authorized(self, *, context: dict[str, Any]) -> bool:
+        """Return the existing enabled/child policy decision for one request."""
+
+        return self._enabled and (
+            not bool(context.get("is_child")) or self._children_enabled
+        )
+
+    def search(
+        self,
+        *,
+        query: str,
+        limit: int,
+        context: dict[str, Any],
+    ) -> ResearchOutcome:
+        """Run one explicit bounded search under the same policy and cache as conversation research."""
+
+        normalized_query = self._minimal_query(query)
+        if not self.request_authorized(context=context):
+            return ResearchOutcome(
+                required=True,
+                attempted=False,
+                status="policy_denied" if self._enabled else "disabled",
+                query=normalized_query or None,
+                provider=self._provider.provider_name,
+                reason="research_request_policy_denied",
+            )
+        if not normalized_query:
+            return ResearchOutcome(
+                required=True,
+                attempted=False,
+                status="needs_clarification",
+                query=None,
+                provider=self._provider.provider_name,
+                reason="empty_research_query",
+            )
+        return self._execute_search(
+            query=normalized_query,
+            context=context,
+            reason="explicit_typed_search",
+            limit=max(1, min(int(limit), self._max_results, 8)),
+        )
+
+    def _execute_search(
+        self,
+        *,
+        query: str,
+        context: dict[str, Any],
+        reason: str,
+        limit: int,
+    ) -> ResearchOutcome:
+        is_child = bool(context.get("is_child"))
         effective_safe_search = 2 if is_child else self._safe_search
         with self._lock:
             self._attempt_count += 1
@@ -87,9 +145,11 @@ class WebResearchService:
                 status="unavailable",
                 query=query,
                 provider=self._provider.provider_name,
-                reason=decision.reason,
+                reason=reason,
                 error_code=error_code,
+                safe_search=effective_safe_search,
             )
+        results = results[: max(1, min(int(limit), self._max_results, 8))]
         if not results:
             return ResearchOutcome(
                 required=True,
@@ -97,7 +157,8 @@ class WebResearchService:
                 status="no_results",
                 query=query,
                 provider=self._provider.provider_name,
-                reason=decision.reason,
+                reason=reason,
+                safe_search=effective_safe_search,
             )
         with self._lock:
             self._success_count += 1
@@ -108,8 +169,9 @@ class WebResearchService:
             status="ok",
             query=query,
             provider=self._provider.provider_name,
-            reason=decision.reason,
+            reason=reason,
             results=results,
+            safe_search=effective_safe_search,
         )
 
     def ground_answer(self, *, answer: str, outcome: ResearchOutcome) -> str:
@@ -164,6 +226,7 @@ class WebResearchService:
             limit=self._max_results,
             safe_search=safe_search,
         )
+        results = [item for item in results[: self._max_results] if isinstance(item, SearchResult)]
         with self._lock:
             self._cache[cache_key] = (now, list(results))
         return list(results)

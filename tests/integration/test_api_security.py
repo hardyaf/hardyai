@@ -43,7 +43,7 @@ def test_operator_cannot_forge_discord_or_policy_context(monkeypatch):
                     "identity_bound": True,
                     "policy_profile": "adult",
                     "skill_scopes": ["skill.email.agent"],
-                    "micro_command_explicit": True,
+                    "command_prefix_explicit": True,
                 },
             },
         )

@@ -1,5 +1,4 @@
 from app.core.main_jarvis import MainJarvis
-from app.core.micro_jarvis import MicroJarvis
 from tests.router_support import RegistryBackedTestRouter as JarvisRouter
 from app.core.session_store import SessionStore
 from app.core.state_machine import RuntimePowerController
@@ -12,7 +11,6 @@ from app.tools.lists_service import ListsService
 
 def _build_router(session_store: SessionStore) -> JarvisRouter:
     return JarvisRouter(
-        micro_jarvis=MicroJarvis(),
         main_jarvis=MainJarvis(),
         session_store=session_store,
         runtime_power=RuntimePowerController(),
@@ -74,7 +72,6 @@ def test_router_emits_pending_interaction_transition_events():
     store = SessionStore()
     event_log = EventLogService()
     router = JarvisRouter(
-        micro_jarvis=MicroJarvis(),
         main_jarvis=MainJarvis(),
         session_store=store,
         runtime_power=RuntimePowerController(),

@@ -43,14 +43,9 @@ class _StubExecutor:
 
 
 def test_main_agent_executor_preserves_typed_plan_entities_without_reclassification():
-    class _NeverClassify:
-        def interpret(self, text, context=None):  # type: ignore[no-untyped-def]
-            raise AssertionError("typed plan commands must not be reclassified")
-
     captured = []
     executor = MainAgentExecutor(
-        micro_jarvis=_NeverClassify(),  # type: ignore[arg-type]
-        run_fast_command=lambda classification, decision: (
+        run_compatibility_action=lambda classification, decision: (
             captured.append((classification, decision))
             or {"status": "ok", "message": "done"}
         ),

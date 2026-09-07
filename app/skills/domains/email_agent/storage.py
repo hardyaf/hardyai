@@ -7,13 +7,108 @@ from threading import RLock
 from typing import Any
 from uuid import uuid4
 
-from app.db.connection import open_sqlite_connection
+from app.db.connection import open_readonly_sqlite_connection, open_sqlite_connection
 from app.db.domain_schema import ensure_email_agent_schema
+from app.db.migrations import initialize_schema
+from app.db.migrations import LATEST_SCHEMA_VERSION
 from app.skills.domains.email_agent.query import EmailQuery
 
 
 def _utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def inspect_email_operations_worker_database(
+    database_path: str,
+    *,
+    now: str,
+) -> tuple[dict[str, Any], set[str]]:
+    """Read the worker schema/row-kind/lease gate without migrations or writes."""
+
+    _, connection = open_readonly_sqlite_connection(database_path)
+    try:
+        schema_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        mailbox_columns = {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(email_mailbox_operations)").fetchall()
+        }
+        parent_columns = {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(email_tool_operations)").fetchall()
+        }
+        required_mailbox_columns = {
+            "parent_operation_id",
+            "parent_manifest_hash",
+            "child_index",
+            "arguments_hash",
+        }
+        required_parent_columns = {
+            "idempotency_key",
+            "operation_identity_hash",
+            "parent_manifest_hash",
+            "expected_child_count",
+            "recovery_manifest_json",
+            "recovery_manifest_hash",
+        }
+        schema_ready = (
+            schema_version == LATEST_SCHEMA_VERSION
+            and required_mailbox_columns <= mailbox_columns
+            and required_parent_columns <= parent_columns
+        )
+        if not schema_ready:
+            return {
+                "schema_version": schema_version,
+                "schema_ready": False,
+                "supported_row_kinds": False,
+                "unsupported_row_count": 0,
+                "active_lease_owner_count": 0,
+                "single_worker_ownership": False,
+            }, set()
+        unsupported_managed = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM email_managed_label_operations "
+                "WHERE action NOT IN ('apply','remove')"
+            ).fetchone()[0]
+        )
+        unsupported_mailbox = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM email_mailbox_operations "
+                "WHERE parent_operation_id IS NOT NULL AND operation_type <> 'move_to_spam'"
+            ).fetchone()[0]
+        )
+        active_owners = int(
+            connection.execute(
+                """
+                SELECT COUNT(DISTINCT lease_owner) FROM (
+                    SELECT lease_owner FROM email_managed_label_operations
+                    WHERE status='claimed' AND lease_owner IS NOT NULL
+                      AND lease_expires_at IS NOT NULL AND lease_expires_at>?
+                    UNION ALL
+                    SELECT lease_owner FROM email_mailbox_operations
+                    WHERE parent_operation_id IS NOT NULL AND status='claimed'
+                      AND lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL
+                      AND lease_expires_at>?
+                )
+                """,
+                (str(now), str(now)),
+            ).fetchone()[0]
+        )
+        label_refs = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT label_ref FROM email_managed_labels WHERE enabled=1"
+            ).fetchall()
+        }
+        return {
+            "schema_version": schema_version,
+            "schema_ready": True,
+            "supported_row_kinds": unsupported_managed == 0 and unsupported_mailbox == 0,
+            "unsupported_row_count": unsupported_managed + unsupported_mailbox,
+            "active_lease_owner_count": active_owners,
+            "single_worker_ownership": active_owners <= 1,
+        }, label_refs
+    finally:
+        connection.close()
 
 
 class EmailAgentSQLiteStorage:
@@ -23,12 +118,85 @@ class EmailAgentSQLiteStorage:
         _, self._conn = open_sqlite_connection(database_path)
         self._lock = RLock()
         with self._lock:
+            initialize_schema(self._conn)
             ensure_email_agent_schema(self._conn)
 
 
     def close(self) -> None:
         with self._lock:
             self._conn.close()
+
+    def operations_worker_readiness(self, *, now: str) -> dict[str, Any]:
+        """Inspect the exact P5F/P8D worker rows without claiming or mutating them."""
+
+        required_mailbox_columns = {
+            "parent_operation_id",
+            "parent_manifest_hash",
+            "child_index",
+            "arguments_hash",
+        }
+        required_parent_columns = {
+            "idempotency_key",
+            "operation_identity_hash",
+            "parent_manifest_hash",
+            "expected_child_count",
+            "recovery_manifest_json",
+            "recovery_manifest_hash",
+        }
+        with self._lock:
+            schema_version = int(self._conn.execute("PRAGMA user_version").fetchone()[0])
+            mailbox_columns = {
+                str(row[1])
+                for row in self._conn.execute(
+                    "PRAGMA table_info(email_mailbox_operations)"
+                ).fetchall()
+            }
+            parent_columns = {
+                str(row[1])
+                for row in self._conn.execute("PRAGMA table_info(email_tool_operations)").fetchall()
+            }
+            unsupported_managed = int(
+                self._conn.execute(
+                    "SELECT COUNT(*) FROM email_managed_label_operations "
+                    "WHERE action NOT IN ('apply','remove')"
+                ).fetchone()[0]
+            )
+            unsupported_mailbox = int(
+                self._conn.execute(
+                    "SELECT COUNT(*) FROM email_mailbox_operations "
+                    "WHERE parent_operation_id IS NOT NULL AND operation_type <> 'move_to_spam'"
+                ).fetchone()[0]
+            )
+            active_owners = int(
+                self._conn.execute(
+                    """
+                    SELECT COUNT(DISTINCT lease_owner) FROM (
+                        SELECT lease_owner FROM email_managed_label_operations
+                        WHERE status='claimed' AND lease_owner IS NOT NULL
+                          AND lease_expires_at IS NOT NULL AND lease_expires_at>?
+                        UNION ALL
+                        SELECT lease_owner FROM email_mailbox_operations
+                        WHERE parent_operation_id IS NOT NULL AND status='claimed'
+                          AND lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL
+                          AND lease_expires_at>?
+                    )
+                    """,
+                    (str(now), str(now)),
+                ).fetchone()[0]
+            )
+        schema_ready = (
+            schema_version == LATEST_SCHEMA_VERSION
+            and required_mailbox_columns <= mailbox_columns
+            and required_parent_columns <= parent_columns
+        )
+        return {
+            "schema_version": schema_version,
+            "schema_ready": schema_ready,
+            "supported_row_kinds": unsupported_managed == 0 and unsupported_mailbox == 0,
+            "unsupported_row_count": unsupported_managed + unsupported_mailbox,
+            "active_lease_owner_count": active_owners,
+            "single_worker_ownership": active_owners <= 1,
+        }
 
     def get_sync_state(self) -> dict[str, Any] | None:
         with self._lock:
@@ -945,6 +1113,389 @@ class EmailAgentSQLiteStorage:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def commit_local_tool_batch(
+        self,
+        *,
+        operation_id: str,
+        tool_id: str,
+        owner_user_id: str,
+        discord_channel_id: str,
+        arguments_hash: str,
+        gmail_message_ids: list[str],
+        taxonomy_version: str,
+        review_state: str | None,
+        category_key: str | None,
+        now: str,
+    ) -> dict[str, Any]:
+        if tool_id not in {"email.set_review_state", "email.correct_local_category"}:
+            raise ValueError("email_local_tool_invalid")
+        targets = sorted(str(item).strip() for item in gmail_message_ids if str(item).strip())
+        if not targets or len(targets) != len(set(targets)) or len(targets) > 50:
+            raise ValueError("email_local_targets_invalid")
+        if tool_id == "email.set_review_state":
+            if review_state not in {"reviewed", "dismissed", "actioned"} or category_key is not None:
+                raise ValueError("email_local_review_state_invalid")
+        elif not category_key or review_state is not None:
+            raise ValueError("email_local_category_invalid")
+        identity_hash = str(operation_id).removeprefix("toolop_v1_")
+        if len(identity_hash) != 64 or len(str(arguments_hash)) != 64:
+            raise ValueError("email_local_operation_identity_invalid")
+        idempotency_key = f"main-email-parent:v1:{operation_id}"
+        result = {
+            "target_count": len(targets),
+            "review_state": review_state,
+            "category_key": category_key,
+        }
+        result_json = json.dumps(result, sort_keys=True, separators=(",", ":"))
+        empty_manifest = "{}"
+        empty_hash = hashlib.sha256(empty_manifest.encode("utf-8")).hexdigest()
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute("BEGIN IMMEDIATE")
+            try:
+                existing = cursor.execute(
+                    "SELECT * FROM email_tool_operations WHERE operation_id=?",
+                    (operation_id,),
+                ).fetchone()
+                if existing is not None:
+                    row = dict(existing)
+                    if any(
+                        (
+                            str(row.get("tool_id") or "") != tool_id,
+                            str(row.get("owner_user_id") or "") != owner_user_id,
+                            str(row.get("discord_channel_id") or "") != discord_channel_id,
+                            str(row.get("arguments_hash") or "") != arguments_hash,
+                            int(row.get("expected_child_count") or 0) != len(targets),
+                            str(row.get("idempotency_key") or "") != idempotency_key,
+                            str(row.get("operation_identity_hash") or "") != identity_hash,
+                            str(row.get("result_json") or "") != result_json,
+                        )
+                    ):
+                        raise ValueError("email_operation_id_conflict")
+                    if str(row.get("status") or "") != "committed":
+                        raise ValueError("email_local_reserved_invariant_violation")
+                    self._conn.commit()
+                    return {**self._decode_row(row), "idempotent_replay": True}
+                placeholders = ",".join("?" for _ in targets)
+                existing_count = int(
+                    cursor.execute(
+                        f"SELECT COUNT(*) FROM email_messages WHERE gmail_message_id IN ({placeholders})",
+                        tuple(targets),
+                    ).fetchone()[0]
+                )
+                if existing_count != len(targets):
+                    raise ValueError("email_message_target_missing")
+                cursor.execute(
+                    """
+                    INSERT INTO email_tool_operations(
+                        operation_id, tool_id, contract_version, owner_user_id,
+                        discord_channel_id, arguments_hash, effect_cardinality,
+                        expected_child_count, recovery_manifest_json,
+                        recovery_manifest_hash, status, result_json, idempotency_key,
+                        operation_identity_hash, created_at
+                    ) VALUES (?, ?, 1, ?, ?, ?, 'atomic_batch', ?, ?, ?,
+                              'reserved', ?, ?, ?, ?)
+                    """,
+                    (
+                        operation_id,
+                        tool_id,
+                        owner_user_id,
+                        discord_channel_id,
+                        arguments_hash,
+                        len(targets),
+                        empty_manifest,
+                        empty_hash,
+                        result_json,
+                        idempotency_key,
+                        identity_hash,
+                        now,
+                    ),
+                )
+                for message_id in targets:
+                    if tool_id == "email.set_review_state":
+                        disposition = {
+                            "reviewed": "complete",
+                            "dismissed": "dismissed",
+                            "actioned": "needs_reply",
+                        }[str(review_state)]
+                        cursor.execute(
+                            """
+                            INSERT INTO email_user_state(
+                                user_id, discord_channel_id, gmail_message_id,
+                                review_state, disposition, snoozed_until,
+                                last_presented_at, updated_at
+                            ) VALUES (?, ?, ?, ?, ?, NULL, NULL, ?)
+                            ON CONFLICT(user_id, discord_channel_id, gmail_message_id)
+                            DO UPDATE SET review_state=excluded.review_state,
+                                          disposition=excluded.disposition,
+                                          snoozed_until=NULL,
+                                          updated_at=excluded.updated_at
+                            """,
+                            (
+                                owner_user_id,
+                                discord_channel_id,
+                                message_id,
+                                review_state,
+                                disposition,
+                                now,
+                            ),
+                        )
+                    else:
+                        cursor.execute(
+                            """
+                            INSERT INTO email_classifications(
+                                classification_id, gmail_message_id, taxonomy_version,
+                                logical_category_key, audience, confidence, decision_source,
+                                evidence_json, review_required, corrected_by_user_id,
+                                created_at, updated_at
+                            ) VALUES (?, ?, ?, ?, 'shared', 1.0, 'correction', '{}', 0, ?, ?, ?)
+                            ON CONFLICT(gmail_message_id, taxonomy_version) DO UPDATE SET
+                                logical_category_key=excluded.logical_category_key,
+                                confidence=1.0, decision_source='correction', evidence_json='{}',
+                                review_required=0,
+                                corrected_by_user_id=excluded.corrected_by_user_id,
+                                updated_at=excluded.updated_at
+                            """,
+                            (
+                                str(uuid4()),
+                                message_id,
+                                taxonomy_version,
+                                category_key,
+                                owner_user_id,
+                                now,
+                                now,
+                            ),
+                        )
+                cursor.execute(
+                    """
+                    UPDATE email_tool_operations
+                    SET status='committed', completed_at=?
+                    WHERE operation_id=? AND status='reserved'
+                    """,
+                    (now, operation_id),
+                )
+                if int(cursor.rowcount or 0) != 1:
+                    raise ValueError("email_local_operation_commit_conflict")
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+        return {
+            "operation_id": operation_id,
+            "tool_id": tool_id,
+            "status": "committed",
+            "result": result,
+            "idempotent_replay": False,
+        }
+
+    def reserve_mailbox_tool_operation(
+        self,
+        *,
+        operation_id: str,
+        owner_user_id: str,
+        discord_channel_id: str,
+        arguments_hash: str,
+        recovery_manifest: dict[str, Any],
+        recovery_manifest_hash: str,
+        parent_manifest_hash: str,
+        children: list[dict[str, Any]],
+        taxonomy_version: str,
+        external_request_id: str,
+        max_attempts: int,
+        now: str,
+    ) -> dict[str, Any]:
+        if not 1 <= len(children) <= 5:
+            raise ValueError("email_spam_children_invalid")
+        manifest_json = json.dumps(recovery_manifest, sort_keys=True, separators=(",", ":"))
+        identity_hash = str(operation_id).removeprefix("toolop_v1_")
+        idempotency_key = f"main-email-parent:v1:{operation_id}"
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute("BEGIN IMMEDIATE")
+            try:
+                existing = cursor.execute(
+                    "SELECT * FROM email_tool_operations WHERE operation_id=?",
+                    (operation_id,),
+                ).fetchone()
+                parent_exists = existing is not None
+                if existing is not None:
+                    parent = dict(existing)
+                    if any(
+                        (
+                            str(parent.get("tool_id") or "") != "email.move_to_spam",
+                            str(parent.get("owner_user_id") or "") != owner_user_id,
+                            str(parent.get("discord_channel_id") or "") != discord_channel_id,
+                            str(parent.get("arguments_hash") or "") != arguments_hash,
+                            int(parent.get("expected_child_count") or 0) != len(children),
+                            str(parent.get("recovery_manifest_hash") or "") != recovery_manifest_hash,
+                            str(parent.get("parent_manifest_hash") or "") != parent_manifest_hash,
+                        )
+                    ):
+                        raise ValueError("email_operation_id_conflict")
+                    rows = cursor.execute(
+                        "SELECT * FROM email_mailbox_operations "
+                        "WHERE parent_operation_id=? ORDER BY child_index",
+                        (operation_id,),
+                    ).fetchall()
+                    if len(rows) == len(children):
+                        for row, child in zip(rows, children, strict=True):
+                            actual = dict(row)
+                            if any(
+                                (
+                                    str(actual.get("operation_id") or "")
+                                    != str(child["child_operation_id"]),
+                                    str(actual.get("gmail_message_id") or "")
+                                    != str(child["gmail_message_id"]),
+                                    str(actual.get("taxonomy_version") or "") != taxonomy_version,
+                                    str(actual.get("requested_by_user_id") or "") != owner_user_id,
+                                    str(actual.get("discord_channel_id") or "")
+                                    != discord_channel_id,
+                                    str(actual.get("external_request_id") or "")
+                                    != external_request_id,
+                                    str(actual.get("parent_manifest_hash") or "")
+                                    != parent_manifest_hash,
+                                    int(actual.get("child_index") or 0)
+                                    != int(child["child_index"]),
+                                    str(actual.get("arguments_hash") or "")
+                                    != str(child["arguments_hash"]),
+                                    int(actual.get("max_attempts") or 0)
+                                    != max(1, min(int(max_attempts), 5)),
+                                )
+                            ):
+                                raise ValueError("email_operation_child_set_conflict")
+                        self._conn.commit()
+                        return {**self._decode_row(parent), "idempotent_replay": True}
+                    count = len(rows)
+                    if count != 0 or str(parent.get("status") or "") != "reserved":
+                        raise ValueError("email_operation_child_set_incomplete")
+                if not parent_exists:
+                    cursor.execute(
+                    """
+                    INSERT INTO email_tool_operations(
+                        operation_id, tool_id, contract_version, owner_user_id,
+                        discord_channel_id, arguments_hash, effect_cardinality,
+                        expected_child_count, recovery_manifest_json,
+                        recovery_manifest_hash, status, result_json, idempotency_key,
+                        operation_identity_hash, parent_manifest_hash, created_at
+                    ) VALUES (?, 'email.move_to_spam', 1, ?, ?, ?, 'independent_batch',
+                              ?, ?, ?, 'reserved', '{}', ?, ?, ?, ?)
+                    """,
+                        (
+                        operation_id, owner_user_id, discord_channel_id, arguments_hash,
+                        len(children), manifest_json, recovery_manifest_hash,
+                        idempotency_key, identity_hash, parent_manifest_hash, now,
+                        ),
+                    )
+                for child in children:
+                    cursor.execute(
+                        """
+                        INSERT INTO email_mailbox_operations(
+                            operation_id, gmail_message_id, taxonomy_version,
+                            requested_by_user_id, discord_channel_id, external_request_id,
+                            idempotency_key, operation_type, status, attempt_count,
+                            max_attempts, next_attempt_at, created_at, updated_at,
+                            parent_operation_id, parent_manifest_hash, child_index,
+                            arguments_hash
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'move_to_spam', 'queued', 0,
+                                  ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            child["child_operation_id"], child["gmail_message_id"],
+                            taxonomy_version, owner_user_id, discord_channel_id,
+                            external_request_id,
+                            f"main-email-child:v1:{child['child_operation_id']}",
+                            max(1, min(int(max_attempts), 5)), now, now, now,
+                            operation_id, parent_manifest_hash, int(child["child_index"]),
+                            child["arguments_hash"],
+                        ),
+                    )
+                cursor.execute(
+                    "UPDATE email_tool_operations SET status='queued' WHERE operation_id=?",
+                    (operation_id,),
+                )
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+        return {
+            "operation_id": operation_id,
+            "status": "queued",
+            "expected_child_count": len(children),
+            "idempotent_replay": False,
+        }
+
+    def reserve_mailbox_parent_cursor(
+        self,
+        cursor: Any,
+        *,
+        ticket_projection: dict[str, Any],
+        manifest_hash: str,
+        expected_recovery_hash: str,
+        operation_id: str,
+        owner_user_id: str,
+        discord_channel_id: str,
+        arguments_hash: str,
+        expected_child_count: int,
+        recovery_manifest: dict[str, Any],
+        now: str,
+    ) -> dict[str, str]:
+        if (
+            str(ticket_projection.get("origin_request_id") or "") == ""
+            or str(ticket_projection.get("user_id") or "") != owner_user_id
+            or str(ticket_projection.get("agent_id") or "") == ""
+        ):
+            raise ValueError("email_ticket_projection_conflict")
+        manifest_json = json.dumps(recovery_manifest, sort_keys=True, separators=(",", ":"))
+        if hashlib.sha256(manifest_json.encode("utf-8")).hexdigest() != expected_recovery_hash:
+            raise ValueError("email_recovery_manifest_hash_conflict")
+        identity_hash = str(operation_id).removeprefix("toolop_v1_")
+        idempotency_key = f"main-email-parent:v1:{operation_id}"
+        existing = cursor.execute(
+            "SELECT * FROM email_tool_operations WHERE operation_id=?",
+            (operation_id,),
+        ).fetchone()
+        if existing is not None:
+            row = dict(existing)
+            if any(
+                (
+                    str(row.get("tool_id") or "") != "email.move_to_spam",
+                    str(row.get("owner_user_id") or "") != owner_user_id,
+                    str(row.get("discord_channel_id") or "") != discord_channel_id,
+                    str(row.get("arguments_hash") or "") != arguments_hash,
+                    int(row.get("expected_child_count") or 0) != expected_child_count,
+                    str(row.get("recovery_manifest_hash") or "") != expected_recovery_hash,
+                    str(row.get("parent_manifest_hash") or "") != manifest_hash,
+                )
+            ):
+                raise ValueError("email_operation_id_conflict")
+            return {"status": "existing", "recovery_manifest_hash": expected_recovery_hash}
+        cursor.execute(
+            """
+            INSERT INTO email_tool_operations(
+                operation_id, tool_id, contract_version, owner_user_id,
+                discord_channel_id, arguments_hash, effect_cardinality,
+                expected_child_count, recovery_manifest_json,
+                recovery_manifest_hash, status, result_json, idempotency_key,
+                operation_identity_hash, parent_manifest_hash, created_at
+            ) VALUES (?, 'email.move_to_spam', 1, ?, ?, ?, 'independent_batch',
+                      ?, ?, ?, 'reserved', '{}', ?, ?, ?, ?)
+            """,
+            (
+                operation_id, owner_user_id, discord_channel_id, arguments_hash,
+                expected_child_count, manifest_json, expected_recovery_hash,
+                idempotency_key, identity_hash, manifest_hash, now,
+            ),
+        )
+        return {"status": "created", "recovery_manifest_hash": expected_recovery_hash}
+
+    def get_email_tool_operation(self, *, operation_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM email_tool_operations WHERE operation_id=?",
+                (operation_id,),
+            ).fetchone()
+        return self._decode_row(dict(row)) if row is not None else None
+
     def reserve_managed_label_operation(
         self,
         *,
@@ -1075,7 +1626,9 @@ class EmailAgentSQLiteStorage:
             cursor.execute("BEGIN IMMEDIATE")
             try:
                 rows = cursor.execute(
-                    "SELECT * FROM email_tool_operations WHERE status='reserved'"
+                    "SELECT * FROM email_tool_operations WHERE status='reserved' "
+                    "AND tool_id IN ('email.apply_labels','email.remove_labels',"
+                    "'email.set_read_state','email.archive_messages','email.restore_to_inbox')"
                 ).fetchall()
                 for raw in rows:
                     parent = self._decode_row(dict(raw))
@@ -2109,6 +2662,7 @@ class EmailAgentSQLiteStorage:
         now: str,
         lease_expires_at: str,
         limit: int,
+        parent_bound: bool | None = None,
     ) -> list[dict[str, Any]]:
         owner = str(lease_owner or "").strip()
         if not owner:
@@ -2129,10 +2683,18 @@ class EmailAgentSQLiteStorage:
                     """,
                     (now, now, now),
                 )
+                binding_clause = (
+                    "AND parent_operation_id IS NOT NULL"
+                    if parent_bound is True
+                    else "AND parent_operation_id IS NULL"
+                    if parent_bound is False
+                    else ""
+                )
                 rows = self._conn.execute(
-                    """
+                    f"""
                     SELECT * FROM email_mailbox_operations
                     WHERE attempt_count < max_attempts
+                      {binding_clause}
                       AND (
                         (status='queued' AND next_attempt_at<=?)
                         OR (status='claimed' AND lease_expires_at IS NOT NULL AND lease_expires_at<=?)
@@ -2172,7 +2734,390 @@ class EmailAgentSQLiteStorage:
         return claimed
 
     def claim_spam_operations(self, **kwargs: Any) -> list[dict[str, Any]]:
-        return self.claim_mailbox_operations(**kwargs)
+        return self.claim_mailbox_operations(parent_bound=False, **kwargs)
+
+    def recover_mailbox_tool_operations(self, *, now: str, limit: int = 50) -> dict[str, int]:
+        recovered = 0
+        failed = 0
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute("BEGIN IMMEDIATE")
+            try:
+                parents = cursor.execute(
+                    """
+                    SELECT * FROM email_tool_operations
+                    WHERE tool_id='email.move_to_spam' AND status IN ('reserved','queued')
+                    ORDER BY created_at LIMIT ?
+                    """,
+                    (max(1, min(int(limit), 100)),),
+                ).fetchall()
+                for raw in parents:
+                    parent = self._decode_row(dict(raw))
+                    recovery = parent.get("recovery_manifest") or {}
+                    children = recovery.get("children")
+                    taxonomy_version = str(recovery.get("taxonomy_version") or "")
+                    external_request_id = str(recovery.get("external_request_id") or "")
+                    source_interface = str(recovery.get("source_interface") or "")
+                    external_user_id = str(recovery.get("external_user_id") or "")
+                    agent_id = str(recovery.get("agent_id") or "")
+                    max_attempts = recovery.get("max_attempts")
+                    valid = (
+                        isinstance(children, list)
+                        and len(children) == int(parent.get("expected_child_count") or 0)
+                        and bool(taxonomy_version)
+                        and bool(external_request_id)
+                        and bool(source_interface)
+                        and bool(external_user_id)
+                        and bool(agent_id)
+                        and isinstance(max_attempts, int)
+                        and not isinstance(max_attempts, bool)
+                        and 1 <= max_attempts <= 5
+                        and hashlib.sha256(
+                            str(parent.get("recovery_manifest_json") or "").encode("utf-8")
+                        ).hexdigest() == str(parent.get("recovery_manifest_hash") or "")
+                    )
+                    if valid:
+                        for child in children:
+                            if not isinstance(child, dict):
+                                valid = False
+                                break
+                            expected = {
+                                "operation_id": str(child.get("child_operation_id") or ""),
+                                "gmail_message_id": str(child.get("gmail_message_id") or ""),
+                                "child_index": int(child.get("child_index") or 0),
+                                "arguments_hash": str(child.get("arguments_hash") or ""),
+                            }
+                            if (
+                                not expected["operation_id"]
+                                or not expected["gmail_message_id"]
+                                or expected["child_index"] < 1
+                                or len(expected["arguments_hash"]) != 64
+                            ):
+                                valid = False
+                                break
+                            row = cursor.execute(
+                                "SELECT * FROM email_mailbox_operations WHERE operation_id=?",
+                                (expected["operation_id"],),
+                            ).fetchone()
+                            if row is None:
+                                cursor.execute(
+                                    """
+                                    INSERT INTO email_mailbox_operations(
+                                        operation_id, gmail_message_id, taxonomy_version,
+                                        requested_by_user_id, discord_channel_id,
+                                        external_request_id, idempotency_key, operation_type,
+                                        status, attempt_count, max_attempts, next_attempt_at,
+                                        created_at, updated_at, parent_operation_id,
+                                        parent_manifest_hash, child_index, arguments_hash
+                                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'move_to_spam', 'queued',
+                                              0, ?, ?, ?, ?, ?, ?, ?, ?)
+                                    """,
+                                    (
+                                        expected["operation_id"], expected["gmail_message_id"],
+                                        taxonomy_version,
+                                        parent["owner_user_id"], parent["discord_channel_id"],
+                                        external_request_id,
+                                        f"main-email-child:v1:{expected['operation_id']}",
+                                        max_attempts, now, now, now, parent["operation_id"],
+                                        parent["parent_manifest_hash"], expected["child_index"],
+                                        expected["arguments_hash"],
+                                    ),
+                                )
+                            else:
+                                actual = dict(row)
+                                if any(
+                                    (
+                                        str(actual.get("gmail_message_id") or "") != expected["gmail_message_id"],
+                                        int(actual.get("child_index") or 0) != expected["child_index"],
+                                        str(actual.get("arguments_hash") or "") != expected["arguments_hash"],
+                                        str(actual.get("parent_operation_id") or "") != str(parent["operation_id"]),
+                                        str(actual.get("parent_manifest_hash") or "") != str(parent["parent_manifest_hash"]),
+                                        str(actual.get("taxonomy_version") or "") != taxonomy_version,
+                                        str(actual.get("external_request_id") or "") != external_request_id,
+                                        int(actual.get("max_attempts") or 0) != max_attempts,
+                                    )
+                                ):
+                                    valid = False
+                                    break
+                    if valid:
+                        count = int(cursor.execute(
+                            "SELECT COUNT(*) FROM email_mailbox_operations WHERE parent_operation_id=?",
+                            (parent["operation_id"],),
+                        ).fetchone()[0])
+                        valid = count == int(parent["expected_child_count"])
+                    if valid:
+                        cursor.execute(
+                            "UPDATE email_tool_operations SET status='queued', error_code=NULL "
+                            "WHERE operation_id=? AND status='reserved'",
+                            (parent["operation_id"],),
+                        )
+                        recovered += 1
+                    else:
+                        cursor.execute(
+                            "UPDATE email_tool_operations SET status='failed', "
+                            "error_code='email_operation_child_set_incomplete', completed_at=? "
+                            "WHERE operation_id=?",
+                            (now, parent["operation_id"]),
+                        )
+                        failed += 1
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+        return {"recovered_count": recovered, "failed_count": failed}
+
+    def cancel_claimed_mailbox_operation(
+        self,
+        *,
+        operation_id: str,
+        lease_owner: str,
+        reason_code: str,
+        now: str,
+    ) -> dict[str, Any]:
+        if reason_code not in {"policy_denied", "execution_cancelled"}:
+            raise ValueError("email_mailbox_cancellation_reason_invalid")
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute("BEGIN IMMEDIATE")
+            try:
+                changed = cursor.execute(
+                    """
+                    UPDATE email_mailbox_operations
+                    SET status='cancelled', last_error_code=?, completed_at=?,
+                        updated_at=?, lease_owner=NULL, lease_expires_at=NULL
+                    WHERE operation_id=? AND status='claimed' AND lease_owner=?
+                    """,
+                    (reason_code, now, now, operation_id, lease_owner),
+                ).rowcount
+                if int(changed or 0) != 1:
+                    raise ValueError("email_mailbox_operation_lease_lost")
+                row = cursor.execute(
+                    "SELECT * FROM email_mailbox_operations WHERE operation_id=?",
+                    (operation_id,),
+                ).fetchone()
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+        return self._decode_row(dict(row))
+
+    def cancel_mailbox_tool_operation(
+        self,
+        *,
+        parent_operation_id: str,
+        reason_code: str,
+        now: str,
+    ) -> dict[str, Any]:
+        """Materialize and cancel a quiesced provider batch without a Gmail call."""
+
+        if reason_code not in {"policy_denied", "execution_cancelled"}:
+            raise ValueError("email_mailbox_cancellation_reason_invalid")
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute("BEGIN IMMEDIATE")
+            try:
+                raw_parent = cursor.execute(
+                    "SELECT * FROM email_tool_operations WHERE operation_id=?",
+                    (parent_operation_id,),
+                ).fetchone()
+                if raw_parent is None:
+                    raise ValueError("email_operation_not_found")
+                parent = self._decode_row(dict(raw_parent))
+                if str(parent.get("tool_id") or "") != "email.move_to_spam":
+                    raise ValueError("email_operation_tool_invalid")
+                recovery = parent.get("recovery_manifest") or {}
+                children = recovery.get("children")
+                taxonomy_version = str(recovery.get("taxonomy_version") or "")
+                external_request_id = str(recovery.get("external_request_id") or "")
+                max_attempts = recovery.get("max_attempts")
+                if (
+                    not isinstance(children, list)
+                    or len(children) != int(parent.get("expected_child_count") or 0)
+                    or not taxonomy_version
+                    or not external_request_id
+                    or not isinstance(max_attempts, int)
+                    or isinstance(max_attempts, bool)
+                    or not 1 <= max_attempts <= 5
+                    or hashlib.sha256(
+                        str(parent.get("recovery_manifest_json") or "").encode("utf-8")
+                    ).hexdigest()
+                    != str(parent.get("recovery_manifest_hash") or "")
+                ):
+                    raise ValueError("email_operation_recovery_manifest_invalid")
+                cancelled = 0
+                for child in children:
+                    if not isinstance(child, dict):
+                        raise ValueError("email_operation_recovery_manifest_invalid")
+                    child_id = str(child.get("child_operation_id") or "")
+                    message_id = str(child.get("gmail_message_id") or "")
+                    child_index = int(child.get("child_index") or 0)
+                    child_hash = str(child.get("arguments_hash") or "")
+                    existing = cursor.execute(
+                        "SELECT * FROM email_mailbox_operations WHERE operation_id=?",
+                        (child_id,),
+                    ).fetchone()
+                    if existing is None:
+                        cursor.execute(
+                            """
+                            INSERT INTO email_mailbox_operations(
+                                operation_id, gmail_message_id, taxonomy_version,
+                                requested_by_user_id, discord_channel_id,
+                                external_request_id, idempotency_key, operation_type,
+                                status, attempt_count, max_attempts, next_attempt_at,
+                                last_error_code, created_at, updated_at, completed_at,
+                                parent_operation_id, parent_manifest_hash, child_index,
+                                arguments_hash
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'move_to_spam', 'cancelled',
+                                      0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                child_id,
+                                message_id,
+                                taxonomy_version,
+                                parent["owner_user_id"],
+                                parent["discord_channel_id"],
+                                external_request_id,
+                                f"main-email-child:v1:{child_id}",
+                                max_attempts,
+                                now,
+                                reason_code,
+                                now,
+                                now,
+                                now,
+                                parent_operation_id,
+                                parent["parent_manifest_hash"],
+                                child_index,
+                                child_hash,
+                            ),
+                        )
+                        cancelled += 1
+                        continue
+                    row = dict(existing)
+                    if any(
+                        (
+                            str(row.get("gmail_message_id") or "") != message_id,
+                            str(row.get("parent_operation_id") or "") != parent_operation_id,
+                            str(row.get("parent_manifest_hash") or "")
+                            != str(parent.get("parent_manifest_hash") or ""),
+                            int(row.get("child_index") or 0) != child_index,
+                            str(row.get("arguments_hash") or "") != child_hash,
+                        )
+                    ):
+                        raise ValueError("email_operation_child_set_conflict")
+                    status = str(row.get("status") or "")
+                    if status == "claimed":
+                        raise ValueError("email_mailbox_claim_reconciliation_required")
+                    if status == "queued":
+                        cursor.execute(
+                            """
+                            UPDATE email_mailbox_operations
+                            SET status='cancelled', last_error_code=?, completed_at=?,
+                                updated_at=?, lease_owner=NULL, lease_expires_at=NULL
+                            WHERE operation_id=? AND status='queued'
+                            """,
+                            (reason_code, now, now, child_id),
+                        )
+                        cancelled += int(cursor.rowcount or 0)
+                    elif status == "cancelled" and str(row.get("last_error_code") or "") != reason_code:
+                        raise ValueError("email_mailbox_cancellation_conflict")
+                cursor.execute(
+                    "UPDATE email_tool_operations SET status='queued' "
+                    "WHERE operation_id=? AND status='reserved'",
+                    (parent_operation_id,),
+                )
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+        return {
+            "parent_operation_id": parent_operation_id,
+            "cancelled_count": cancelled,
+            "reason_code": reason_code,
+        }
+
+    def terminal_parent_mailbox_children(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT child.*, parent.parent_manifest_hash AS p7_manifest_hash,
+                       parent.status AS parent_status
+                FROM email_mailbox_operations AS child
+                JOIN email_tool_operations AS parent
+                  ON parent.operation_id=child.parent_operation_id
+                WHERE child.parent_operation_id IS NOT NULL
+                  AND child.status IN ('verified','dead_letter','cancelled')
+                  AND parent.status IN ('reserved','queued','completed','partial','failed','cancelled')
+                  AND parent.recovery_manifest_json<>'{}'
+                ORDER BY child.updated_at, child.operation_id LIMIT ?
+                """,
+                (max(1, min(int(limit), 500)),),
+            ).fetchall()
+        return [self._decode_row(dict(row)) for row in rows]
+
+    def reduce_mailbox_tool_parent(
+        self,
+        *,
+        parent_operation_id: str,
+        outcomes_reconciled: bool,
+        now: str,
+    ) -> dict[str, Any]:
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute("BEGIN IMMEDIATE")
+            try:
+                rows = cursor.execute(
+                    "SELECT status, last_error_code FROM email_mailbox_operations "
+                    "WHERE parent_operation_id=?",
+                    (parent_operation_id,),
+                ).fetchall()
+                expected_row = cursor.execute(
+                    "SELECT expected_child_count FROM email_tool_operations WHERE operation_id=?",
+                    (parent_operation_id,),
+                ).fetchone()
+                if expected_row is None or len(rows) != int(expected_row[0]):
+                    raise ValueError("email_operation_child_set_incomplete")
+                states = [str(row["status"]) for row in rows]
+                if any(state in {"queued", "claimed"} for state in states):
+                    status = "queued"
+                    completed_at = None
+                elif all(state == "verified" for state in states):
+                    status = "completed"
+                    completed_at = now
+                elif any(state == "verified" for state in states):
+                    status = "partial"
+                    completed_at = now
+                elif all(
+                    state == "cancelled" and str(row["last_error_code"] or "") == "execution_cancelled"
+                    for state, row in zip(states, rows, strict=True)
+                ):
+                    status = "cancelled"
+                    completed_at = now
+                else:
+                    status = "failed"
+                    completed_at = now
+                cursor.execute(
+                    """
+                    UPDATE email_tool_operations
+                    SET status=?, completed_at=?, result_json=?,
+                        recovery_manifest_json=CASE WHEN ? THEN '{}' ELSE recovery_manifest_json END
+                    WHERE operation_id=?
+                    """,
+                    (
+                        status, completed_at,
+                        json.dumps({"child_counts": {key: states.count(key) for key in set(states)}}, sort_keys=True),
+                        int(bool(outcomes_reconciled and completed_at)),
+                        parent_operation_id,
+                    ),
+                )
+                row = cursor.execute(
+                    "SELECT * FROM email_tool_operations WHERE operation_id=?",
+                    (parent_operation_id,),
+                ).fetchone()
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+        return self._decode_row(dict(row)) if row is not None else {}
 
     def complete_mailbox_operation(
         self,

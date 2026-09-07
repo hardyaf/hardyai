@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from app.skills.domains.calendar.receipts import build_operation_receipt
+import hashlib
+from types import SimpleNamespace
+
+from app.skills.domains.calendar.receipts import (
+    build_operation_receipt,
+    build_typed_operation_receipt,
+)
 from app.tickets.types import ReviewVerdict
 from app.tickets.verifiers.calendar import GoogleCalendarSourceVerifier
 
@@ -95,3 +101,45 @@ def test_google_calendar_delete_receipt_is_correct_when_provider_reports_not_fou
         operation_receipt=receipt,
     )
     assert observation.deterministic_verdict is ReviewVerdict.CORRECT
+
+
+def test_typed_calendar_receipt_uses_opaque_calendar_ref_and_hashed_revision():
+    revision = "calendar_revision_v1_" + hashlib.sha256(b"etag-1").hexdigest()
+    result = {
+        "status": "ok",
+        "source": "google_live",
+        "payload": {
+            "action": "updated",
+            "provider_event_id": "provider-event-1",
+            "event_ref": "calendar_event_v1_" + "a" * 32,
+            "calendar_ref": "calendar_target_v1_" + "b" * 32,
+            "resource_version": revision,
+            "event": {
+                "title": "Dentist",
+                "start": "2026-08-17T10:00:00-04:00",
+                "end": "2026-08-17T11:00:00-04:00",
+                "attendee_emails": ["parent@example.com"],
+                "deleted": False,
+            },
+        },
+    }
+    receipt = build_typed_operation_receipt(
+        envelope=SimpleNamespace(
+            operation_id="toolop_v1_" + "c" * 64,
+            tool_id="calendar.update_event",
+        ),
+        result=result,
+    )
+
+    assert receipt is not None
+    assert receipt["resource_locator"] == {
+        "calendar_ref": "calendar_target_v1_" + "b" * 32,
+        "event_id": "provider-event-1",
+    }
+    observation = GoogleCalendarSourceVerifier(calendar_service=FakeCalendarService()).observe(
+        resource_locator=receipt["resource_locator"],
+        expected_state=receipt["expected_effect"],
+        operation_receipt=receipt,
+    )
+    assert observation.deterministic_verdict is ReviewVerdict.CORRECT
+    assert observation.later_change_detected is False

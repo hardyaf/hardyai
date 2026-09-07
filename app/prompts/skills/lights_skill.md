@@ -15,44 +15,11 @@ active: true
 interactive: true
 operation_dispositions:
   home.set_switch: migrate
-  home.list_devices: deferred
-  home.get_device_state: deferred
+  home.list_devices: migrate
+  home.get_device_state: migrate
   home.get_switch_state: deactivate_stale
   home.list_switches: deactivate_stale
-version: 2
-
-micro_enabled: true
-micro_functions:
-  - function_id: lights.set_switch
-    intent: home.set_switch
-    regex_contract: "direct single-switch control with deterministic on/off extraction"
-    supported_actions:
-      - set_known_switch_on
-      - set_known_switch_off
-    required_entities:
-      - switch_name
-      - action
-    unsupported_or_escalate:
-      - ambiguous_switch_reference
-      - missing_switch_name
-      - missing_action
-      - multi_target_request
-      - scene_or_group_request
-      - policy_restricted_target
-      - unsafe_deictic_reference
-micro_failure_handoff:
-  baseline_context_keys:
-    - micro_intent
-    - micro_confidence
-    - micro_entities
-    - micro_ambiguity_flags
-    - required_missing_fields
-    - token_session_turn_summaries
-  capability_context_keys:
-    - last_switch_name
-    - available_switches
-    - last_switch_action
-    - pending_switch_confirmation
+version: 3
 
 main_handoff_context:
   always_pass_from_session:
@@ -63,6 +30,251 @@ main_handoff_context:
     - last_switch_name
     - last_successful_action
     - pending_switch_confirmation
+main_tools_contract_version: 1
+main_tools:
+  - tool_id: home.list_devices
+    contract_version: 1
+    purpose: "List configured devices from Jarvis's local simulated Home state. Use this read when a device must be discovered or an alias is unclear; returned device_ref values are canonical opaque selectors. This does not report physical-device truth."
+    interactive: true
+    effect: read
+    approval_rule: none
+    approval_conditions: []
+    idempotency: not_applicable
+    sensitivity: private
+    persistence: redacted
+    effect_cardinality: single
+    runtime_dependencies: []
+    transferable_observation_fields:
+      - pattern: /devices/*/device_ref
+        scope: same_domain
+      - pattern: /devices/*/name
+        scope: same_domain
+    timeout_seconds: 5
+    max_result_items: 100
+    max_observation_chars: 6000
+    legacy_intents:
+      - home.list_switches
+    input_schema:
+      type: object
+      additionalProperties: false
+      required: []
+      minProperties: 0
+      maxProperties: 1
+      properties:
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+          description: "Maximum number of configured simulated devices to return."
+    observation_schema:
+      type: object
+      additionalProperties: false
+      required: [devices, source, simulated, truncated]
+      properties:
+        devices:
+          type: array
+          minItems: 0
+          maxItems: 100
+          items: &home_device_observation
+            type: object
+            additionalProperties: false
+            required: [device_ref, name, state, alias_hints]
+            properties:
+              device_ref:
+                type: string
+                minLength: 10
+                maxLength: 80
+                description: "Canonical opaque device_v1 reference returned by the server."
+              name:
+                type: string
+                minLength: 1
+                maxLength: 100
+              state:
+                type: string
+                enum: ["on", "off", unknown]
+              alias_hints:
+                type: array
+                minItems: 0
+                maxItems: 8
+                uniqueItems: true
+                items:
+                  type: string
+                  minLength: 1
+                  maxLength: 100
+              room_name:
+                type: string
+                minLength: 1
+                maxLength: 100
+              updated_at:
+                type: string
+                minLength: 1
+                maxLength: 64
+        source:
+          type: string
+          enum: [local_simulated_state]
+        simulated:
+          type: boolean
+          const: true
+        truncated:
+          type: boolean
+
+  - tool_id: home.get_device_state
+    contract_version: 1
+    purpose: "Read one configured device from Jarvis's local simulated Home state. Prefer a device_ref returned by home.list_devices. A human-supplied exact name or unique alias is allowed, but ambiguous, missing, or stale selectors return candidates instead of guessing. This does not report physical-device truth."
+    interactive: true
+    effect: read
+    approval_rule: none
+    approval_conditions: []
+    idempotency: not_applicable
+    sensitivity: private
+    persistence: redacted
+    effect_cardinality: single
+    runtime_dependencies: []
+    transferable_observation_fields:
+      - pattern: /device/device_ref
+        scope: same_domain
+      - pattern: /candidates/*/device_ref
+        scope: same_domain
+    timeout_seconds: 5
+    max_result_items: 3
+    max_observation_chars: 3000
+    legacy_intents:
+      - home.get_switch_state
+    input_schema:
+      type: object
+      additionalProperties: false
+      required: []
+      minProperties: 1
+      maxProperties: 1
+      properties:
+        device_ref:
+          type: string
+          minLength: 10
+          maxLength: 80
+          description: "One canonical opaque device_v1 reference previously returned by Home discovery."
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: "One human-supplied configured device name or deterministic alias; never an observed opaque reference copied as a name."
+    observation_schema:
+      type: object
+      additionalProperties: false
+      required: [candidates, match_status, source, simulated]
+      properties:
+        device: *home_device_observation
+        candidates:
+          type: array
+          minItems: 0
+          maxItems: 3
+          items:
+            type: object
+            additionalProperties: false
+            required: [device_ref, name, alias_hints]
+            properties:
+              device_ref:
+                type: string
+                minLength: 10
+                maxLength: 80
+              name:
+                type: string
+                minLength: 1
+                maxLength: 100
+              alias_hints:
+                type: array
+                minItems: 0
+                maxItems: 8
+                uniqueItems: true
+                items:
+                  type: string
+                  minLength: 1
+                  maxLength: 100
+        match_status:
+          type: string
+          enum: [exact_ref, exact_name, unique_alias, ambiguous_alias, stale_reference, not_found]
+        source:
+          type: string
+          enum: [local_simulated_state]
+        simulated:
+          type: boolean
+          const: true
+
+  - tool_id: home.set_device_state
+    contract_version: 1
+    purpose: "Set one exact configured device reference to on or off in Jarvis's local simulated Home state. The operation never targets a group, scene, room, alias, or all devices and does not claim physical-device truth."
+    interactive: true
+    effect: local_write
+    approval_rule: none
+    approval_conditions: []
+    idempotency: required
+    sensitivity: private
+    persistence: redacted
+    effect_cardinality: single
+    runtime_dependencies: []
+    transferable_observation_fields: []
+    timeout_seconds: 10
+    max_result_items: 3
+    max_observation_chars: 3000
+    legacy_intents:
+      - home.set_switch
+    input_schema:
+      type: object
+      additionalProperties: false
+      required: [device_ref, state]
+      properties:
+        device_ref:
+          type: string
+          minLength: 10
+          maxLength: 80
+          description: "One canonical opaque device_v1 reference returned by Home discovery. Names and group selectors are forbidden."
+        state:
+          type: string
+          enum: ["on", "off"]
+    observation_schema:
+      type: object
+      additionalProperties: false
+      required: [candidates, match_status, changed, idempotent_replay, source, simulated]
+      properties:
+        device: *home_device_observation
+        candidates:
+          type: array
+          minItems: 0
+          maxItems: 3
+          items:
+            type: object
+            additionalProperties: false
+            required: [device_ref, name, alias_hints]
+            properties:
+              device_ref:
+                type: string
+                minLength: 10
+                maxLength: 80
+              name:
+                type: string
+                minLength: 1
+                maxLength: 100
+              alias_hints:
+                type: array
+                minItems: 0
+                maxItems: 8
+                uniqueItems: true
+                items:
+                  type: string
+                  minLength: 1
+                  maxLength: 100
+        match_status:
+          type: string
+          enum: [exact_ref, stale_reference]
+        changed:
+          type: boolean
+        idempotent_replay:
+          type: boolean
+        source:
+          type: string
+          enum: [local_simulated_state]
+        simulated:
+          type: boolean
+          const: true
 ---
 
 # Lights Skill
@@ -72,6 +284,8 @@ main_handoff_context:
 Control configured house light switches with safe, deterministic behavior.
 
 This skill is responsible for:
+- listing configured simulated devices
+- reading the simulated state of one exact configured device
 - turning a known switch on
 - turning a known switch off
 - preserving continuity for short follow-up references
@@ -99,6 +313,21 @@ Do not use this skill when:
 - the request refers to unsupported automation concepts
 - the request is about wiring, hardware installation, or electrical advice rather than device control
 
+## Typed Read Tools
+
+### `home.list_devices`
+
+List a bounded catalog of configured simulated devices. Use the returned opaque `device_ref` when a
+later read must identify one device exactly.
+
+### `home.get_device_state`
+
+Read one configured simulated device by opaque reference, exact name, or unique deterministic alias.
+Ambiguous, missing, and stale selectors return bounded candidates and require clarification.
+
+The historical read names `home.get_switch_state` and `home.list_switches` remain legacy compatibility
+aliases only. They are not projected to Main as tools.
+
 ## Intent Mapping
 
 ### `home.set_switch`
@@ -110,11 +339,12 @@ Common phrases:
 - "switch the mudroom light off"
 - "turn it on" -> only if context safely resolves target
 
-The future read operations are `home.list_devices` and `home.get_device_state`. They are deferred and
-must not be advertised or dispatched until their typed implementations are added. The historical names
-`home.get_switch_state` and `home.list_switches` are stale compatibility metadata only.
-
 ## Required Inputs
+
+### Read Device State
+- exactly one of `device_ref` or `name`
+- prefer a current `device_ref` returned by `home.list_devices`
+- a stale reference, ambiguous alias, or unknown name must clarify
 
 ### Set Switch
 - `switch_name` required unless safely resolved from context
@@ -157,7 +387,8 @@ Optional payloads:
 
 ## Execution Rules
 
-1. Classify an executable request as `home.set_switch`.
+1. For reads, select `home.list_devices` or `home.get_device_state`; for legacy control, classify the
+   request as `home.set_switch`.
 2. Extract `switch_name` and `action` if present.
 3. Normalize the switch reference:
    - ignore case
@@ -174,6 +405,7 @@ Optional payloads:
    - `last_switch_action`
    - `last_successful_action`
 11. Return a short result summary.
+12. Every read states that the source is simulated local state and performs no action-log write.
 
 ## Clarification Rules
 
@@ -221,25 +453,9 @@ Examples:
 - repeated same-state actions are acceptable and should be treated idempotently from the user perspective
 - never claim a light changed state unless the handler confirmed success
 
-## MicroJarvis Contract
+## Execution Ownership
 
-### Allowed Directly by Micro
-- `home.set_switch`
-
-### Micro May Proceed Only When
-- the target switch is explicit or safely resolved
-- the action is explicit for `home.set_switch`
-- the request is single-target and deterministic
-- no clarification is needed
-
-### Escalate to Main Jarvis When
-- the switch reference is ambiguous
-- the user asks for multiple switches at once
-- the user requests a room-wide or grouped action
-- the user uses a deictic reference without safe context
-- the phrasing is conversational enough to require reasoning
-- there is any policy or safety restriction on the target
-- the request mixes home control with broader planning
+Main owns every interactive Lights turn.
 
 ## Main Jarvis Responsibilities
 
@@ -300,7 +516,7 @@ User: "Turn on the poarch light."
 
 - [x] Intent boundaries are explicit
 - [x] Required entities are explicit
-- [x] Micro contract completed
+- [x] Main execution contract completed
 - [x] Failure handoff contract completed
 - [x] Main handoff context completed
 - [x] Pronoun/deictic behavior documented

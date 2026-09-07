@@ -124,7 +124,7 @@ class PrivateNotesDigestCompiler:
                 context={
                     "agent_id": config.agent_id,
                     "requested_by_user_id": config.owner_user_id,
-                    "micro_intent": "private_notes.compile_digest",
+                    "initial_intent": "private_notes.compile_digest",
                     "runtime_skill_intents": ["private_notes.compile_digest"],
                     "web_research": None,
                 },

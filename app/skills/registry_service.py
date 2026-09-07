@@ -35,9 +35,6 @@ REQUIRED_FRONTMATTER_FIELDS = {
     "execution_ref",
     "storage_type",
     "storage_ref",
-    "micro_enabled",
-    "micro_functions",
-    "micro_failure_handoff",
     "main_handoff_context",
 }
 
@@ -51,7 +48,6 @@ REQUIRED_SECTION_KEYS = {
     "duplicate conflict handling",
     "storage contract",
     "failure behavior",
-    "microjarvis contract",
     "main handoff context contract",
     "learnability checklist",
 }
@@ -119,11 +115,6 @@ class SkillRegistryService:
 
     def seed_defaults(self) -> None:
         now = _utc_now()
-        micro_boot_docs = [
-            ("app/prompts/microjarvis_identity.md", 20),
-            ("app/prompts/microjarvis_capabilities.md", 40),
-            ("app/prompts/micro_jarvis_skills.md", 60),
-        ]
         main_boot_docs = [
             ("app/prompts/jarvis_identity.md", 20),
             ("app/prompts/jarvis_loop.md", 30),
@@ -132,13 +123,6 @@ class SkillRegistryService:
             ("app/prompts/jarvis_system.md", 60),
         ]
 
-        for doc_path, priority in micro_boot_docs:
-            self._sqlite_store.upsert_model_boot_memory(
-                model_name="microj",
-                doc_path=doc_path,
-                priority=priority,
-                required=True,
-            )
         for model_name in ("jarvis", "bigj"):
             for doc_path, priority in main_boot_docs:
                 self._sqlite_store.upsert_model_boot_memory(
@@ -224,35 +208,6 @@ class SkillRegistryService:
                 "storage_type": "api",
                 "storage_ref": "google_calendar_oauth",
                 "critical_level": 3,
-                "micro_enabled": True,
-                "micro_functions": [
-                    {
-                        "function_id": "calendar.view",
-                        "intent": "calendar.view",
-                        "supported_actions": ["read_calendar"],
-                        "unsupported_or_escalate": [
-                            "calendar.add_event",
-                            "calendar.update_event",
-                            "calendar.delete_event",
-                            "calendar.invite",
-                        ],
-                    }
-                ],
-                "micro_failure_handoff": {
-                    "baseline_context_keys": [
-                        "micro_intent",
-                        "micro_confidence",
-                        "micro_entities",
-                        "micro_ambiguity_flags",
-                        "required_missing_fields",
-                    ],
-                    "capability_context_keys": [
-                        "last_calendar_person",
-                        "last_event_reference",
-                        "last_calendar_action",
-                        "window",
-                    ],
-                },
                 "main_handoff_context": {
                     "always_pass_from_session": ["pending_clarification", "main_agent_token_session"],
                     "domain_carryover": [
@@ -278,24 +233,6 @@ class SkillRegistryService:
                     "app.skills.domains.lights.storage:SQLiteLightsStorage(switches,switch_actions_log)"
                 ),
                 "critical_level": 2,
-                "micro_enabled": True,
-                "micro_functions": [
-                    {
-                        "function_id": "lights.set_switch",
-                        "intent": "home.set_switch",
-                        "supported_actions": ["switch_on", "switch_off"],
-                        "unsupported_or_escalate": ["bulk_ambiguous_scope"],
-                    }
-                ],
-                "micro_failure_handoff": {
-                    "baseline_context_keys": [
-                        "micro_intent",
-                        "micro_confidence",
-                        "micro_entities",
-                        "micro_ambiguity_flags",
-                    ],
-                    "capability_context_keys": ["last_switch_name", "available_switches"],
-                },
                 "main_handoff_context": {
                     "always_pass_from_session": ["pending_clarification", "main_agent_token_session"],
                     "domain_carryover": ["last_switch_name", "last_successful_action"],
@@ -321,31 +258,6 @@ class SkillRegistryService:
                 "storage_type": "sql",
                 "storage_ref": "app.skills.domains.lists.storage:SQLiteListsStorage(lists,list_items)",
                 "critical_level": 3,
-                "micro_enabled": True,
-                "micro_functions": [
-                    {
-                        "function_id": "lists.add_item",
-                        "intent": "lists.add_item",
-                        "supported_actions": ["add_item_to_existing_list"],
-                        "unsupported_or_escalate": ["deictic_without_context", "create_list"],
-                    },
-                    {
-                        "function_id": "lists.get_items",
-                        "intent": "lists.get_items",
-                        "supported_actions": ["read_existing_list"],
-                        "unsupported_or_escalate": ["deictic_without_context"],
-                    },
-                ],
-                "micro_failure_handoff": {
-                    "baseline_context_keys": [
-                        "micro_intent",
-                        "micro_confidence",
-                        "micro_entities",
-                        "micro_ambiguity_flags",
-                        "required_missing_fields",
-                    ],
-                    "capability_context_keys": ["last_list_name", "available_lists"],
-                },
                 "main_handoff_context": {
                     "always_pass_from_session": ["pending_clarification", "main_agent_token_session"],
                     "domain_carryover": ["last_list_name", "last_successful_action"],
@@ -368,17 +280,6 @@ class SkillRegistryService:
                     ") + data/skill_history/conversation"
                 ),
                 "critical_level": 2,
-                "micro_enabled": False,
-                "micro_functions": [],
-                "micro_failure_handoff": {
-                    "baseline_context_keys": [
-                        "micro_intent",
-                        "micro_confidence",
-                        "micro_entities",
-                        "micro_ambiguity_flags",
-                    ],
-                    "capability_context_keys": [],
-                },
                 "main_handoff_context": {
                     "always_pass_from_session": ["main_agent_token_session"],
                     "domain_carryover": ["last_successful_action"],
@@ -404,26 +305,6 @@ class SkillRegistryService:
                     "private_note_entries,private_note_digests)"
                 ),
                 "critical_level": 0,
-                "micro_enabled": False,
-                "micro_functions": [],
-                "micro_failure_handoff": {
-                    "baseline_context_keys": [
-                        "micro_intent",
-                        "micro_confidence",
-                        "micro_entities",
-                        "micro_ambiguity_flags",
-                        "required_missing_fields",
-                        "agent_id",
-                        "agent_display_name",
-                        "main_agent_token_session",
-                    ],
-                    "capability_context_keys": [
-                        "private_notes_channel_id",
-                        "private_notes_owner_user_id",
-                        "private_notes_pending_count",
-                        "private_notes_last_capture_at",
-                    ],
-                },
                 "main_handoff_context": {
                     "always_pass_from_session": ["main_agent_token_session"],
                     "domain_carryover": [
@@ -452,26 +333,6 @@ class SkillRegistryService:
                     "google_gmail_readonly+google_calendar_events"
                 ),
                 "critical_level": 0,
-                "micro_enabled": False,
-                "micro_functions": [],
-                "micro_failure_handoff": {
-                    "baseline_context_keys": [
-                        "micro_intent",
-                        "micro_confidence",
-                        "micro_entities",
-                        "micro_ambiguity_flags",
-                        "required_missing_fields",
-                        "agent_id",
-                        "agent_display_name",
-                        "main_agent_token_session",
-                    ],
-                    "capability_context_keys": [
-                        "calendar_inbox_slot_key",
-                        "calendar_inbox_last_status",
-                        "calendar_inbox_last_counts",
-                        "calendar_inbox_last_error_type",
-                    ],
-                },
                 "main_handoff_context": {
                     "always_pass_from_session": ["main_agent_token_session"],
                     "domain_carryover": [
@@ -523,33 +384,6 @@ class SkillRegistryService:
                     "google_gmail_readonly+isolated_gmail_mailbox_writer"
                 ),
                 "critical_level": 1,
-                "micro_enabled": False,
-                "micro_functions": [],
-                "micro_failure_handoff": {
-                    "baseline_context_keys": [
-                        "micro_intent",
-                        "micro_confidence",
-                        "micro_entities",
-                        "micro_ambiguity_flags",
-                        "required_missing_fields",
-                        "agent_id",
-                        "agent_display_name",
-                        "main_agent_token_session",
-                    ],
-                    "capability_context_keys": [
-                        "last_email_query",
-                        "last_email_reference_set_id",
-                        "last_email_result_refs",
-                        "focused_email_message_id",
-                        "focused_email_thread_id",
-                        "last_email_source_route",
-                        "last_email_category_key",
-                        "last_email_action_candidates",
-                        "last_email_date_candidates",
-                        "email_sync_last_status",
-                        "email_sync_last_error_type",
-                    ],
-                },
                 "main_handoff_context": {
                     "always_pass_from_session": ["main_agent_token_session"],
                     "domain_carryover": [
@@ -581,13 +415,9 @@ class SkillRegistryService:
                 created_by=str(skill["created_by"]),
                 storage_type=str(skill["storage_type"]),
                 storage_ref=str(skill["storage_ref"]),
-                micro_enabled=bool(skill.get("micro_enabled")),
-                micro_functions=skill.get("micro_functions") if isinstance(skill.get("micro_functions"), list) else [],
-                micro_failure_handoff=(
-                    skill.get("micro_failure_handoff")
-                    if isinstance(skill.get("micro_failure_handoff"), dict)
-                    else {}
-                ),
+                micro_enabled=False,
+                micro_functions=[],
+                micro_failure_handoff={},
                 main_handoff_context=(
                     skill.get("main_handoff_context")
                     if isinstance(skill.get("main_handoff_context"), dict)
@@ -634,17 +464,9 @@ class SkillRegistryService:
                 created_by=str(legacy_calendar.get("created_by") or "system"),
                 storage_type=str(legacy_calendar.get("storage_type") or "hybrid"),
                 storage_ref=(str(legacy_calendar.get("storage_ref") or "").strip() or None),
-                micro_enabled=bool(legacy_calendar.get("micro_enabled")),
-                micro_functions=(
-                    list(legacy_calendar.get("micro_functions") or [])
-                    if isinstance(legacy_calendar.get("micro_functions"), list)
-                    else []
-                ),
-                micro_failure_handoff=(
-                    dict(legacy_calendar.get("micro_failure_handoff") or {})
-                    if isinstance(legacy_calendar.get("micro_failure_handoff"), dict)
-                    else {}
-                ),
+                micro_enabled=False,
+                micro_functions=[],
+                micro_failure_handoff={},
                 main_handoff_context=(
                     dict(legacy_calendar.get("main_handoff_context") or {})
                     if isinstance(legacy_calendar.get("main_handoff_context"), dict)
@@ -933,14 +755,6 @@ class SkillRegistryService:
                     and str(item or "").strip().casefold() not in _STALE_OPERATION_IDS
                 )
             )
-            micro_intents: list[str] = []
-            for item in skill.get("micro_functions") or []:
-                if not isinstance(item, dict):
-                    continue
-                micro_intent = str(item.get("intent") or item.get("function_id") or "").strip().casefold()
-                if micro_intent and micro_intent not in micro_intents:
-                    micro_intents.append(micro_intent)
-
             catalog.append(
                 {
                     "skill_id": str(skill.get("skill_id") or "").strip(),
@@ -949,8 +763,6 @@ class SkillRegistryService:
                     "main_enabled": bool(intents) and self._execution_ref_is_importable(
                         skill.get("execution_ref")
                     ),
-                    "micro_enabled": bool(skill.get("micro_enabled")),
-                    "micro_intents": micro_intents,
                     "scheduled": bool(skill.get("cron_enabled")),
                 }
             )
@@ -1085,13 +897,9 @@ class SkillRegistryService:
             learnable_ready = bool(validation.get("ok"))
             active = active_from_frontmatter and learnable_ready
 
-            micro_enabled = bool(frontmatter.get("micro_enabled", previous.get("micro_enabled", False)))
-            micro_functions_raw = frontmatter.get("micro_functions")
-            micro_functions: list[Any] = micro_functions_raw if isinstance(micro_functions_raw, list) else []
-            micro_failure_handoff_raw = frontmatter.get("micro_failure_handoff")
-            micro_failure_handoff = (
-                micro_failure_handoff_raw if isinstance(micro_failure_handoff_raw, dict) else {}
-            )
+            micro_enabled = False
+            micro_functions: list[Any] = []
+            micro_failure_handoff: dict[str, Any] = {}
             main_handoff_context_raw = frontmatter.get("main_handoff_context")
             main_handoff_context = (
                 main_handoff_context_raw if isinstance(main_handoff_context_raw, dict) else {}
@@ -1307,7 +1115,7 @@ class SkillRegistryService:
         frontmatter, body = cls._split_frontmatter(str(markdown or ""))
         metadata = {
             key: frontmatter.get(key)
-            for key in ("skill_id", "skill_name", "intents", "execution_ref", "micro_enabled")
+            for key in ("skill_id", "skill_name", "intents", "execution_ref")
             if frontmatter.get(key) is not None
         }
         parts = ["# Runtime Skill Contract", json.dumps(metadata, ensure_ascii=True, separators=(",", ":"))]
@@ -1326,7 +1134,6 @@ class SkillRegistryService:
             "execution steps",
             "execution rules",
             "failure behavior",
-            "microjarvis contract",
             "main handoff context contract",
             "main jarvis responsibilities",
         )
@@ -1376,13 +1183,6 @@ class SkillRegistryService:
         missing_sections = sorted(section for section in REQUIRED_SECTION_KEYS if section not in headings)
         for section in missing_sections:
             errors.append(f"missing required section: {section}")
-
-        micro_functions = frontmatter.get("micro_functions") if isinstance(frontmatter, dict) else None
-        if isinstance(frontmatter, dict) and frontmatter.get("micro_enabled") and not isinstance(micro_functions, list):
-            errors.append("micro_enabled=true requires micro_functions list")
-        if isinstance(frontmatter, dict) and frontmatter.get("micro_enabled") and isinstance(micro_functions, list):
-            if not micro_functions:
-                errors.append("micro_enabled=true requires at least one micro_functions entry")
 
         tool_diagnostics: tuple[dict[str, str], ...] = ()
         if isinstance(frontmatter, dict) and "main_tools" in frontmatter:
@@ -1468,30 +1268,6 @@ class SkillRegistryService:
             return True
         if normalized.endswith("/skills/micro_jarvis_skills.md") or normalized.endswith("/prompts/micro_jarvis_skills.md"):
             return model_name.strip().lower() != "microj"
-        return False
-
-    def is_micro_allowed_for_intent(self, *, skill: dict[str, Any] | None, intent: str) -> bool:
-        if not isinstance(skill, dict):
-            return False
-        if not bool(skill.get("active")):
-            return False
-        if not bool(skill.get("learnable_ready")):
-            return False
-        if not bool(skill.get("micro_enabled")):
-            return False
-        normalized_intent = str(intent or "").strip().lower()
-        if not normalized_intent:
-            return False
-        micro_functions = skill.get("micro_functions")
-        if not isinstance(micro_functions, list):
-            return False
-        for entry in micro_functions:
-            if isinstance(entry, str) and entry.strip().lower() == normalized_intent:
-                return True
-            if isinstance(entry, dict):
-                candidate = str(entry.get("intent") or "").strip().lower()
-                if candidate == normalized_intent:
-                    return True
         return False
 
     def record_skill_run(
@@ -1690,131 +1466,6 @@ class SkillRegistryService:
             "skill_count": len(selected_skills),
             "missing_markdown_count": len({path for path in missing_markdown_paths if path}),
             "min_critical_level": critical_threshold,
-        }
-
-    def compile_micro_skills_markdown(
-        self,
-        *,
-        output_path: str = "app/prompts/micro_jarvis_skills.md",
-        compile_if_stale: bool = False,
-    ) -> dict[str, Any]:
-        resolved_output = Path(output_path)
-        if not resolved_output.is_absolute():
-            resolved_output = (self._repo_root / resolved_output).resolve()
-        resolved_output.parent.mkdir(parents=True, exist_ok=True)
-        metadata_path = self._artifact_metadata_path(resolved_output)
-
-        selected: list[dict[str, Any]] = []
-        stale_inputs: list[dict[str, Any]] = []
-        for skill in self.list_skills(active_only=True):
-            if not bool(skill.get("learnable_ready")) or not bool(skill.get("micro_enabled")):
-                continue
-            micro_functions = skill.get("micro_functions")
-            if not isinstance(micro_functions, list) or not micro_functions:
-                continue
-            skill_id = str(skill.get("skill_id") or "").strip()
-            stale_inputs.append(
-                {
-                    "skill_id": skill_id,
-                    "updated_at": str(skill.get("updated_at") or ""),
-                    "micro_functions": micro_functions,
-                    "markdown_path": str(skill.get("markdown_path") or "").strip(),
-                }
-            )
-            selected.append(
-                {
-                    "skill_id": skill_id,
-                    "skill_name": str(skill.get("skill_name") or "").strip(),
-                    "micro_functions": micro_functions,
-                    "markdown_path": str(skill.get("markdown_path") or "").strip(),
-                }
-            )
-
-        selected.sort(key=lambda row: str(row.get("skill_id") or ""))
-        stale_inputs.sort(key=lambda row: str(row.get("skill_id") or ""))
-        source_descriptor = {
-            "artifact": "micro_skills",
-            "inputs": stale_inputs,
-        }
-        source_hash = self._sha256_json(source_descriptor)
-        previous_meta = self._read_json_file(metadata_path)
-        if (
-            compile_if_stale
-            and resolved_output.exists()
-            and isinstance(previous_meta, dict)
-            and str(previous_meta.get("source_hash") or "") == source_hash
-        ):
-            return {
-                "status": "skipped",
-                "reason": "up_to_date",
-                "output_path": str(resolved_output),
-                "metadata_path": str(metadata_path),
-                "source_hash": source_hash,
-                "skill_count": len(selected),
-            }
-
-        compiled_at = _utc_now()
-        lines: list[str] = [
-            "# Micro Jarvis Skills (Compiled)",
-            "",
-            "Auto-generated micro execution allowlist from SQL `skills` registry.",
-            f"- skill_count: {len(selected)}",
-            "",
-        ]
-        if not selected:
-            lines.extend(
-                [
-                    "## No Micro Skills",
-                    "",
-                    "No active learnable skills are currently enabled for micro execution.",
-                    "",
-                ]
-            )
-        else:
-            for skill in selected:
-                lines.extend(
-                    [
-                        f"## {skill['skill_name']} (`{skill['skill_id']}`)",
-                        "",
-                        f"- markdown_path: `{skill['markdown_path']}`",
-                        "- micro_functions:",
-                    ]
-                )
-                for entry in skill["micro_functions"]:
-                    if isinstance(entry, dict):
-                        function_id = str(entry.get("function_id") or "").strip()
-                        intent = str(entry.get("intent") or "").strip()
-                        lines.append(
-                            f"  - {function_id or intent or 'unknown'}"
-                            + (f" -> {intent}" if intent else "")
-                        )
-                    else:
-                        lines.append(f"  - {str(entry).strip()}")
-                lines.append("")
-
-        compiled = "\n".join(lines).strip() + "\n"
-        content_hash = self._sha256_text(compiled)
-        resolved_output.write_text(compiled, encoding="utf-8")
-        self._markdown_cache.pop(str(resolved_output).lower(), None)
-        self._write_json_file(
-            metadata_path,
-            {
-                "artifact": "micro_skills",
-                "compiled_at": compiled_at,
-                "source_hash": source_hash,
-                "content_hash": content_hash,
-                "output_path": self._relative_repo_path(resolved_output),
-                "skill_count": len(selected),
-            },
-        )
-        return {
-            "status": "ok",
-            "compiled_at": compiled_at,
-            "output_path": str(resolved_output),
-            "metadata_path": str(metadata_path),
-            "source_hash": source_hash,
-            "content_hash": content_hash,
-            "skill_count": len(selected),
         }
 
     @staticmethod

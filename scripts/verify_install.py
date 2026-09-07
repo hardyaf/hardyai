@@ -68,8 +68,6 @@ def ollama_model_is_present(configured_name: str, available_names: Iterable[str]
 
 def configured_model_names(settings: Any) -> list[str]:
     names: list[str] = []
-    if settings.micro_model_enabled:
-        names.append(str(settings.micro_model_name).strip())
     if settings.main_repair_model_enabled:
         names.append(str(settings.main_repair_model_name).strip())
     if bool(getattr(settings, "action_ticket_review_enabled", False)):
@@ -225,7 +223,6 @@ def _check_dependencies(checks: InstallChecks) -> None:
 def _check_skill_artifacts(checks: InstallChecks) -> None:
     artifacts = (
         REPO_ROOT / "app" / "prompts" / "skills" / "critical_skills.md",
-        REPO_ROOT / "app" / "prompts" / "micro_jarvis_skills.md",
     )
     critical_text = ""
     for artifact_path in artifacts:
@@ -585,7 +582,7 @@ def _check_local_models(
 ) -> None:
     model_names = configured_model_names(settings)
     if not model_names:
-        message = "both local-model lanes are disabled"
+        message = "local Main model is disabled"
         if require_models:
             checks.fail("local_models", message)
         else:
@@ -593,8 +590,6 @@ def _check_local_models(
         return
 
     providers: list[str] = []
-    if settings.micro_model_enabled:
-        providers.append(str(settings.micro_model_provider).strip().lower())
     if settings.main_repair_model_enabled:
         providers.append(str(settings.main_repair_model_provider).strip().lower())
     if bool(getattr(settings, "action_ticket_review_enabled", False)):
@@ -689,10 +684,7 @@ def _check_web_research(checks: InstallChecks, settings: Any) -> None:
         checks.fail("web_research", f"unsupported provider: {provider or '<empty>'}")
         return
 
-    if not (
-        bool(getattr(settings, "main_repair_model_enabled", False))
-        or bool(getattr(settings, "micro_model_enabled", False))
-    ):
+    if not bool(getattr(settings, "main_repair_model_enabled", False)):
         checks.fail("web_research", "an enabled local model lane is required to synthesize research")
         return
 

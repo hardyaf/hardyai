@@ -148,16 +148,8 @@ def _secret_value(value_name: str, file_name: str) -> str:
 @dataclass(frozen=True)
 class Settings:
     app_env: str
-    micro_fast_confidence_threshold: float
     default_session_source: str
-    micro_model_enabled: bool
-    micro_model_provider: str
-    micro_model_name: str
     local_model_url: str
-    micro_model_timeout_seconds: float
-    micro_model_num_ctx: int
-    micro_model_num_predict: int
-    micro_model_heuristic_fallback_enabled: bool
     main_repair_model_enabled: bool
     main_repair_model_provider: str
     main_repair_model_name: str
@@ -175,7 +167,7 @@ class Settings:
     model_adaptive_token_max_attempts: int
     model_adaptive_token_growth_factor: float
     model_adaptive_token_max_multiplier: int
-    larger_model_micro_only_window_seconds: float
+    main_model_keep_alive_seconds: float
     skill_artifact_auto_compile_enabled: bool
     main_tool_execution_mode: str
     main_tool_enabled_domains: tuple[str, ...]
@@ -187,7 +179,6 @@ class Settings:
     main_tool_max_observation_chars: int
     main_tool_max_total_observation_chars: int
     main_tool_timeout_seconds: int
-    legacy_micro_routing_enabled: bool
     main_agent_loop_max_steps: int
     main_agent_loop_max_failures: int
     main_agent_loop_context_max_chars: int
@@ -228,6 +219,10 @@ class Settings:
     discord_attachment_max_per_message: int
     discord_document_notifications_enabled: bool
     discord_document_notification_poll_seconds: float
+    action_approval_worker_enabled: bool
+    action_approval_worker_poll_seconds: float
+    action_approval_worker_batch_size: int
+    action_approval_worker_lease_seconds: int
     memory_mode: str
     memory_markdown_path: str
     house_switch_names: list[str]
@@ -382,34 +377,17 @@ class Settings:
 
 settings = Settings(
     app_env=os.getenv("APP_ENV", "development"),
-    micro_fast_confidence_threshold=_as_float("MICRO_FAST_CONFIDENCE_THRESHOLD", 0.72),
     default_session_source=os.getenv("DEFAULT_SESSION_SOURCE", "web"),
-    micro_model_enabled=_as_bool("MICRO_MODEL_ENABLED", False),
-    micro_model_provider=os.getenv("MICRO_MODEL_PROVIDER", "ollama"),
-    micro_model_name=os.getenv("MICRO_MODEL_NAME", "qwen2.5:7b"),
     local_model_url=os.getenv("LOCAL_MODEL_URL", "http://127.0.0.1:11434"),
-    micro_model_timeout_seconds=_as_float("MICRO_MODEL_TIMEOUT_SECONDS", 6.0),
-    micro_model_num_ctx=max(512, _as_int("MICRO_MODEL_NUM_CTX", 4096)),
-    micro_model_num_predict=max(1, _as_int("MICRO_MODEL_NUM_PREDICT", 256)),
-    micro_model_heuristic_fallback_enabled=_as_bool(
-        "MICRO_MODEL_HEURISTIC_FALLBACK_ENABLED",
-        True,
-    ),
-    main_repair_model_enabled=_as_bool(
-        "MAIN_REPAIR_MODEL_ENABLED",
-        _as_bool("MICRO_MODEL_ENABLED", False),
-    ),
-    main_repair_model_provider=os.getenv(
-        "MAIN_REPAIR_MODEL_PROVIDER",
-        os.getenv("MICRO_MODEL_PROVIDER", "ollama"),
-    ),
+    main_repair_model_enabled=_as_bool("MAIN_REPAIR_MODEL_ENABLED", False),
+    main_repair_model_provider=os.getenv("MAIN_REPAIR_MODEL_PROVIDER", "ollama"),
     main_repair_model_name=os.getenv(
         "MAIN_REPAIR_MODEL_NAME",
         "qwen3.8:27b",
     ),
     main_repair_model_timeout_seconds=_as_float(
         "MAIN_REPAIR_MODEL_TIMEOUT_SECONDS",
-        _as_float("MICRO_MODEL_TIMEOUT_SECONDS", 6.0),
+        20.0,
     ),
     main_repair_model_num_ctx=max(512, _as_int("MAIN_REPAIR_MODEL_NUM_CTX", 32768)),
     main_repair_model_num_predict=max(1, _as_int("MAIN_REPAIR_MODEL_NUM_PREDICT", 1024)),
@@ -419,7 +397,7 @@ settings = Settings(
         max(
             _as_float(
                 "MAIN_REPAIR_MODEL_TIMEOUT_SECONDS",
-                _as_float("MICRO_MODEL_TIMEOUT_SECONDS", 6.0),
+                20.0,
             ),
             20.0,
         ),
@@ -442,8 +420,8 @@ settings = Settings(
         1,
         min(_as_int("MODEL_ADAPTIVE_TOKEN_MAX_MULTIPLIER", 8), 32),
     ),
-    larger_model_micro_only_window_seconds=_as_float(
-        "LARGER_MODEL_MICRO_ONLY_WINDOW_SECONDS",
+    main_model_keep_alive_seconds=_as_float(
+        "MAIN_MODEL_KEEP_ALIVE_SECONDS",
         180.0,
     ),
     skill_artifact_auto_compile_enabled=_as_bool(
@@ -452,7 +430,7 @@ settings = Settings(
     ),
     main_tool_execution_mode=_as_strict_choice(
         "MAIN_TOOL_EXECUTION_MODE",
-        "off",
+        "active",
         {"off", "shadow", "active"},
     ),
     main_tool_enabled_domains=_as_identifier_allowlist(
@@ -483,7 +461,6 @@ settings = Settings(
         24000,
     ),
     main_tool_timeout_seconds=_as_positive_int("MAIN_TOOL_TIMEOUT_SECONDS", 120),
-    legacy_micro_routing_enabled=_as_strict_bool("LEGACY_MICRO_ROUTING_ENABLED", True),
     main_agent_loop_max_steps=max(1, _as_int("MAIN_AGENT_LOOP_MAX_STEPS", 8)),
     main_agent_loop_max_failures=max(1, _as_int("MAIN_AGENT_LOOP_MAX_FAILURES", 2)),
     main_agent_loop_context_max_chars=max(256, _as_int("MAIN_AGENT_LOOP_CONTEXT_MAX_CHARS", 6000)),
@@ -574,6 +551,19 @@ settings = Settings(
     discord_document_notification_poll_seconds=max(
         1.0,
         min(_as_float("DISCORD_DOCUMENT_NOTIFICATION_POLL_SECONDS", 2.0), 60.0),
+    ),
+    action_approval_worker_enabled=_as_bool("ACTION_APPROVAL_WORKER_ENABLED", False),
+    action_approval_worker_poll_seconds=max(
+        1.0,
+        min(_as_float("ACTION_APPROVAL_WORKER_POLL_SECONDS", 2.0), 60.0),
+    ),
+    action_approval_worker_batch_size=max(
+        1,
+        min(_as_int("ACTION_APPROVAL_WORKER_BATCH_SIZE", 10), 50),
+    ),
+    action_approval_worker_lease_seconds=max(
+        15,
+        min(_as_int("ACTION_APPROVAL_WORKER_LEASE_SECONDS", 60), 600),
     ),
     memory_mode=os.getenv("MEMORY_MODE", "sqlite"),
     memory_markdown_path=os.getenv("MEMORY_MARKDOWN_PATH", "./data/memory_markdown"),

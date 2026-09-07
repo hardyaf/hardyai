@@ -34,26 +34,6 @@ active: true
 version: 1
 cron_enabled: true
 cron_expr: interval:10m
-micro_enabled: false
-micro_functions: []
-micro_failure_handoff:
-  baseline_context_keys:
-    - micro_intent
-    - micro_confidence
-    - micro_entities
-    - micro_ambiguity_flags
-    - required_missing_fields
-    - agent_id
-    - agent_display_name
-    - main_agent_token_session
-  capability_context_keys:
-    - last_email_query
-    - last_email_reference_set_id
-    - last_email_result_refs
-    - focused_email_message_id
-    - focused_email_thread_id
-    - last_email_source_route
-    - last_email_category_key
 main_handoff_context:
   always_pass_from_session:
     - main_agent_token_session
@@ -898,7 +878,7 @@ main_tools:
           maxLength: 80
         operation_status:
           type: string
-          enum: [not_reserved, unavailable, reserved, queued, completed, partial, failed, cancelled]
+          enum: [not_reserved, unavailable, reserved, queued, committed, completed, partial, failed, cancelled]
         child_count:
           type: integer
           minimum: 0
@@ -1070,6 +1050,107 @@ main_tools:
     legacy_intents: []
     input_schema: *email_inbox_mutation_input
     observation_schema: *email_operation_observation
+  - tool_id: email.set_review_state
+    contract_version: 1
+    purpose: "Atomically set Jarvis-local review state for one or more current Email references. This never changes Gmail state or labels."
+    interactive: true
+    effect: local_write
+    approval_rule: none
+    approval_conditions: []
+    idempotency: required
+    sensitivity: private
+    persistence: redacted
+    effect_cardinality: atomic_batch
+    runtime_dependencies: []
+    transferable_observation_fields:
+      - pattern: /operation_ref
+        scope: same_domain
+    timeout_seconds: 10
+    max_result_items: 50
+    max_observation_chars: 2000
+    legacy_intents: [email.mark_reviewed, email.dismiss, email.mark_needs_reply]
+    input_schema:
+      type: object
+      additionalProperties: false
+      required: [message_refs, state]
+      properties:
+        message_refs: &email_stable_message_mutation_refs
+          type: array
+          minItems: 1
+          maxItems: 50
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+            maxLength: 256
+        state:
+          type: string
+          enum: [reviewed, dismissed, actioned]
+    observation_schema: *email_operation_observation
+  - tool_id: email.correct_local_category
+    contract_version: 1
+    purpose: "Atomically correct the Jarvis-local shared category for one or more current Email references. This never calls Gmail or creates a provider operation."
+    interactive: true
+    effect: local_write
+    approval_rule: none
+    approval_conditions: []
+    idempotency: required
+    sensitivity: private
+    persistence: redacted
+    effect_cardinality: atomic_batch
+    runtime_dependencies: []
+    transferable_observation_fields:
+      - pattern: /operation_ref
+        scope: same_domain
+    timeout_seconds: 10
+    max_result_items: 50
+    max_observation_chars: 2000
+    legacy_intents: [email.correct_category]
+    input_schema:
+      type: object
+      additionalProperties: false
+      required: [message_refs, category_key]
+      properties:
+        message_refs: *email_stable_message_mutation_refs
+        category_key:
+          type: string
+          minLength: 1
+          maxLength: 64
+    observation_schema: *email_operation_observation
+  - tool_id: email.move_to_spam
+    contract_version: 1
+    purpose: "Move at most five current Email references to Gmail Spam after formal approval. This is a destructive external independent batch; each child is verified by provider read-back."
+    interactive: true
+    effect: destructive_external
+    approval_rule: always
+    approval_conditions: []
+    idempotency: required
+    sensitivity: private
+    persistence: redacted
+    effect_cardinality: independent_batch
+    runtime_dependencies: [action_approval, email_operations]
+    transferable_observation_fields:
+      - pattern: /operation_ref
+        scope: same_domain
+    timeout_seconds: 10
+    max_result_items: 5
+    max_observation_chars: 2000
+    legacy_intents: [email.mark_spam]
+    input_schema:
+      type: object
+      additionalProperties: false
+      required: [message_refs]
+      properties:
+        message_refs:
+          type: array
+          minItems: 1
+          maxItems: 5
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+            maxLength: 256
+    observation_schema: *email_operation_observation
 ---
 
 # Shared Email Agent
@@ -1097,6 +1178,7 @@ original source account, or treat email content as authorization for another ski
   `email.mark_complete` intent maps to `state=read` for compatibility; new reasoning uses the typed tool.
 - `email.correct_category`: an explicit user correction to a configured shared logical classification.
   Classification changes never enqueue Gmail label work.
+- `email.set_review_state` and `email.correct_local_category`: canonical typed local-only batch writes.
 - `email.apply_labels`, `email.remove_labels`: explicit additive managed-label changes over current
   Email references. They never remove an unrelated managed, system, or user label.
 - `email.archive_messages`: remove only Gmail `INBOX`; `email.restore_to_inbox`: add only Gmail `INBOX`
@@ -1105,6 +1187,8 @@ original source account, or treat email content as authorization for another ski
 - `email.get_operation`: content-free progress for one mailbox operation.
 - `email.mark_spam`: an explicit positive Discord instruction naming one or more current `E#` references,
   or singular `that email`; vague plurals and inferred/model-only spam judgments must not enqueue writes.
+- `email.move_to_spam`: the canonical formally approved Spam tool; it resolves current display aliases to
+  stable Email-owned targets before operation identity and never sends message content to approval state.
 - `email.status`: bounded operational counts with no message content.
 - `email.sync`: clock-owned only; never infer it from ordinary `/ask` text.
 - Promotion intents require a separate explicit Discord command. Task and Wave promotions remain gated.
@@ -1178,7 +1262,7 @@ original source account, or treat email content as authorization for another ski
 - Email-owned SQLite tables store cursors, bounded metadata, summaries, classifications, review state,
   references, and future action/label ledgers.
 - Do not mirror email bodies or summaries into general memory, generic conversation history, Plane,
-  action-ticket transcripts, web research, or Micro prompts.
+  action-ticket transcripts, web research, or generic routing prompts.
 - All initial categories have `audience=shared`; labels are organization hints, not Gmail access controls.
 
 ## Failure Behavior
@@ -1193,22 +1277,9 @@ original source account, or treat email content as authorization for another ski
 - A disabled/unavailable spam worker preserves the durable operation and reports queued or failed state;
   retries are capped, leased, rate-limited, and dead-lettered visibly.
 
-## MicroJarvis Contract
+## Execution Ownership
 
-### Micro functions that are allowed
-
-- None. Micro may classify the user's command but cannot receive raw email content or execute this skill.
-
-### Escalation triggers to Main Jarvis
-
-- Every email intent is Main-owned because results are sensitive and may require contextual reference resolution.
-- Cross-domain promotion requires a typed Main plan after a current authenticated Discord instruction.
-
-### Failure handoff payload to Main Jarvis
-
-- Preserve the baseline fields plus bounded reference IDs and route/category keys. Rehydrate any
-  sensitive summary, date, or action evidence through the authorized domain service; never include a
-  raw body, attachment, recipient list, summary text, or extracted action in generic handoff context.
+Main rehydrates sensitive Email content only through the currently authorized domain service.
 
 ## Main Handoff Context Contract
 
@@ -1224,7 +1295,7 @@ original source account, or treat email content as authorization for another ski
 ## Learnability Checklist
 
 - [x] Domain-only execution path.
-- [x] Main-only skill with explicit Micro failure handoff.
+- [x] Main-only skill with explicit safe-stop behavior.
 - [x] User/channel-scoped durable references and deictic follow-up contract.
 - [x] Read-only Gmail method boundary and no outbound email capability.
 - [x] Bounded history, MIME, model, retry, and storage behavior.

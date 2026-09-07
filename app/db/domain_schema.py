@@ -3,6 +3,21 @@ from __future__ import annotations
 import sqlite3
 
 
+def _execute_sql_batch(conn: sqlite3.Connection, sql: str) -> None:
+    """Execute fixed Email DDL without sqlite3.executescript's implicit commit."""
+
+    statement = ""
+    for line in sql.splitlines():
+        statement += line + "\n"
+        if not sqlite3.complete_statement(statement):
+            continue
+        if statement.strip():
+            conn.execute(statement)
+        statement = ""
+    if statement.strip():
+        raise ValueError("Incomplete Email schema batch.")
+
+
 class DomainSchemaMigrations:
     """Central schema authority for independently constructed domain repositories."""
 
@@ -131,8 +146,9 @@ class DomainSchemaMigrations:
             )
             self._conn.commit()
 
-    def apply_email_agent(self) -> None:
-        self._conn.executescript(
+    def create_email_agent_schema(self) -> None:
+        _execute_sql_batch(
+            self._conn,
             """
             CREATE TABLE IF NOT EXISTS email_sync_state (
                 state_key TEXT PRIMARY KEY,
@@ -531,7 +547,27 @@ class DomainSchemaMigrations:
             FROM email_spam_operations
             """
         )
-        self._conn.commit()
+    def apply_email_agent(self) -> None:
+        version = int(self._conn.execute("PRAGMA user_version").fetchone()[0])
+        if version < 14:
+            raise RuntimeError("email_agent_schema_migration_required")
+        required = {
+            "email_messages",
+            "email_user_state",
+            "email_reference_sets",
+            "email_classifications",
+            "email_tool_operations",
+            "email_managed_label_operations",
+            "email_mailbox_operations",
+        }
+        present = {
+            str(row[0])
+            for row in self._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if not required.issubset(present):
+            raise RuntimeError("email_agent_schema_incomplete")
 
 
 class _NoopLock:
@@ -552,3 +588,7 @@ def ensure_calendar_inbox_schema(conn: sqlite3.Connection) -> None:
 
 def ensure_email_agent_schema(conn: sqlite3.Connection) -> None:
     DomainSchemaMigrations(conn).apply_email_agent()
+
+
+def create_email_agent_schema(conn: sqlite3.Connection) -> None:
+    DomainSchemaMigrations(conn).create_email_agent_schema()

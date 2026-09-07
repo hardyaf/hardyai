@@ -21,8 +21,8 @@ GPU scheduling, semantic retrieval, extraction/classification, or downstream act
 - Documents uses append-only source versions and processing runs, idempotent stage commits, immutable
   content-addressed artifacts, normalized pages/blocks/tables/cells, and an explicit active-run projection.
 - The Main-only Documents skill offers bounded ingest instructions, status, search, evidence/source link,
-  explicit reprocessing, review listing, and metadata proposals through the local gateway. Micro remains
-  disabled. Content-bearing responses declare the generic `restricted_read` persistence policy, which
+  explicit reprocessing, review listing, and metadata proposals through the local gateway. No secondary
+  semantic model receives document content. Content-bearing responses declare the generic `restricted_read` persistence policy, which
   suppresses generic recent turns, conversation history, memory, tickets, and Plane payloads.
 - Watched-folder intake uses the same validated/hash/idempotent ingest service as HTTP after stable-file
   detection and atomic claim. Paperless-origin reconciliation is bounded, hash verified, owner scoped,

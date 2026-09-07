@@ -17,6 +17,8 @@ from app.skills.domains.email_agent.config import EmailAgentPermissions
 from app.skills.domains.email_agent.operations import EmailManagedLabelToolExecutor
 from app.skills.domains.email_agent.storage import EmailAgentSQLiteStorage
 from app.skills.tool_contracts import ToolCallEnvelope, compile_tool_descriptors
+from app.tickets.async_receipts import normalize_execution_manifest
+from app.tickets.repository import content_hash
 from app.workers.email_operations_worker import (
     EmailOperationsWorker,
     EmailOperationsWorkerConfig,
@@ -134,7 +136,7 @@ def _envelope(
         channel_scope="100",
         skill_id="skill.email.agent",
         descriptor=descriptor,
-        authorization_snapshot_ref="authz-1",
+        authorization_snapshot_ref="authz_v1_" + "a" * 64,
         validated_arguments=canonical,
     )
 
@@ -170,6 +172,7 @@ class FakeWriter:
         self.fail_message_id = fail_message_id
         self.calls: list[dict] = []
         self.system_calls: list[dict] = []
+        self.spam_calls: list[dict] = []
 
     def verify_profile(self) -> None:
         return None
@@ -204,6 +207,16 @@ class FakeWriter:
             verified=True,
         )
 
+    def move_to_spam(self, **kwargs):
+        self.spam_calls.append(dict(kwargs))
+        return GmailSpamWriteResult(
+            message_id=kwargs["message_id"],
+            labels_before=("INBOX",),
+            labels_after=("SPAM",),
+            provider_modified=True,
+            verified=True,
+        )
+
 
 def _setup(tmp_path, *, max_attempts: int = 4):
     permissions = _permissions()
@@ -228,6 +241,230 @@ def _setup(tmp_path, *, max_attempts: int = 4):
         utc_clock=lambda: NOW,
     )
     return permissions, storage, executor
+
+
+def test_p8d_local_batches_commit_atomically_replay_and_never_enqueue_provider_rows(tmp_path):
+    _, storage, executor = _setup(tmp_path)
+    review = _envelope(
+        executor,
+        tool_id="email.set_review_state",
+        arguments={"message_refs": ["E2", "E1"], "state": "reviewed"},
+    )
+    category = _envelope(
+        executor,
+        tool_id="email.correct_local_category",
+        arguments={"message_refs": ["E1"], "category_key": "needs_review"},
+        ordinal=2,
+    )
+
+    first = executor.execute(envelope=review)
+    replay = executor.execute(envelope=review)
+    corrected = executor.execute(envelope=category)
+    with storage._lock:
+        review_rows = storage._conn.execute(
+            "SELECT gmail_message_id, review_state FROM email_user_state ORDER BY gmail_message_id"
+        ).fetchall()
+        category_row = storage._conn.execute(
+            "SELECT logical_category_key, decision_source FROM email_classifications "
+            "WHERE gmail_message_id='m1' AND taxonomy_version='shared-v1'"
+        ).fetchone()
+        provider_children = storage._conn.execute(
+            "SELECT COUNT(*) FROM email_managed_label_operations"
+        ).fetchone()[0] + storage._conn.execute(
+            "SELECT COUNT(*) FROM email_mailbox_operations"
+        ).fetchone()[0]
+        reserved_local = storage._conn.execute(
+            "SELECT COUNT(*) FROM email_tool_operations "
+            "WHERE tool_id IN ('email.set_review_state','email.correct_local_category') "
+            "AND status='reserved'"
+        ).fetchone()[0]
+
+    assert first["status"] == "ok"
+    assert replay["payload"]["idempotent_replay"] is True
+    assert corrected["status"] == "ok"
+    assert [(row[0], row[1]) for row in review_rows] == [
+        ("m1", "reviewed"),
+        ("m2", "reviewed"),
+    ]
+    assert tuple(category_row) == ("needs_review", "correction")
+    assert provider_children == 0
+    assert reserved_local == 0
+
+    with pytest.raises(ValueError, match="email_message_target_missing"):
+        storage.commit_local_tool_batch(
+            operation_id="toolop_v1_" + "9" * 64,
+            tool_id="email.set_review_state",
+            owner_user_id="operator",
+            discord_channel_id="100",
+            arguments_hash="8" * 64,
+            gmail_message_ids=["m1", "missing"],
+            taxonomy_version="shared-v1",
+            review_state="dismissed",
+            category_key=None,
+            now=NOW.isoformat(),
+        )
+    with storage._lock:
+        assert storage._conn.execute(
+            "SELECT COUNT(*) FROM email_tool_operations WHERE operation_id=?",
+            ("toolop_v1_" + "9" * 64,),
+        ).fetchone()[0] == 0
+    storage.close()
+
+
+class _AtomicManifestReservation:
+    def __init__(self, storage):
+        self.storage = storage
+        self.manifests = []
+
+    def reserve(self, *, ticket_id, request_id, manifest, domain_reservation):
+        del ticket_id, request_id
+        normalized = normalize_execution_manifest(manifest)
+        manifest_hash = content_hash(normalized)
+        with self.storage._lock:
+            cursor = self.storage._conn.cursor()
+            cursor.execute("BEGIN IMMEDIATE")
+            try:
+                domain_reservation(
+                    cursor,
+                    {
+                        "origin_request_id": "request-email.move_to_spam-1",
+                        "user_id": "operator",
+                        "agent_id": "jarvis",
+                    },
+                    manifest_hash,
+                    normalized["recovery_manifest_hash"],
+                )
+                self.storage._conn.commit()
+            except Exception:
+                self.storage._conn.rollback()
+                raise
+        self.manifests.append(normalized)
+        return {"manifest_hash": manifest_hash}
+
+
+class _OutcomeSink:
+    def __init__(self):
+        self.calls = []
+
+    def record_terminal_child(self, **kwargs):
+        self.calls.append(dict(kwargs))
+        return {"aggregate": {"missing_child_operation_ids": []}}
+
+
+def test_p8d_spam_reservation_recovery_worker_and_p7_receipts_are_child_idempotent(tmp_path):
+    permissions, storage, _ = _setup(tmp_path)
+    reservation = _AtomicManifestReservation(storage)
+    executor = EmailManagedLabelToolExecutor(
+        storage=storage,
+        permissions=permissions,
+        max_attempts=3,
+        utc_clock=lambda: NOW,
+        effect_manifest_reservation=reservation,
+        ticket_resolver=lambda _request_id: {"ticket_id": "ticket-1"},
+    )
+    envelope = _envelope(
+        executor,
+        tool_id="email.move_to_spam",
+        arguments={"message_refs": ["E2", "E1"]},
+    )
+
+    queued = executor.execute(envelope=envelope)
+    replay = executor.execute(envelope=envelope)
+    with storage._lock:
+        private = storage._conn.execute(
+            "SELECT recovery_manifest_json FROM email_tool_operations WHERE operation_id=?",
+            (envelope.operation_id,),
+        ).fetchone()[0]
+        storage._conn.execute(
+            "UPDATE email_tool_operations SET status='reserved' WHERE operation_id=?",
+            (envelope.operation_id,),
+        )
+        storage._conn.execute(
+            "DELETE FROM email_mailbox_operations WHERE parent_operation_id=? AND child_index=2",
+            (envelope.operation_id,),
+        )
+        storage._conn.commit()
+    recovered = storage.recover_mailbox_tool_operations(now=NOW.isoformat())
+    writer = FakeWriter()
+    sink = _OutcomeSink()
+    worker = EmailOperationsWorker(
+        storage=storage,
+        writer=writer,
+        permissions=permissions,
+        config=EmailOperationsWorkerConfig(enabled=True),
+        worker_id="worker-p8d",
+        outcome_sink=sink,
+    )
+    result = worker.run_once(now=NOW)
+    with storage._lock:
+        parent = storage._conn.execute(
+            "SELECT status, recovery_manifest_json FROM email_tool_operations WHERE operation_id=?",
+            (envelope.operation_id,),
+        ).fetchone()
+        children = storage._conn.execute(
+            "SELECT operation_id, child_index, taxonomy_version, external_request_id, status "
+            "FROM email_mailbox_operations WHERE parent_operation_id=? ORDER BY child_index",
+            (envelope.operation_id,),
+        ).fetchall()
+
+    assert queued["status"] == "queued"
+    assert replay["payload"]["idempotent_replay"] is True
+    assert recovered == {"recovered_count": 1, "failed_count": 0}
+    assert json.loads(private)["taxonomy_version"] == "shared-v1"
+    assert result["verified_count"] == 2
+    assert parent["status"] == "completed"
+    assert parent["recovery_manifest_json"] == "{}"
+    assert [(row[1], row[2], row[3], row[4]) for row in children] == [
+        (1, "shared-v1", envelope.root_request_id, "verified"),
+        (2, "shared-v1", envelope.root_request_id, "verified"),
+    ]
+    assert len(writer.spam_calls) == 2
+    assert len(sink.calls) == 2
+    assert all(call["effect_state"] == "verified" for call in sink.calls)
+    assert reservation.manifests[0]["descriptor_hash"] == envelope.descriptor_hash
+
+    cancelled_envelope = _envelope(
+        executor,
+        tool_id="email.move_to_spam",
+        arguments={"message_refs": ["E1"]},
+        ordinal=2,
+    )
+    assert executor.execute(envelope=cancelled_envelope)["status"] == "queued"
+    with storage._lock:
+        storage._conn.execute(
+            "UPDATE email_tool_operations SET status='reserved' WHERE operation_id=?",
+            (cancelled_envelope.operation_id,),
+        )
+        storage._conn.execute(
+            "DELETE FROM email_mailbox_operations WHERE parent_operation_id=?",
+            (cancelled_envelope.operation_id,),
+        )
+        storage._conn.commit()
+    cancellation = storage.cancel_mailbox_tool_operation(
+        parent_operation_id=cancelled_envelope.operation_id,
+        reason_code="execution_cancelled",
+        now=NOW.isoformat(),
+    )
+    no_effect_writer = FakeWriter()
+    cancellation_sink = _OutcomeSink()
+    cancellation_worker = EmailOperationsWorker(
+        storage=storage,
+        writer=no_effect_writer,
+        permissions=permissions,
+        config=EmailOperationsWorkerConfig(enabled=True),
+        worker_id="worker-p8d-cancel",
+        outcome_sink=cancellation_sink,
+    )
+    cancellation_worker.run_once(now=NOW)
+    cancelled_parent = storage.get_email_tool_operation(
+        operation_id=cancelled_envelope.operation_id
+    )
+    assert cancellation["cancelled_count"] == 1
+    assert no_effect_writer.spam_calls == []
+    assert cancelled_parent["status"] == "cancelled"
+    assert cancelled_parent["recovery_manifest_json"] == "{}"
+    assert cancellation_sink.calls[0]["effect_state"] == "cancelled"
+    storage.close()
 
 
 def test_atomic_reservation_replay_and_verified_worker_completion(tmp_path):

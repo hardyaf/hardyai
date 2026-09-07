@@ -45,9 +45,9 @@ services:
       OFFLINE_MODE: "true"
       ACCELERATOR_DATABASE_PATH: /opt/jarvis/data/accelerator/leases.db
       ACCELERATOR_ADMISSION_API_KEY_PATH: /run/secrets/accelerator_admission_api_key
-      ACCELERATOR_OLLAMA_MODELS: "${JARVIS_MICRO_MODEL:-qwen2.5:7b},${JARVIS_MAIN_MODEL:-qwen3.8:27b}"
+      ACCELERATOR_OLLAMA_MODELS: "${JARVIS_MAIN_MODEL:-qwen3.8:27b}"
       ACCELERATOR_OLLAMA_CANDIDATE_MODELS: "${JARVIS_MAIN_CANDIDATE_MODEL:-qwen3.8:27b}"
-      ACCELERATOR_OLLAMA_EVICTABLE_MODELS: "${JARVIS_MICRO_MODEL:-qwen2.5:7b}"
+      ACCELERATOR_OLLAMA_EVICTABLE_MODELS: ""
       ACCELERATOR_OLLAMA_PROTECTED_MODELS: "${JARVIS_MAIN_MODEL:-qwen3.8:27b}"
       ACCELERATOR_MAX_REQUEST_BYTES: "${ACCELERATOR_MAX_REQUEST_BYTES:-2097152}"
       ACCELERATOR_MAX_VLM_REQUEST_BYTES: "${ACCELERATOR_MAX_VLM_REQUEST_BYTES:-75497472}"
@@ -116,7 +116,7 @@ services:
       MEMORY_MODE: sqlite
       MEMORY_MARKDOWN_PATH: /opt/jarvis/data/memory_markdown
       SKILL_ARTIFACT_AUTO_COMPILE_ENABLED: "false"
-      MAIN_TOOL_EXECUTION_MODE: "${MAIN_TOOL_EXECUTION_MODE:-off}"
+      MAIN_TOOL_EXECUTION_MODE: "${MAIN_TOOL_EXECUTION_MODE:-active}"
       MAIN_TOOL_ENABLED_DOMAINS: "${MAIN_TOOL_ENABLED_DOMAINS:-}"
       MAIN_TOOL_ENABLED_OPERATIONS: "${MAIN_TOOL_ENABLED_OPERATIONS:-}"
       MAIN_TOOL_MAX_SELECTED_SKILLS: "${MAIN_TOOL_MAX_SELECTED_SKILLS:-3}"
@@ -126,17 +126,9 @@ services:
       MAIN_TOOL_MAX_OBSERVATION_CHARS: "${MAIN_TOOL_MAX_OBSERVATION_CHARS:-8000}"
       MAIN_TOOL_MAX_TOTAL_OBSERVATION_CHARS: "${MAIN_TOOL_MAX_TOTAL_OBSERVATION_CHARS:-24000}"
       MAIN_TOOL_TIMEOUT_SECONDS: "${MAIN_TOOL_TIMEOUT_SECONDS:-120}"
-      LEGACY_MICRO_ROUTING_ENABLED: "${LEGACY_MICRO_ROUTING_ENABLED:-true}"
       LOCAL_MODEL_URL: http://accelerator-admission:8040
       ACCELERATOR_ADMISSION_REQUIRED: "true"
       ACCELERATOR_ADMISSION_API_KEY_PATH: /run/secrets/accelerator_admission_api_key
-      MICRO_MODEL_ENABLED: "${JARVIS_MODELS_ENABLED:-false}"
-      MICRO_MODEL_PROVIDER: ollama
-      MICRO_MODEL_NAME: "${JARVIS_MICRO_MODEL:-qwen2.5:7b}"
-      MICRO_MODEL_TIMEOUT_SECONDS: "30"
-      MICRO_MODEL_NUM_CTX: "${MICRO_MODEL_NUM_CTX:-4096}"
-      MICRO_MODEL_NUM_PREDICT: "${MICRO_MODEL_NUM_PREDICT:-256}"
-      MICRO_MODEL_HEURISTIC_FALLBACK_ENABLED: "true"
       MAIN_REPAIR_MODEL_ENABLED: "${JARVIS_MODELS_ENABLED:-false}"
       MAIN_REPAIR_MODEL_PROVIDER: ollama
       MAIN_REPAIR_MODEL_NAME: "${JARVIS_MAIN_MODEL:-qwen3.8:27b}"
@@ -303,6 +295,52 @@ services:
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     networks: [default, accelerator-control]
+
+  action-approval-worker:
+    image: jarvis-poc-app:local
+    profiles: ["approvals"]
+    restart: unless-stopped
+    init: true
+    user: "${JARVIS_UID:-1001}:${JARVIS_GID:-1001}"
+    env_file:
+      - ../../.env
+    environment:
+      APP_ENV: production
+      DATABASE_PATH: /opt/jarvis/data/jarvis_v2.db
+      SKILL_ARTIFACT_AUTO_COMPILE_ENABLED: "false"
+      DISCORD_ENABLED: "false"
+      DISCORD_PERMISSIONS_PATH: /opt/jarvis/secrets/live/discord_permissions.yaml
+      ACTION_APPROVAL_WORKER_ENABLED: "${ACTION_APPROVAL_WORKER_ENABLED:-false}"
+      ACTION_APPROVAL_WORKER_POLL_SECONDS: "${ACTION_APPROVAL_WORKER_POLL_SECONDS:-2}"
+      ACTION_APPROVAL_WORKER_BATCH_SIZE: "${ACTION_APPROVAL_WORKER_BATCH_SIZE:-10}"
+      ACTION_APPROVAL_WORKER_LEASE_SECONDS: "${ACTION_APPROVAL_WORKER_LEASE_SECONDS:-60}"
+    command: ["python", "-m", "app.workers.action_approval_worker"]
+    volumes:
+      - ../../data:/opt/jarvis/data
+      - ../../secrets/live:/opt/jarvis/secrets/live:ro
+      - type: bind
+        source: ${DOCUMENTS_SECRETS_ROOT:-/etc/hardyai/documents-required}/jarvis_operator_api_key
+        target: /run/secrets/jarvis_operator_api_key
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${DOCUMENTS_SECRETS_ROOT:-/etc/hardyai/documents-required}/accelerator_admission_api_key
+        target: /run/secrets/accelerator_admission_api_key
+        read_only: true
+        bind:
+          create_host_path: false
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.workers.action_approval_worker", "--readiness-only"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks: [default, accelerator-control, documents-control, discord-ingress-control]
 
   plane-sync:
     image: jarvis-poc-app:local
@@ -608,7 +646,6 @@ services:
       EMAIL_AGENT_SYNC_ENABLED: "false"
       PLANE_ENABLED: "false"
       WEB_RESEARCH_ENABLED: "false"
-      MICRO_MODEL_ENABLED: "false"
       MAIN_REPAIR_MODEL_ENABLED: "false"
       ACTION_TICKET_REVIEW_ENABLED: "false"
     command: ["python", "-m", "app.workers.document_processing_worker"]
@@ -712,7 +749,6 @@ services:
       EMAIL_AGENT_SYNC_ENABLED: "false"
       PLANE_ENABLED: "false"
       WEB_RESEARCH_ENABLED: "false"
-      MICRO_MODEL_ENABLED: "false"
       MAIN_REPAIR_MODEL_ENABLED: "false"
       ACTION_TICKET_REVIEW_ENABLED: "false"
     command:
@@ -798,7 +834,6 @@ services:
       EMAIL_AGENT_SYNC_ENABLED: "false"
       PLANE_ENABLED: "false"
       WEB_RESEARCH_ENABLED: "false"
-      MICRO_MODEL_ENABLED: "false"
       MAIN_REPAIR_MODEL_ENABLED: "false"
       ACTION_TICKET_REVIEW_ENABLED: "false"
     command:

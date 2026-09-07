@@ -38,7 +38,7 @@ async def _run(*, iterations: int, prompt: str) -> dict:
             channel_id=200,
             user_id=300,
             message_id=f"benchmark-{run_id}-{iteration + 1}",
-            micro_command_explicit=False,
+            command_prefix_explicit=False,
         )
         started = time.perf_counter()
         response = await turn_service.route(

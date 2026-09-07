@@ -1,5 +1,4 @@
 from app.core.main_jarvis import MainJarvis
-from app.core.micro_jarvis import MicroJarvis
 from tests.router_support import RegistryBackedTestRouter as JarvisRouter
 from app.core.session_store import SessionStore
 from app.core.state_machine import RuntimePowerController
@@ -12,7 +11,6 @@ from app.tools.lists_service import ListsService
 
 def _build_router() -> JarvisRouter:
     return JarvisRouter(
-        micro_jarvis=MicroJarvis(),
         main_jarvis=MainJarvis(),
         session_store=SessionStore(),
         runtime_power=RuntimePowerController(),
@@ -40,6 +38,6 @@ def test_sleep_blocks_non_wake_requests_until_wake_phrase():
     assert wake["result"]["status"] == "awake"
 
     after_wake = router.route(AskRequest(text="add milk to groceries", session_id="s1"))
-    assert after_wake["route"] == "micro_tool"
+    assert after_wake["route"] == "main_jarvis"
     assert after_wake["result"]["status"] == "ok"
     assert after_wake["result"]["list_name"] == "groceries"

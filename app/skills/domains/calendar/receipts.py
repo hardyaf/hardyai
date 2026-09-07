@@ -7,6 +7,58 @@ from app.tickets.repository import content_hash
 from app.tickets.types import iso_utc
 
 
+def build_typed_operation_receipt(
+    *,
+    envelope: Any,
+    result: dict[str, Any],
+) -> dict[str, Any] | None:
+    if str(result.get("status") or "").casefold() != "ok" or result.get("source") != "google_live":
+        return None
+    payload = result.get("payload") if isinstance(result.get("payload"), dict) else {}
+    event = payload.get("event") if isinstance(payload.get("event"), dict) else {}
+    event_id = str(payload.get("provider_event_id") or "").strip()
+    calendar_ref = str(payload.get("calendar_ref") or "").strip()
+    event_ref = str(payload.get("event_ref") or "").strip()
+    if not event_id or not calendar_ref or not event_ref:
+        return None
+    deleted = bool(event.get("deleted"))
+    expected: dict[str, Any] = {"exists": not deleted}
+    if not deleted:
+        expected.update(
+            {
+                "title": str(event.get("title") or ""),
+                "start_at": str(event.get("start") or ""),
+                "end_at": str(event.get("end") or ""),
+                "attendee_emails": sorted(
+                    str(item).strip().casefold()
+                    for item in event.get("attendee_emails") or []
+                    if str(item).strip()
+                ),
+            }
+        )
+    operation_id = str(envelope.operation_id)
+    return {
+        "operation_id": operation_id,
+        "idempotency_key": f"calendar-tool-receipt:v1:{operation_id}",
+        "capability": str(envelope.tool_id),
+        "action": str(payload.get("action") or "calendar_write"),
+        "resource_key": f"google-calendar-event:{calendar_ref}:{event_ref}",
+        "provider_resource_id": event_id,
+        "provider_revision": str(payload.get("resource_version") or "") or None,
+        "status": "committed",
+        "committed_at": iso_utc(),
+        "expected_effect": expected,
+        "validator_name": "calendar.google",
+        "validator_version": "2",
+        "resource_locator": {
+            "calendar_ref": calendar_ref,
+            "event_id": event_id,
+        },
+        "execution_observation": dict(event),
+        "result": {key: value for key, value in result.items() if not str(key).startswith("_")},
+    }
+
+
 def build_operation_receipt(
     *,
     intent: str,

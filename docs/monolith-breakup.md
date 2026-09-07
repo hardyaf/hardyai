@@ -2,6 +2,9 @@
 
 Status: complete and verified on the authoritative Ubuntu deployment on 2026-08-24.
 
+Routing note: the verification details below are a historical release record. The later Main-only
+cutover retired the classifier and preserves its old labels only for backward-readable history.
+
 ## Outcome
 
 The breakup is successful at the behavioral and dependency boundaries that matter most:
@@ -78,13 +81,13 @@ The final release passed:
 - post-start SQLite integrity, exact-source synchronization, container health, and HTTP `/health` checks;
 - direct Qwen 2.5 7B and GPT-OSS 20B inference probes plus a model-backed authenticated Main turn;
 - live SearXNG, Google Calendar read, Main clarification, and idempotent direct-house action checks; and
-- Discord connection plus a read-only explicit-envelope Micro routing check.
+- Discord connection plus the then-current read-only explicit-envelope routing check.
 
 The deployment test found and closed two gaps that the earlier assertions did not catch. The production
 verifier now authenticates its loopback smoke turn without sending the operator key over plain remote HTTP.
-Explicit Discord commands also refresh deterministic ownership after domain entity normalization, so a
-normalized complete read command executes through `micro_tool`; unprefixed, incomplete, ambiguous, and
-Main-only mutating requests still fail closed to Main.
+At that release boundary, explicit Discord commands also refreshed deterministic ownership after domain
+entity normalization, and a normalized complete read command used the then-current direct route. That
+route is now retired; every accepted semantic command enters Main.
 
 The clean exports used for this pass were disposable release artifacts, not deployment authorities or
 second canonical checkouts.
@@ -102,7 +105,7 @@ The breakup is complete, with these bounded follow-up concerns:
   synchronously before the response is returned; new asynchronous write paths must register a durable job
   handler and expose delivery state before they may return success.
 - The production image still reports the known Starlette/httpx and Python `audioop` deprecation warnings.
-- The explicit Discord Micro check used the production command-envelope and router path without posting a
+- The historical explicit Discord routing check used the production command-envelope and router path without posting a
   synthetic message into a real household channel. The live bot connection and adapter policy loaded
   successfully; the next organic `!` command remains the end-to-end transport confirmation.
 - Windows rollback state was not changed. Observe the Ubuntu deployment before any separately approved

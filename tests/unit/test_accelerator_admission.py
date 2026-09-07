@@ -47,7 +47,7 @@ def test_accelerator_client_fails_closed_when_admission_key_is_required(monkeypa
     monkeypatch.delenv("ACCELERATOR_ADMISSION_API_KEY_PATH", raising=False)
 
     try:
-        accelerator_request_headers("micro")
+        accelerator_request_headers("main_repair")
     except RuntimeError as exc:
         assert str(exc) == "accelerator_admission_key_path_missing"
     else:

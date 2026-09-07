@@ -167,3 +167,75 @@ def test_watchdog_reconciles_interrupted_execution_without_receipt(tmp_path):
         assert repo.get_job(str(watchdog["job_id"]))["status"] == JobStatus.COMPLETED.value
     finally:
         repo.close()
+
+
+def test_watchdog_recreates_review_job_after_receipt_completion_crash(tmp_path):
+    path = tmp_path / "watchdog-receipt.db"
+    SQLiteStore(database_path=str(path)).close()
+    repo = TicketRepository(database_path=str(path))
+    try:
+        ticket = repo.create_ticket(
+            origin_request_id="request-receipted",
+            session_id="session-1",
+            user_id="user-1",
+            agent_id="jarvis",
+            source="test",
+            intent="lists.add_item",
+            skill_id="skill.lists.core",
+            route="micro_tool",
+            title="add milk",
+        )
+        ticket_id = str(ticket["ticket_id"])
+        repo.transition_ticket(ticket_id=ticket_id, status=TicketStatus.EXECUTING)
+        receipt = repo.record_operation_receipt(
+            ticket_id=ticket_id,
+            receipt={
+                "operation_id": "operation-receipted",
+                "idempotency_key": "receipt-receipted",
+                "capability": "lists.add_item",
+                "action": "add_item",
+                "resource_key": "list:user-1:groceries",
+                "status": "committed",
+                "committed_at": "2026-09-06T00:00:00+00:00",
+                "expected_effect": {"items_present": ["milk"]},
+                "validator_name": "lists.sqlite",
+                "validator_version": "1",
+                "resource_locator": {
+                    "owner_user_id": "user-1",
+                    "list_name": "groceries",
+                },
+                "execution_observation": {},
+                "result": {},
+            },
+        )
+        assert receipt["operation_id"] == "operation-receipted"
+        assert repo.list_expectations(ticket_id) == []
+        assert repo.list_entries(ticket_id) == []
+        watchdog = repo.enqueue_job(
+            job_type="ticket_watchdog",
+            aggregate_id=ticket_id,
+            idempotency_key="receipt-completion-watchdog",
+            payload={"ticket_id": ticket_id},
+            available_at=iso_utc(utc_now() - timedelta(seconds=1)),
+        )
+
+        results = TicketReviewWorker(
+            repository=repo,
+            review_service=object(),
+            live_idle_seconds=0,
+            review_delay_seconds=3600,
+        ).run_once()
+        assert results == [{"status": "verification_pending", "ticket_id": ticket_id}]
+        persisted = repo.get_ticket(ticket_id)
+        assert persisted["status"] == TicketStatus.VERIFICATION_PENDING.value
+        assert persisted["source_action_revision"]
+        assert len(repo.list_expectations(ticket_id)) == 1
+        assert [
+            item["entry_type"] for item in repo.list_entries(ticket_id)
+        ] == ["operation_receipt"]
+        review_jobs = repo.list_jobs(job_type="ticket_review")
+        assert len(review_jobs) == 1
+        assert review_jobs[0]["status"] == JobStatus.PENDING.value
+        assert repo.get_job(str(watchdog["job_id"]))["status"] == JobStatus.COMPLETED.value
+    finally:
+        repo.close()

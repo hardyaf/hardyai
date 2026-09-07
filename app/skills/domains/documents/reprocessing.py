@@ -55,6 +55,9 @@ class DocumentReprocessingService:
         owner_id: str,
         idempotency_key: str,
         processing_tier: str = "default",
+        operation_id: str | None = None,
+        tool_id: str | None = None,
+        arguments_hash: str | None = None,
     ) -> dict[str, Any]:
         record = self.repository.get(document_id, owner_id=owner_id)
         if record is None or not DocumentAccessPolicy.can_read(record=record, user_id=owner_id):
@@ -118,6 +121,9 @@ class DocumentReprocessingService:
             resource_lane=resource_lane,
             fallback_from_run_id=fallback_from_run_id,
             request_key=request_key,
+            operation_id=operation_id,
+            tool_id=tool_id,
+            arguments_hash=arguments_hash,
         )
         enqueue_confirmed = True
         try:
@@ -125,6 +131,9 @@ class DocumentReprocessingService:
                 document_id=document_id,
                 source_version_id=str(run["source_version_id"]),
                 run_id=str(run["run_id"]),
+                operation_id=operation_id,
+                processing_tier=normalized_tier,
+                arguments_hash=arguments_hash,
             )
         except Exception:
             enqueue_confirmed = False
@@ -142,10 +151,19 @@ class DocumentReprocessingService:
     def recover_pending(self, *, limit: int = 100) -> int:
         recovered = 0
         for run in self.repository.pending_processing_runs(limit=limit):
+            tool_operation = self.repository.tool_operation_for_result(str(run["run_id"]))
+            route = str(run.get("route") or "")
             self.enqueuer.enqueue_processing(
                 document_id=str(run["document_id"]),
                 source_version_id=str(run["source_version_id"]),
                 run_id=str(run["run_id"]),
+                operation_id=(
+                    str(tool_operation["operation_id"]) if tool_operation is not None else None
+                ),
+                processing_tier=("review_fallback" if route == "vlm_fallback" else "default"),
+                arguments_hash=(
+                    str(tool_operation["arguments_hash"]) if tool_operation is not None else None
+                ),
             )
             recovered += 1
         return recovered

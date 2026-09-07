@@ -71,7 +71,7 @@ def test_main_conversation_backend_prompt_includes_profiles():
 
         prompt = backend._build_prompt(
             text="teach me how to make pasta",
-            context={"micro_intent": "unknown"},
+            context={"initial_intent": "unknown"},
         )
 
         assert "IDENTITY_MARKER_JARVIS" in prompt
@@ -145,7 +145,7 @@ def test_main_repair_backend_includes_relevant_skill_profile_on_demand():
         text="add milk to groceries",
         context={
             "agent_id": "jarvis",
-            "micro_intent": "lists.add_item",
+            "initial_intent": "lists.add_item",
             "requested_by_user_id": "jordan",
         },
     )
@@ -196,8 +196,6 @@ def test_main_repair_prompt_includes_email_actions_and_scoped_capability_catalog
                     "intents": ["email.list_recent", "email.summarize"],
                     "main_intents": ["email.list_recent", "email.summarize"],
                     "main_enabled": True,
-                    "micro_enabled": False,
-                    "micro_intents": [],
                     "configured": True,
                     "authorized_here": True,
                     "availability": "available",
@@ -216,10 +214,10 @@ def test_main_repair_prompt_includes_email_actions_and_scoped_capability_catalog
     assert "must-not-leak" not in prompt
 
 
-def test_main_conversation_prompt_can_explain_micro_from_runtime_catalog():
+def test_main_conversation_prompt_describes_only_main_runtime_capabilities():
     backend = OllamaMainConversationBackend(base_url="http://localhost:11434", model="test-model")
     prompt = backend._build_prompt(
-        text="what can Micro do?",
+        text="what can you do?",
         context={
             "runtime_capability_catalog": [
                 {
@@ -228,8 +226,6 @@ def test_main_conversation_prompt_can_explain_micro_from_runtime_catalog():
                     "intents": ["lists.add_item", "lists.create_list"],
                     "main_intents": ["lists.add_item", "lists.create_list"],
                     "main_enabled": True,
-                    "micro_enabled": True,
-                    "micro_intents": ["lists.add_item"],
                     "configured": True,
                     "authorized_here": True,
                     "availability": "available",
@@ -238,9 +234,9 @@ def test_main_conversation_prompt_can_explain_micro_from_runtime_catalog():
         },
     )
 
-    assert "Answer capability questions about both Main and Micro" in prompt
-    assert "explicit ! commands" in prompt
-    assert '"micro_intents":["lists.add_item"]' in prompt
+    assert "Answer capability questions from the runtime capability catalog" in prompt
+    assert '"main_intents":["lists.add_item","lists.create_list"]' in prompt
+    assert "micro_intents" not in prompt
 
 
 def test_main_turn_decision_prompt_enforces_action_commitment_boundary():
@@ -1862,7 +1858,7 @@ def test_main_turn_decision_loads_compact_contracts_for_authorized_candidate_ski
     prompt = backend._build_turn_decision_prompt(
         text="can you summarize my emails",
         context={
-            "micro_intent": "conversation.general",
+            "initial_intent": "conversation.general",
             "runtime_skill_intents": ["conversation.general"],
             "runtime_capability_catalog": [
                 {

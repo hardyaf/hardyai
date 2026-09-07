@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import sqlite3
 
-from app.db.document_schema import DOCUMENT_SCHEMA_VERSION, initialize_document_schema
+from app.db.document_schema import (
+    DOCUMENT_SCHEMA_VERSION,
+    evaluate_document_schema_reader_compatibility,
+    initialize_document_schema,
+)
 
 
 def test_v5_artifact_storage_key_migration_preserves_links_and_allows_run_reuse(tmp_path) -> None:
@@ -49,7 +53,7 @@ def test_v5_artifact_storage_key_migration_preserves_links_and_allows_run_reuse(
         """
     )
 
-    assert initialize_document_schema(connection) == DOCUMENT_SCHEMA_VERSION == 14
+    assert initialize_document_schema(connection) == DOCUMENT_SCHEMA_VERSION == 15
     connection.execute(
         """
         INSERT INTO document_artifacts VALUES (
@@ -74,7 +78,15 @@ def test_v6_migration_adds_durable_channel_ingress_receipts(tmp_path) -> None:
     connection.execute("PRAGMA user_version = 6")
     connection.commit()
 
-    assert initialize_document_schema(connection) == 14
+    assert initialize_document_schema(connection) == 15
+    tables = {
+        row[0]
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('document_analyses','document_literal_claims')"
+        )
+    }
+    assert tables == {"document_analyses", "document_literal_claims"}
+    assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
     columns = {
         row[1] for row in connection.execute("PRAGMA table_info(document_ingress_receipts)")
     }
@@ -89,7 +101,7 @@ def test_v7_migration_adds_ocr_confidence_and_language_columns(tmp_path) -> None
     connection.execute("PRAGMA user_version = 7")
     connection.commit()
 
-    assert initialize_document_schema(connection) == 14
+    assert initialize_document_schema(connection) == 15
     columns = {row[1] for row in connection.execute("PRAGMA table_info(document_blocks)")}
     assert {"confidence", "language"} <= columns
     connection.close()
@@ -105,7 +117,7 @@ def test_v8_migration_adds_phase6_append_only_classification_and_fields(tmp_path
     connection.execute("PRAGMA user_version = 8")
     connection.commit()
 
-    assert initialize_document_schema(connection) == 14
+    assert initialize_document_schema(connection) == 15
     tables = {
         row[0]
         for row in connection.execute(
@@ -130,7 +142,7 @@ def test_v9_migration_adds_archive_text_visibility_gate(tmp_path) -> None:
     connection.execute("PRAGMA user_version = 9")
     connection.commit()
 
-    assert initialize_document_schema(connection) == 14
+    assert initialize_document_schema(connection) == 15
     columns = {row[1] for row in connection.execute("PRAGMA table_info(documents)")}
     assert "archive_text_visible" in columns
     connection.close()
@@ -144,7 +156,7 @@ def test_v10_migration_adds_phase7_note_proposal_tables(tmp_path) -> None:
     connection.execute("PRAGMA user_version = 10")
     connection.commit()
 
-    assert initialize_document_schema(connection) == 14
+    assert initialize_document_schema(connection) == 15
     tables = {
         row[0]
         for row in connection.execute(
@@ -163,7 +175,7 @@ def test_v11_migration_adds_phase8_contact_proposals(tmp_path) -> None:
     connection.execute("PRAGMA user_version = 11")
     connection.commit()
 
-    assert initialize_document_schema(connection) == 14
+    assert initialize_document_schema(connection) == 15
     columns = {
         row[1] for row in connection.execute("PRAGMA table_info(document_contact_proposals)")
     }
@@ -176,6 +188,7 @@ def test_v11_migration_adds_phase8_contact_proposals(tmp_path) -> None:
     } <= columns
     assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
     connection.close()
+    connection.close()
 
 
 def test_v12_migration_adds_phase9_analyses_and_literal_claims(tmp_path) -> None:
@@ -186,16 +199,80 @@ def test_v12_migration_adds_phase9_analyses_and_literal_claims(tmp_path) -> None
     connection.execute("PRAGMA user_version = 12")
     connection.commit()
 
-    assert initialize_document_schema(connection) == 14
-    tables = {
-        row[0]
-        for row in connection.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('document_analyses','document_literal_claims')"
-        )
+    assert initialize_document_schema(connection) == 15
+
+
+def test_v14_to_v15_adds_compatible_document_tool_operation_ledger(tmp_path) -> None:
+    connection = sqlite3.connect(tmp_path / "documents-v15.db")
+    initialize_document_schema(connection)
+    connection.execute("DROP TABLE document_tool_operations")
+    connection.execute("DROP TABLE document_schema_reader_compatibility")
+    connection.execute("PRAGMA user_version = 14")
+    connection.commit()
+
+    assert initialize_document_schema(connection) == 15
+    assert connection.execute(
+        "SELECT minimum_reader_version, change_class FROM document_schema_reader_compatibility WHERE schema_version=15"
+    ).fetchone() == (14, "additive")
+    columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(document_tool_operations)")
     }
-    assert tables == {"document_analyses", "document_literal_claims"}
+    assert columns == {
+        "operation_id",
+        "tool_id",
+        "arguments_hash",
+        "status",
+        "target_ref",
+        "result_ref",
+        "created_at",
+        "completed_at",
+    }
+    assert "operation_id" in {
+        row[1] for row in connection.execute("PRAGMA table_info(document_field_decisions)")
+    }
+    compatible, reason, version = evaluate_document_schema_reader_compatibility(
+        connection,
+        reader_version=14,
+    )
+    assert (compatible, reason, version) == (True, "additive_reader_bridge", 15)
     assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
     connection.close()
+
+
+def test_document_reader_bridge_fails_closed_for_missing_destructive_or_too_new_rows(
+    tmp_path,
+) -> None:
+    for suffix, row, expected in (
+        ("missing", None, "compatibility_table_missing"),
+        ("destructive", (15, 14, "destructive", "bad"), "change_not_additive"),
+        ("too-new", (15, 15, "additive", "bad"), "minimum_reader_too_new"),
+    ):
+        connection = sqlite3.connect(tmp_path / f"documents-{suffix}.db")
+        if row is not None:
+            connection.execute(
+                """
+                CREATE TABLE document_schema_reader_compatibility (
+                    schema_version INTEGER PRIMARY KEY,
+                    minimum_reader_version INTEGER NOT NULL,
+                    change_class TEXT NOT NULL,
+                    description TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                "INSERT INTO document_schema_reader_compatibility VALUES (?, ?, ?, ?)",
+                row,
+            )
+        connection.execute("PRAGMA user_version = 15")
+        connection.commit()
+        compatible, reason, version = evaluate_document_schema_reader_compatibility(
+            connection,
+            reader_version=14,
+        )
+        assert compatible is False
+        assert reason == expected
+        assert version == 15
+        connection.close()
 
 
 def test_v13_migration_adds_content_free_restricted_access_audit(tmp_path) -> None:
@@ -205,7 +282,7 @@ def test_v13_migration_adds_content_free_restricted_access_audit(tmp_path) -> No
     connection.execute("PRAGMA user_version = 13")
     connection.commit()
 
-    assert initialize_document_schema(connection) == 14
+    assert initialize_document_schema(connection) == 15
     columns = {
         row[1]
         for row in connection.execute("PRAGMA table_info(document_restricted_access_audit)")

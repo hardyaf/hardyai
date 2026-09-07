@@ -1,19 +1,25 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
+import re
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Callable, Mapping, Protocol
+from urllib.parse import urlsplit
 
 from app.core.tool_loop_types import (
+    CrossToolTransferBinding,
     ModelStep,
+    ProvenanceEvaluation,
     RequestTemporalContext,
     SkillSelection,
     ToolLoopContractError,
     ToolObservation,
     validate_descriptor_payload,
 )
+from app.reviews.service import action_channel_binding_hash, action_request_binding_hash
 from app.skills.tool_contracts import (
     FrozenDict,
     ToolContractError,
@@ -45,6 +51,17 @@ class MainToolModel(Protocol):
 UtcClock = Callable[[], datetime]
 MonotonicClock = Callable[[], float]
 ShadowObservationProvider = Callable[..., dict[str, Any] | None]
+ApprovalBindingProvider = Callable[[dict[str, Any]], dict[str, str] | None]
+_ANSWER_URL_PATTERN = re.compile(r"https?://[^\s)>\]}]+", flags=re.IGNORECASE)
+_CROSS_DOMAIN_SENSITIVITY_MATRIX = {
+    "normal": frozenset(
+        {"normal", "private", "financial", "identity", "highly_restricted"}
+    ),
+    "private": frozenset({"private", "highly_restricted"}),
+    "financial": frozenset({"financial", "highly_restricted"}),
+    "identity": frozenset({"identity", "highly_restricted"}),
+    "highly_restricted": frozenset(),
+}
 
 
 @dataclass(frozen=True)
@@ -90,6 +107,8 @@ class MainToolLoop:
         utc_clock: UtcClock | None = None,
         monotonic_clock: MonotonicClock | None = None,
         shadow_observation_provider: ShadowObservationProvider | None = None,
+        action_approval_service: Any | None = None,
+        approval_binding_provider: ApprovalBindingProvider | None = None,
     ) -> None:
         normalized_mode = str(execution_mode or "off").strip().casefold()
         if normalized_mode not in {"off", "shadow", "active"}:
@@ -105,6 +124,8 @@ class MainToolLoop:
         self._utc_clock = utc_clock or (lambda: datetime.now(UTC))
         self._monotonic_clock = monotonic_clock or time.monotonic
         self._shadow_observation_provider = shadow_observation_provider
+        self._action_approval_service = action_approval_service
+        self._approval_binding_provider = approval_binding_provider
 
     @property
     def mode(self) -> str:
@@ -526,6 +547,7 @@ class MainToolLoop:
         receipt_refs: list[str] = []
         policies: list[str] = []
         committed_effect_count = 0
+        portions: list[dict[str, Any]] = []
 
         while steps < self._limits.max_steps and failures < self._limits.max_failures:
             if self._deadline_reached(started):
@@ -541,6 +563,7 @@ class MainToolLoop:
                     receipt_refs=receipt_refs,
                     policies=policies,
                     committed_effect_count=committed_effect_count,
+                    portions=portions,
                 )
             steps += 1
             if initial_step is not None:
@@ -569,14 +592,30 @@ class MainToolLoop:
                     raw_step if isinstance(raw_step, Mapping) else {},
                     allowed_tool_ids=set(descriptors),
                 )
-            except ToolLoopContractError:
+            except ToolLoopContractError as exc:
+                rejected_tool_id = (
+                    str(raw_step.get("tool_id") or "").strip().casefold()
+                    if isinstance(raw_step, Mapping)
+                    else ""
+                )
+                rejected_descriptor = descriptors.get(rejected_tool_id)
+                if rejected_descriptor is not None:
+                    portions.append(
+                        self._rejected_portion(
+                            descriptor=rejected_descriptor,
+                            reason=exc.code,
+                        )
+                    )
                 failures += 1
                 continue
 
             if step.mode == "respond":
                 outcome = self._outcome(
                     status="responded",
-                    message=step.message or "Completed.",
+                    message=self._sanitize_untrusted_answer_links(
+                        step.message or "Completed.",
+                        observations=observations,
+                    ),
                     stop_reason="model_responded",
                     selected_skill_ids=list(selection.selected_skill_ids),
                     tool_ids=list(descriptors),
@@ -585,6 +624,7 @@ class MainToolLoop:
                     observation_count=len(observations),
                     committed_effect_count=committed_effect_count,
                     persistence=self._most_restrictive_policy(policies),
+                    portions=portions,
                     steps=steps,
                     failures=failures,
                     elapsed_ms=self._elapsed_ms(started),
@@ -604,6 +644,12 @@ class MainToolLoop:
                 user_id=user_id,
                 agent_id=agent_id,
             ):
+                portions.append(
+                    self._rejected_portion(
+                        descriptor=descriptor,
+                        reason="tool_contract_changed",
+                    )
+                )
                 return self._partial_stop(
                     reason="tool_contract_changed",
                     steps=steps,
@@ -616,6 +662,7 @@ class MainToolLoop:
                     receipt_refs=receipt_refs,
                     policies=policies,
                     committed_effect_count=committed_effect_count,
+                    portions=portions,
                 )
             policies.append(descriptor.persistence)
             arguments = thaw_json(step.arguments or {})
@@ -640,16 +687,31 @@ class MainToolLoop:
                 )
             try:
                 validated = validate_descriptor_payload(descriptor, arguments)
-                self._validate_p3_provenance(
+                provenance = self._validate_p3_provenance(
                     step=step,
                     text=text,
                     observations=observations,
                     destination_descriptor=descriptor,
                     observation_descriptors=observation_descriptors,
                 )
-            except ToolLoopContractError:
+                provenance = self._reauthorize_transfer_sources(
+                    evaluation=provenance,
+                    observation_descriptors=observation_descriptors,
+                    user_id=user_id,
+                    agent_id=agent_id,
+                    source_interface=source_interface,
+                    context=context,
+                )
+            except ToolLoopContractError as exc:
+                portions.append(
+                    self._rejected_portion(
+                        descriptor=descriptor,
+                        reason=exc.code,
+                    )
+                )
                 failures += 1
                 continue
+            policies.append(provenance.effective_persistence)
             args_hash = hashlib.sha256(canonical_json(validated).encode("utf-8")).hexdigest()
             call_key = (descriptor.tool_id, descriptor.contract_version, args_hash)
             if descriptor.effect != "read" and call_key in accepted_effectful:
@@ -670,6 +732,7 @@ class MainToolLoop:
                         receipt_refs=receipt_refs,
                         policies=policies,
                         committed_effect_count=committed_effect_count,
+                        portions=portions,
                     )
                 read_counts[call_key] = current_count + 1
             call_ordinal += 1
@@ -686,12 +749,22 @@ class MainToolLoop:
                 observations=observations,
                 operation_ids=operation_ids,
                 receipt_refs=receipt_refs,
+                provenance=provenance,
             )
             observation = call_outcome.get("_observation")
             if not isinstance(observation, ToolObservation):
                 return {key: value for key, value in call_outcome.items() if not key.startswith("_")}
             observation_chars = len(canonical_json(observation.to_model_dict()))
             total_observation_chars += observation_chars
+            observations.append(observation)
+            observation_descriptors[observation.observation_ref] = descriptor
+            portions.append(self._call_portion(descriptor=descriptor, observation=observation))
+            if descriptor.effect != "read" and (
+                observation.committed_effect or observation.status == "ok"
+            ):
+                accepted_effectful[call_key] = observation
+            if descriptor.effect != "read" and observation.committed_effect:
+                committed_effect_count += 1
             if (
                 observation_chars > min(descriptor.max_observation_chars, self._limits.max_observation_chars)
                 or total_observation_chars > self._limits.max_total_observation_chars
@@ -708,15 +781,8 @@ class MainToolLoop:
                     receipt_refs=receipt_refs,
                     policies=policies,
                     committed_effect_count=committed_effect_count,
+                    portions=portions,
                 )
-            observations.append(observation)
-            observation_descriptors[observation.observation_ref] = descriptor
-            if descriptor.effect != "read" and (
-                observation.committed_effect or observation.status == "ok"
-            ):
-                accepted_effectful[call_key] = observation
-            if descriptor.effect != "read" and observation.committed_effect:
-                committed_effect_count += 1
             if observation.status in {"denied", "waiting_for_approval", "queued"}:
                 return self._outcome(
                     status=observation.status,
@@ -729,6 +795,7 @@ class MainToolLoop:
                     observation_count=len(observations),
                     committed_effect_count=sum(1 for item in observations if item.committed_effect),
                     persistence=self._most_restrictive_policy(policies),
+                    portions=portions,
                     steps=steps,
                     failures=failures,
                     elapsed_ms=self._elapsed_ms(started),
@@ -750,7 +817,68 @@ class MainToolLoop:
             receipt_refs=receipt_refs,
             policies=policies,
             committed_effect_count=committed_effect_count,
+            portions=portions,
         )
+
+    @classmethod
+    def _sanitize_untrusted_answer_links(
+        cls,
+        message: str,
+        *,
+        observations: list[ToolObservation],
+    ) -> str:
+        untrusted = [item for item in observations if item.untrusted]
+        if not untrusted:
+            return str(message or "")
+        allowed_urls: set[str] = set()
+        for observation in untrusted:
+            cls._collect_safe_url_fields(thaw_json(observation.payload), allowed_urls)
+
+        def replace(match: re.Match[str]) -> str:
+            raw = match.group(0)
+            candidate = raw.rstrip(".,;:!?")
+            suffix = raw[len(candidate) :]
+            if candidate in allowed_urls:
+                return raw
+            return "[unverified link removed]" + suffix
+
+        return _ANSWER_URL_PATTERN.sub(replace, str(message or ""))
+
+    @classmethod
+    def _collect_safe_url_fields(cls, value: Any, output: set[str]) -> None:
+        if isinstance(value, Mapping):
+            for key, child in value.items():
+                if str(key).strip().casefold() == "url" and isinstance(child, str):
+                    candidate = child.strip()
+                    if cls._is_safe_public_answer_url(candidate):
+                        output.add(candidate)
+                else:
+                    cls._collect_safe_url_fields(child, output)
+        elif isinstance(value, (list, tuple)):
+            for child in value:
+                cls._collect_safe_url_fields(child, output)
+
+    @staticmethod
+    def _is_safe_public_answer_url(value: str) -> bool:
+        if not value or len(value) > 2_048 or any(ord(char) <= 32 for char in value):
+            return False
+        try:
+            parsed = urlsplit(value)
+            parsed.port
+        except ValueError:
+            return False
+        if parsed.scheme.casefold() not in {"http", "https"} or not parsed.hostname:
+            return False
+        if parsed.username is not None or parsed.password is not None:
+            return False
+        hostname = parsed.hostname.rstrip(".").casefold()
+        if hostname == "localhost" or hostname.endswith((".localhost", ".local")):
+            return False
+        try:
+            address = ipaddress.ip_address(hostname)
+        except ValueError:
+            return True
+        return address.is_global
 
     def _dispatch_call(
         self,
@@ -767,7 +895,11 @@ class MainToolLoop:
         observations: list[ToolObservation],
         operation_ids: list[str],
         receipt_refs: list[str],
+        provenance: ProvenanceEvaluation | None = None,
     ) -> dict[str, Any]:
+        provenance = provenance or ProvenanceEvaluation(
+            effective_persistence=descriptor.persistence
+        )
         operation_id, _, normalized = tool_operation_id(
             root_request_id=request_id,
             tool_id=descriptor.tool_id,
@@ -795,40 +927,262 @@ class MainToolLoop:
                 call_ordinal=call_ordinal,
             )
         else:
-            result = self._authorized_executor.execute_tool(
-                tool_id=descriptor.tool_id,
-                contract_version=descriptor.contract_version,
-                arguments=thaw_json(normalized),
-                source_interface=source_interface,
-                requested_by_user_id=user_id,
-                agent_id=agent_id,
-                request_context=context,
-                request_id=request_id,
-                call_ordinal=call_ordinal,
-            )
+            if descriptor.approval_rule == "denied":
+                result = {
+                    "status": "policy_denied",
+                    "message": "This action is prohibited by its approval policy.",
+                    "denial_reason": "tool_approval_policy_denied",
+                    "payload": {},
+                }
+            elif provenance.requires_formal_approval and descriptor.effect == "read":
+                result = {
+                    "status": "policy_denied",
+                    "message": "This cross-domain transfer requires formal action approval.",
+                    "denial_reason": "cross_domain_read_approval_unavailable",
+                    "payload": {},
+                }
+            elif provenance.requires_formal_approval or descriptor.approval_rule == "always" or (
+                descriptor.approval_rule == "conditional"
+                and self._conditional_approval_required(
+                    descriptor,
+                    normalized,
+                    provenance=provenance,
+                )
+            ):
+                result, operation_id = self._pause_for_approval(
+                    descriptor=descriptor,
+                    arguments=thaw_json(normalized),
+                    request_id=request_id,
+                    call_ordinal=call_ordinal,
+                    session=session,
+                    user_id=user_id,
+                    agent_id=agent_id,
+                    source_interface=source_interface,
+                    context=context,
+                    default_operation_id=operation_id,
+                    provenance=provenance,
+                )
+            else:
+                result = self._authorized_executor.execute_tool(
+                    tool_id=descriptor.tool_id,
+                    contract_version=descriptor.contract_version,
+                    arguments=thaw_json(normalized),
+                    source_interface=source_interface,
+                    requested_by_user_id=user_id,
+                    agent_id=agent_id,
+                    request_context=context,
+                    request_id=request_id,
+                    call_ordinal=call_ordinal,
+                )
         observation = self._observation_from_result(
             descriptor=descriptor,
             operation_id=operation_id,
             result=result,
+            inherited_untrusted=provenance.untrusted,
         )
-        if observation.status == "denied":
-            return self._outcome(
-                status="denied",
-                message=observation.safe_message,
-                stop_reason="tool_denied",
-                tool_ids=[descriptor.tool_id],
-                operation_ids=operation_ids,
-                receipt_refs=receipt_refs,
-                observation_count=len(observations) + 1,
-                committed_effect_count=sum(1 for item in observations if item.committed_effect),
-                persistence=descriptor.persistence,
-            )
-        if observation.committed_effect or descriptor.effect == "read":
+        if operation_id not in operation_ids:
             operation_ids.append(operation_id)
         for ref in observation.receipt_refs:
             if ref not in receipt_refs:
                 receipt_refs.append(ref)
         return {"_observation": observation}
+
+    @staticmethod
+    def _conditional_approval_required(
+        descriptor: ToolDescriptor,
+        arguments: Mapping[str, Any],
+        *,
+        provenance: ProvenanceEvaluation | None = None,
+    ) -> bool:
+        for condition in descriptor.approval_conditions:
+            if condition == "cross_domain_no_store_transfer":
+                return bool(
+                    provenance is not None
+                    and provenance.has_transfer
+                    and provenance.requires_formal_approval
+                )
+            if condition == "external_recipients_present":
+                for key in ("attendees", "guests", "invitees", "recipients"):
+                    value = arguments.get(key)
+                    if isinstance(value, (list, tuple)) and value:
+                        return True
+                    if isinstance(value, str) and value.strip():
+                        return True
+        return False
+
+    def _pause_for_approval(
+        self,
+        *,
+        descriptor: ToolDescriptor,
+        arguments: dict[str, Any],
+        request_id: str,
+        call_ordinal: int,
+        session: Any,
+        user_id: str,
+        agent_id: str,
+        source_interface: str,
+        context: dict[str, Any],
+        default_operation_id: str,
+        provenance: ProvenanceEvaluation,
+    ) -> tuple[dict[str, Any], str]:
+        available_dependencies = context.get("available_runtime_dependencies")
+        approval_runtime_available = isinstance(
+            available_dependencies, (list, tuple, set, frozenset)
+        ) and "action_approval" in {
+            str(item or "").strip().casefold() for item in available_dependencies
+        }
+        if (
+            self._action_approval_service is None
+            or self._pending_interactions is None
+            or self._approval_binding_provider is None
+            or not approval_runtime_available
+        ):
+            return (
+                {
+                    "status": "policy_denied",
+                    "message": "This action requires approval, but approval is not available.",
+                    "denial_reason": "action_approval_unavailable",
+                    "payload": {},
+                },
+                default_operation_id,
+            )
+        prepare = getattr(self._authorized_executor, "prepare_tool_call", None)
+        if not callable(prepare):
+            return (
+                {
+                    "status": "policy_denied",
+                    "message": "This action could not be bound for approval.",
+                    "denial_reason": "action_approval_executor_unavailable",
+                    "payload": {},
+                },
+                default_operation_id,
+            )
+        prepared = prepare(
+            tool_id=descriptor.tool_id,
+            contract_version=descriptor.contract_version,
+            arguments=arguments,
+            source_interface=source_interface,
+            requested_by_user_id=user_id,
+            agent_id=agent_id,
+            request_context=context,
+            request_id=request_id,
+            call_ordinal=call_ordinal,
+        )
+        if isinstance(prepared, Mapping):
+            return dict(prepared), default_operation_id
+        envelope = getattr(prepared, "envelope", None)
+        prepared_descriptor = getattr(prepared, "descriptor", None)
+        resource_version = str(getattr(prepared, "resource_version", "") or "").strip()
+        if envelope is None or not isinstance(prepared_descriptor, ToolDescriptor) or not resource_version:
+            return (
+                {
+                    "status": "policy_denied",
+                    "message": "This action could not be bound for approval.",
+                    "denial_reason": "action_approval_binding_invalid",
+                    "payload": {},
+                },
+                default_operation_id,
+            )
+        binding = self._approval_binding_provider(dict(context))
+        if not isinstance(binding, Mapping):
+            return (
+                {
+                    "status": "policy_denied",
+                    "message": "The protected approval destination is unavailable.",
+                    "denial_reason": "action_approval_destination_unavailable",
+                    "payload": {},
+                },
+                envelope.operation_id,
+            )
+        approver = str(binding.get("approver_principal") or "").strip()
+        if not approver:
+            return (
+                {
+                    "status": "policy_denied",
+                    "message": "The protected approval identity is unavailable.",
+                    "denial_reason": "action_approval_approver_unavailable",
+                    "payload": {},
+                },
+                envelope.operation_id,
+            )
+        expires_at = (self._utc_clock().astimezone(UTC) + timedelta(hours=1)).isoformat()
+        try:
+            transfer_manifest = (
+                self._transfer_manifest(
+                    prepared=prepared,
+                    provenance=provenance,
+                )
+                if provenance.has_transfer
+                else None
+            )
+            created = self._action_approval_service.create_action_proposal(
+                envelope=envelope,
+                descriptor=prepared_descriptor,
+                resource_version=resource_version,
+                approver_principal=approver,
+                expires_at=expires_at,
+                destination_purpose="human_reviews",
+                transfer_manifest=transfer_manifest,
+            )
+        except Exception:  # Fail closed at the durable approval boundary.
+            return (
+                {
+                    "status": "policy_denied",
+                    "message": "The approval request could not be durably recorded.",
+                    "denial_reason": "action_approval_persistence_failed",
+                    "payload": {},
+                },
+                envelope.operation_id,
+            )
+        proposal = created.get("proposal") if isinstance(created, Mapping) else None
+        review = created.get("review") if isinstance(created, Mapping) else None
+        job = created.get("notification_job") if isinstance(created, Mapping) else None
+        if not all(isinstance(item, Mapping) for item in (proposal, review, job)):
+            return (
+                {
+                    "status": "policy_denied",
+                    "message": "The approval request could not be verified.",
+                    "denial_reason": "action_approval_receipt_invalid",
+                    "payload": {},
+                },
+                envelope.operation_id,
+            )
+        if str(proposal.get("state") or "") != "pending" or str(job.get("status") or "") not in {
+            "pending",
+            "retry",
+            "running",
+            "completed",
+        }:
+            return (
+                {
+                    "status": "policy_denied",
+                    "message": "This exact approval request is no longer pending.",
+                    "denial_reason": "action_approval_not_pending",
+                    "payload": {},
+                },
+                envelope.operation_id,
+            )
+        self._pending_interactions.store_action_approval_pointer(
+            session=session,
+            tool_id=envelope.tool_id,
+            skill_id=envelope.skill_id,
+            proposal_id=str(proposal["proposal_id"]),
+            review_id=str(review["review_id"]),
+            operation_id=envelope.operation_id,
+            proposal_hash=str(proposal["proposal_hash"]),
+            expires_at=str(proposal["expires_at"]),
+            persistence=provenance.effective_persistence,
+        )
+        return (
+            {
+                "status": "waiting_for_approval",
+                "message": "The exact action is waiting for approval.",
+                "payload": {},
+                "review_id": str(review["review_id"]),
+                "job_id": str(job["job_id"]),
+            },
+            envelope.operation_id,
+        )
 
     def _observation_from_result(
         self,
@@ -836,6 +1190,7 @@ class MainToolLoop:
         descriptor: ToolDescriptor,
         operation_id: str,
         result: Any,
+        inherited_untrusted: bool = False,
     ) -> ToolObservation:
         if not isinstance(result, Mapping):
             result = {"status": "error", "message": "The tool returned no valid result.", "payload": {}}
@@ -858,15 +1213,18 @@ class MainToolLoop:
             properties = descriptor.observation_schema.get("properties")
             allowed = set(properties) if isinstance(properties, Mapping) else set()
             payload = {key: value for key, value in result.items() if key in allowed}
-        try:
-            validated_payload = validate_descriptor_payload(
-                descriptor,
-                payload,
-                observation=True,
-            )
-        except ToolLoopContractError:
-            status = "terminal_error"
+        if status in {"waiting_for_approval", "denied"} and not payload:
             validated_payload = FrozenDict.from_mapping({})
+        else:
+            try:
+                validated_payload = validate_descriptor_payload(
+                    descriptor,
+                    payload,
+                    observation=True,
+                )
+            except ToolLoopContractError:
+                status = "terminal_error"
+                validated_payload = FrozenDict.from_mapping({})
         message = str(result.get("message") or "").strip()
         if not message:
             message = {
@@ -888,7 +1246,7 @@ class MainToolLoop:
         reviews = self._opaque_refs(result, "review_id", "review_ids")
         jobs = self._opaque_refs(result, "job_id", "job_ids")
         committed = bool(result.get("committed_effect")) or (
-            descriptor.effect != "read" and status in {"ok", "queued"}
+            descriptor.effect != "read" and status == "ok"
         )
         observation_ref = "obs_v1_" + hashlib.sha256(
             f"{operation_id}\n{status}\n{canonical_json(validated_payload)}".encode("utf-8")
@@ -904,7 +1262,8 @@ class MainToolLoop:
             receipt_refs=receipts,
             review_refs=reviews,
             job_refs=jobs,
-            untrusted=bool(result.get("untrusted", False)),
+            untrusted=bool(result.get("untrusted", False)) or bool(inherited_untrusted),
+            operation_id=operation_id,
         )
 
     def _store_clarification(
@@ -1071,122 +1430,449 @@ class MainToolLoop:
         observations: list[ToolObservation],
         destination_descriptor: ToolDescriptor | None = None,
         observation_descriptors: Mapping[str, ToolDescriptor] | None = None,
-    ) -> None:
+    ) -> ProvenanceEvaluation:
+        """Validate exact P9 provenance without granting execution authority."""
+
         observation_by_ref = {item.observation_ref: item for item in observations}
+        unique_observations = list(observation_by_ref.values())
         descriptor_by_ref = dict(observation_descriptors or {})
+        arguments = thaw_json(step.arguments or {})
+        destination_policy = (
+            destination_descriptor.persistence
+            if destination_descriptor is not None
+            else "standard"
+        )
+        claims_by_destination = {
+            str(claim.get("destination_pointer") or ""): claim
+            for claim in step.provenance_claims
+        }
+        for pointer in claims_by_destination:
+            if not MainToolLoop._pointer_exists(arguments, pointer):
+                raise ToolLoopContractError("provenance_destination_missing")
+        if not observations:
+            if any(
+                claim.get("kind") == "observation_derived"
+                for claim in step.provenance_claims
+            ):
+                raise ToolLoopContractError("provenance_observation_ref_stale")
+            return ProvenanceEvaluation(effective_persistence=destination_policy)
+
+        leaf_pointers = MainToolLoop._leaf_pointers(arguments)
+        model_derived_destinations: set[str] = set()
+        observation_claims: list[tuple[Mapping[str, Any], ToolObservation, ToolDescriptor, Any]] = []
         for claim in step.provenance_claims:
-            if claim.get("kind") != "observation_derived":
+            destination_pointer = str(claim.get("destination_pointer") or "")
+            destination_found, destination_value = MainToolLoop._pointer_value(
+                arguments,
+                destination_pointer,
+            )
+            if not destination_found:
+                raise ToolLoopContractError("provenance_destination_missing")
+            if claim.get("kind") == "request_derived":
+                if not MainToolLoop._request_value_appears(
+                    destination_value,
+                    MainToolLoop._normalize_request_text(text),
+                ):
+                    model_derived_destinations.add(destination_pointer)
                 continue
-            if destination_descriptor is None or str(claim.get("derivation") or "") != "copy":
-                raise ToolLoopContractError("observation_transfer_not_available_until_p9")
+            if destination_descriptor is None:
+                raise ToolLoopContractError("observation_transfer_destination_missing")
             source_ref = str(claim.get("source_observation_ref") or "")
             source_observation = observation_by_ref.get(source_ref)
             source_descriptor = descriptor_by_ref.get(source_ref)
             source_pointer = str(claim.get("source_pointer") or "")
-            destination_found, destination_value = MainToolLoop._pointer_value(
-                thaw_json(step.arguments or {}),
-                str(claim.get("destination_pointer") or ""),
+            if source_observation is None or source_descriptor is None:
+                raise ToolLoopContractError("provenance_observation_ref_stale")
+            source_domain = source_descriptor.tool_id.partition(".")[0]
+            destination_domain = destination_descriptor.tool_id.partition(".")[0]
+            cross_domain = source_domain != destination_domain
+            transfer_field = MainToolLoop._matching_transfer_field(
+                descriptor=source_descriptor,
+                source_pointer=source_pointer,
+                cross_domain=cross_domain,
             )
-            if (source_observation is None or source_descriptor is None) and destination_found:
-                recovered = MainToolLoop._unique_transfer_source(
-                    observations=observations,
-                    observation_descriptors=descriptor_by_ref,
-                    destination_descriptor=destination_descriptor,
-                    source_pointer=source_pointer,
-                    destination_value=destination_value,
-                )
-                if recovered is not None:
-                    source_observation, source_descriptor = recovered
-            if (
-                source_observation is None
-                or source_descriptor is None
-                or source_observation.untrusted
-                or source_descriptor.skill_id != destination_descriptor.skill_id
-            ):
-                raise ToolLoopContractError("observation_transfer_not_available_until_p9")
-            if not any(
-                field.scope == "same_domain"
-                and MainToolLoop._pointer_pattern_matches(field.pattern, source_pointer)
-                for field in source_descriptor.transferable_observation_fields
-            ):
+            if transfer_field is None:
                 raise ToolLoopContractError("observation_transfer_field_denied")
+            if cross_domain and not MainToolLoop._sensitivity_compatible(
+                source_descriptor.sensitivity,
+                destination_descriptor.sensitivity,
+            ):
+                raise ToolLoopContractError("observation_transfer_sensitivity_denied")
             source_found, source_value = MainToolLoop._transfer_pointer_value(
                 thaw_json(source_observation.payload),
                 source_pointer,
             )
             if (
                 not source_found
-                or not destination_found
-                or not MainToolLoop._transfer_values_match(
-                    source_value=source_value,
-                    destination_value=destination_value,
-                    source_pointer=source_pointer,
+                or (
+                    str(claim.get("derivation") or "") == "copy"
+                    and not MainToolLoop._transfer_values_match(
+                        source_value=source_value,
+                        destination_value=destination_value,
+                        source_pointer=source_pointer,
+                    )
                 )
             ):
                 raise ToolLoopContractError("observation_transfer_value_mismatch")
-        request_claim_destinations = {
-            str(claim.get("destination_pointer") or "")
-            for claim in step.provenance_claims
-            if claim.get("kind") == "request_derived"
-        }
-        claimed_destinations = {
-            str(claim.get("destination_pointer") or "")
-            for claim in step.provenance_claims
-        }
-        arguments = thaw_json(step.arguments or {})
-        if any(
-            not MainToolLoop._pointer_exists(arguments, pointer)
-            for pointer in request_claim_destinations
-        ):
-            raise ToolLoopContractError("provenance_destination_missing")
-        if not observations:
-            return
-        normalized_text = " ".join(str(text or "").casefold().split())
-        for key, value in arguments.items():
-            pointer = "/" + str(key).replace("~", "~0").replace("/", "~1")
-            if pointer in claimed_destinations or any(
-                destination.startswith(pointer + "/")
-                for destination in claimed_destinations
-            ):
+            observation_claims.append(
+                (claim, source_observation, source_descriptor, transfer_field)
+            )
+            model_derived_destinations.add(destination_pointer)
+
+        normalized_text = MainToolLoop._normalize_request_text(text)
+        for pointer, value in leaf_pointers:
+            matching_claims = [
+                claim
+                for destination, claim in claims_by_destination.items()
+                if MainToolLoop._pointer_covers(destination, pointer)
+            ]
+            if len(matching_claims) > 1:
+                raise ToolLoopContractError("provenance_destination_overlap")
+            if matching_claims:
                 continue
             if MainToolLoop._request_value_appears(value, normalized_text):
                 continue
             raise ToolLoopContractError("argument_provenance_unproven")
 
+        destination_domain = (
+            destination_descriptor.tool_id.partition(".")[0]
+            if destination_descriptor is not None
+            else ""
+        )
+        cross_domain = bool(
+            model_derived_destinations
+            and destination_descriptor is not None
+            and any(
+                descriptor.tool_id.partition(".")[0] != destination_domain
+                for descriptor in descriptor_by_ref.values()
+            )
+        )
+        inherited_untrusted = bool(model_derived_destinations) and any(
+            observation.untrusted for observation in unique_observations
+        )
+        if not cross_domain:
+            return ProvenanceEvaluation(
+                effective_persistence=MainToolLoop._most_restrictive_policy(
+                    [destination_policy]
+                    + (
+                        [
+                            descriptor.persistence
+                            for descriptor in descriptor_by_ref.values()
+                        ]
+                        if model_derived_destinations
+                        else []
+                    )
+                ),
+                untrusted=inherited_untrusted,
+            )
+
+        named_by_ref: dict[str, list[tuple[Mapping[str, Any], Any]]] = {}
+        for claim, source_observation, _source_descriptor, transfer_field in observation_claims:
+            named_by_ref.setdefault(source_observation.observation_ref, []).append(
+                (claim, transfer_field)
+            )
+        bindings: list[CrossToolTransferBinding] = []
+        effective_policies = [destination_policy]
+        for observation in unique_observations:
+            source_descriptor = descriptor_by_ref.get(observation.observation_ref)
+            if source_descriptor is None:
+                raise ToolLoopContractError("provenance_observation_descriptor_missing")
+            source_domain = source_descriptor.tool_id.partition(".")[0]
+            source_crosses_domain = source_domain != destination_domain
+            if source_crosses_domain and not MainToolLoop._sensitivity_compatible(
+                source_descriptor.sensitivity,
+                destination_descriptor.sensitivity,
+            ):
+                raise ToolLoopContractError("observation_transfer_sensitivity_denied")
+            named = named_by_ref.get(observation.observation_ref, [])
+            if named:
+                for claim, transfer_field in named:
+                    source_pointer = str(claim.get("source_pointer") or "")
+                    if source_crosses_domain and transfer_field.scope != "cross_domain":
+                        raise ToolLoopContractError("observation_transfer_field_denied")
+                    source_found, source_value = MainToolLoop._transfer_pointer_value(
+                        thaw_json(observation.payload),
+                        source_pointer,
+                    )
+                    if not source_found:
+                        raise ToolLoopContractError("observation_transfer_value_mismatch")
+                    bindings.append(
+                        MainToolLoop._transfer_binding(
+                            observation=observation,
+                            descriptor=source_descriptor,
+                            transfer_pattern=transfer_field.pattern,
+                            transfer_scope=transfer_field.scope,
+                            source_pointer=source_pointer,
+                            subtree=source_value,
+                        )
+                    )
+            else:
+                cross_fields = [
+                    field
+                    for field in source_descriptor.transferable_observation_fields
+                    if field.scope == "cross_domain"
+                ]
+                if not cross_fields:
+                    raise ToolLoopContractError("observation_exposure_transfer_denied")
+                bindings.append(
+                    MainToolLoop._transfer_binding(
+                        observation=observation,
+                        descriptor=source_descriptor,
+                        transfer_pattern=cross_fields[0].pattern,
+                        transfer_scope=cross_fields[0].scope,
+                        source_pointer="",
+                        subtree=thaw_json(observation.payload),
+                    )
+                )
+            effective_policies.append(source_descriptor.persistence)
+
+        if not bindings:
+            raise ToolLoopContractError("cross_domain_transfer_source_missing")
+        destination_values = tuple(
+            (
+                pointer,
+                hashlib.sha256(
+                    canonical_json(MainToolLoop._pointer_value(arguments, pointer)[1]).encode(
+                        "utf-8"
+                    )
+                ).hexdigest(),
+            )
+            for pointer in sorted(model_derived_destinations)
+        )
+        return ProvenanceEvaluation(
+            destination_values=destination_values,
+            sources=tuple(bindings),
+            effective_persistence=MainToolLoop._most_restrictive_policy(
+                effective_policies
+            ),
+            untrusted=any(binding.untrusted for binding in bindings),
+            cross_domain=True,
+            requires_formal_approval=any(
+                binding.persistence == "no_store" for binding in bindings
+            ),
+        )
+
     @staticmethod
-    def _unique_transfer_source(
+    def _normalize_request_text(value: str) -> str:
+        return " ".join(str(value or "").casefold().split())
+
+    @staticmethod
+    def _pointer_covers(ancestor: str, pointer: str) -> bool:
+        return pointer == ancestor or pointer.startswith(ancestor + "/")
+
+    @staticmethod
+    def _leaf_pointers(value: Any, pointer: str = "") -> list[tuple[str, Any]]:
+        if isinstance(value, Mapping):
+            if not value:
+                return [(pointer, value)]
+            leaves: list[tuple[str, Any]] = []
+            for key, child in value.items():
+                encoded = str(key).replace("~", "~0").replace("/", "~1")
+                leaves.extend(MainToolLoop._leaf_pointers(child, f"{pointer}/{encoded}"))
+            return leaves
+        if isinstance(value, (list, tuple)):
+            if not value:
+                return [(pointer, value)]
+            leaves = []
+            for index, child in enumerate(value):
+                leaves.extend(MainToolLoop._leaf_pointers(child, f"{pointer}/{index}"))
+            return leaves
+        return [(pointer, value)]
+
+    @staticmethod
+    def _matching_transfer_field(
         *,
-        observations: list[ToolObservation],
-        observation_descriptors: Mapping[str, ToolDescriptor],
-        destination_descriptor: ToolDescriptor,
+        descriptor: ToolDescriptor,
         source_pointer: str,
-        destination_value: Any,
-    ) -> tuple[ToolObservation, ToolDescriptor] | None:
-        candidates: list[tuple[ToolObservation, ToolDescriptor]] = []
-        for observation in observations:
-            descriptor = observation_descriptors.get(observation.observation_ref)
+        cross_domain: bool,
+    ) -> Any | None:
+        for field in descriptor.transferable_observation_fields:
             if (
-                descriptor is None
-                or observation.untrusted
-                or descriptor.skill_id != destination_descriptor.skill_id
+                (not cross_domain or field.scope == "cross_domain")
+                and MainToolLoop._pointer_pattern_matches(field.pattern, source_pointer)
+            ):
+                return field
+        return None
+
+    @staticmethod
+    def _sensitivity_compatible(source: str, destination: str) -> bool:
+        return str(destination) in _CROSS_DOMAIN_SENSITIVITY_MATRIX.get(
+            str(source),
+            frozenset(),
+        )
+
+    @staticmethod
+    def _transfer_binding(
+        *,
+        observation: ToolObservation,
+        descriptor: ToolDescriptor,
+        transfer_pattern: str,
+        transfer_scope: str,
+        source_pointer: str,
+        subtree: Any,
+    ) -> CrossToolTransferBinding:
+        return CrossToolTransferBinding(
+            observation_ref=observation.observation_ref,
+            operation_id=observation.operation_id,
+            skill_id=descriptor.skill_id,
+            domain=descriptor.tool_id.partition(".")[0],
+            tool_id=descriptor.tool_id,
+            contract_version=descriptor.contract_version,
+            descriptor_hash=hashlib.sha256(
+                canonical_json(descriptor.to_storage_dict()).encode("utf-8")
+            ).hexdigest(),
+            resource_version="",
+            transfer_pattern=transfer_pattern,
+            transfer_scope=transfer_scope,
+            source_pointer=source_pointer,
+            subtree_hash=hashlib.sha256(
+                canonical_json(subtree).encode("utf-8")
+            ).hexdigest(),
+            sensitivity=descriptor.sensitivity,
+            persistence=descriptor.persistence,
+            untrusted=observation.untrusted,
+        )
+
+    def _reauthorize_transfer_sources(
+        self,
+        *,
+        evaluation: ProvenanceEvaluation,
+        observation_descriptors: Mapping[str, ToolDescriptor],
+        user_id: str,
+        agent_id: str,
+        source_interface: str,
+        context: dict[str, Any],
+    ) -> ProvenanceEvaluation:
+        if not evaluation.has_transfer:
+            return evaluation
+        authorize = getattr(self._authorized_executor, "authorize_tool_reference", None)
+        if not callable(authorize):
+            raise ToolLoopContractError("transfer_source_reauthorization_unavailable")
+        rebound: list[CrossToolTransferBinding] = []
+        authorization_cache: dict[tuple[str, int], Any] = {}
+        for binding in evaluation.sources:
+            if not binding.operation_id:
+                raise ToolLoopContractError("transfer_source_operation_missing")
+            key = (binding.tool_id, binding.contract_version)
+            current = authorization_cache.get(key)
+            if current is None:
+                current = authorize(
+                    tool_id=binding.tool_id,
+                    contract_version=binding.contract_version,
+                    source_interface=source_interface,
+                    requested_by_user_id=user_id,
+                    agent_id=agent_id,
+                    request_context=context,
+                )
+                authorization_cache[key] = current
+            if isinstance(current, Mapping):
+                raise ToolLoopContractError("transfer_source_unauthorized")
+            descriptor = getattr(current, "descriptor", None)
+            observed_descriptor = observation_descriptors.get(binding.observation_ref)
+            descriptor_hash = str(getattr(current, "descriptor_hash", "") or "")
+            resource_version = str(getattr(current, "resource_version", "") or "")
+            if (
+                not isinstance(descriptor, ToolDescriptor)
+                or not isinstance(observed_descriptor, ToolDescriptor)
+                or not descriptor_hash
+                or not resource_version
+                or canonical_json(descriptor.to_storage_dict())
+                != canonical_json(observed_descriptor.to_storage_dict())
+                or descriptor_hash != binding.descriptor_hash
+                or descriptor.tool_id != binding.tool_id
+                or descriptor.skill_id != binding.skill_id
+                or descriptor.sensitivity != binding.sensitivity
+                or descriptor.persistence != binding.persistence
                 or not any(
-                    field.scope == "same_domain"
-                    and MainToolLoop._pointer_pattern_matches(field.pattern, source_pointer)
+                    field.pattern == binding.transfer_pattern
+                    and field.scope == binding.transfer_scope
                     for field in descriptor.transferable_observation_fields
                 )
             ):
-                continue
-            source_found, source_value = MainToolLoop._transfer_pointer_value(
-                thaw_json(observation.payload),
-                source_pointer,
+                raise ToolLoopContractError("transfer_source_contract_changed")
+            rebound.append(
+                CrossToolTransferBinding(
+                    observation_ref=binding.observation_ref,
+                    operation_id=binding.operation_id,
+                    skill_id=binding.skill_id,
+                    domain=binding.domain,
+                    tool_id=binding.tool_id,
+                    contract_version=binding.contract_version,
+                    descriptor_hash=descriptor_hash,
+                    resource_version=resource_version,
+                    transfer_pattern=binding.transfer_pattern,
+                    transfer_scope=binding.transfer_scope,
+                    source_pointer=binding.source_pointer,
+                    subtree_hash=binding.subtree_hash,
+                    sensitivity=binding.sensitivity,
+                    persistence=binding.persistence,
+                    untrusted=binding.untrusted,
+                )
             )
-            if source_found and MainToolLoop._transfer_values_match(
-                source_value=source_value,
-                destination_value=destination_value,
-                source_pointer=source_pointer,
-            ):
-                candidates.append((observation, descriptor))
-        return candidates[0] if len(candidates) == 1 else None
+        return ProvenanceEvaluation(
+            destination_values=evaluation.destination_values,
+            sources=tuple(rebound),
+            effective_persistence=evaluation.effective_persistence,
+            untrusted=evaluation.untrusted,
+            cross_domain=evaluation.cross_domain,
+            requires_formal_approval=evaluation.requires_formal_approval,
+        )
+
+    @staticmethod
+    def _transfer_manifest(
+        *,
+        prepared: Any,
+        provenance: ProvenanceEvaluation,
+    ) -> dict[str, Any]:
+        envelope = getattr(prepared, "envelope", None)
+        descriptor = getattr(prepared, "descriptor", None)
+        descriptor_hash = str(getattr(prepared, "descriptor_hash", "") or "")
+        resource_version = str(getattr(prepared, "resource_version", "") or "")
+        if (
+            envelope is None
+            or not isinstance(descriptor, ToolDescriptor)
+            or not descriptor_hash
+            or not resource_version
+            or not provenance.has_transfer
+        ):
+            raise ToolLoopContractError("transfer_manifest_binding_invalid")
+        destination_values: list[dict[str, str]] = []
+        for pointer, _preparation_hash in provenance.destination_values:
+            found, value = MainToolLoop._pointer_value(
+                thaw_json(envelope.arguments),
+                pointer,
+            )
+            if not found:
+                raise ToolLoopContractError("transfer_destination_changed")
+            destination_values.append(
+                {
+                    "destination_pointer": pointer,
+                    "value_hash": hashlib.sha256(
+                        canonical_json(value).encode("utf-8")
+                    ).hexdigest(),
+                }
+            )
+        return {
+            "manifest_version": 1,
+            "request_id": envelope.root_request_id,
+            "request_hash": action_request_binding_hash(envelope),
+            "requester_user_id": envelope.user_id,
+            "agent_id": envelope.agent_id,
+            "channel_binding_hash": action_channel_binding_hash(envelope),
+            "destination": {
+                "skill_id": envelope.skill_id,
+                "domain": envelope.tool_id.partition(".")[0],
+                "tool_id": envelope.tool_id,
+                "contract_version": envelope.contract_version,
+                "descriptor_hash": descriptor_hash,
+                "resource_version": resource_version,
+                "arguments_hash": envelope.arguments_hash,
+                "sensitivity": descriptor.sensitivity,
+                "persistence": descriptor.persistence,
+            },
+            "destination_values": destination_values,
+            "sources": [source.to_manifest_dict() for source in provenance.sources],
+        }
 
     @staticmethod
     def _request_value_appears(value: Any, normalized_text: str) -> bool:
@@ -1195,37 +1881,13 @@ class MainToolLoop:
         if isinstance(value, str):
             token = " ".join(value.casefold().split())
             return bool(token and token in normalized_text)
-        if isinstance(value, bool) or value is None:
-            return False
+        if isinstance(value, bool):
+            return str(value).casefold() in normalized_text.split()
+        if value is None:
+            return "null" in normalized_text.split()
         if isinstance(value, int):
             token = str(value).casefold()
-            if token and token in normalized_text:
-                return True
-            number_words = {
-                0: "zero",
-                1: "one",
-                2: "two",
-                3: "three",
-                4: "four",
-                5: "five",
-                6: "six",
-                7: "seven",
-                8: "eight",
-                9: "nine",
-                10: "ten",
-                11: "eleven",
-                12: "twelve",
-                13: "thirteen",
-                14: "fourteen",
-                15: "fifteen",
-                16: "sixteen",
-                17: "seventeen",
-                18: "eighteen",
-                19: "nineteen",
-                20: "twenty",
-            }
-            word = number_words.get(value)
-            return bool(word and word in normalized_text.split())
+            return bool(token and token in normalized_text.split())
         if isinstance(value, float):
             token = str(value).casefold()
             return bool(token and token in normalized_text)
@@ -1326,11 +1988,11 @@ class MainToolLoop:
     def _pointer_pattern_matches(pattern: str, pointer: str) -> bool:
         pattern_segments = str(pattern or "")[1:].split("/")
         pointer_segments = str(pointer or "")[1:].split("/")
-        if len(pattern_segments) != len(pointer_segments):
+        if len(pattern_segments) > len(pointer_segments):
             return False
         return all(
             expected == "*" or expected == observed
-            for expected, observed in zip(pattern_segments, pointer_segments, strict=True)
+            for expected, observed in zip(pattern_segments, pointer_segments, strict=False)
         )
 
     @staticmethod
@@ -1566,12 +2228,14 @@ class MainToolLoop:
         receipt_refs: list[str],
         policies: list[str],
         committed_effect_count: int,
+        portions: list[dict[str, Any]],
     ) -> dict[str, Any]:
         committed = max(0, int(committed_effect_count))
-        if committed:
+        completed = sum(1 for item in portions if item.get("state") == "completed")
+        if completed:
             message = (
-                f"I completed {committed} bounded tool call(s), then stopped safely. "
-                "The committed receipt references are included with this result."
+                f"I completed {completed} bounded tool call(s), then stopped safely. "
+                "Any committed receipt references are included with this result."
             )
             status = "partial"
         else:
@@ -1588,10 +2252,56 @@ class MainToolLoop:
             observation_count=observation_count,
             committed_effect_count=committed,
             persistence=self._most_restrictive_policy(policies),
+            portions=portions,
             steps=steps,
             failures=failures,
             elapsed_ms=self._elapsed_ms(started),
         )
+
+    @staticmethod
+    def _call_portion(
+        *,
+        descriptor: ToolDescriptor,
+        observation: ToolObservation,
+    ) -> dict[str, Any]:
+        if observation.status == "waiting_for_approval":
+            state = "pending"
+        elif observation.status == "queued" and not observation.committed_effect:
+            state = "pending"
+        elif observation.status == "denied":
+            state = "denied"
+        elif observation.status in {"terminal_error", "retryable_error", "needs_input"}:
+            state = "failed"
+        else:
+            state = "completed"
+        return {
+            "state": state,
+            "tool_id": descriptor.tool_id,
+            "operation_id": observation.operation_id,
+            "status": observation.status,
+            "committed_effect": observation.committed_effect,
+            "receipt_refs": list(observation.receipt_refs),
+            "review_refs": list(observation.review_refs),
+            "job_refs": list(observation.job_refs),
+        }
+
+    @staticmethod
+    def _rejected_portion(
+        *,
+        descriptor: ToolDescriptor,
+        reason: str,
+    ) -> dict[str, Any]:
+        return {
+            "state": "denied",
+            "tool_id": descriptor.tool_id,
+            "operation_id": "",
+            "status": "rejected_before_operation",
+            "committed_effect": False,
+            "receipt_refs": [],
+            "review_refs": [],
+            "job_refs": [],
+            "reason_code": str(reason or "tool_call_rejected")[:120],
+        }
 
     @staticmethod
     def _most_restrictive_policy(values: list[str]) -> str:
@@ -1619,6 +2329,7 @@ class MainToolLoop:
         committed_effect_count: int = 0,
         would_call_count: int = 0,
         persistence: str = "standard",
+        portions: list[dict[str, Any]] | None = None,
         question: str | None = None,
         missing_fields: list[str] | None = None,
         steps: int = 0,
@@ -1637,6 +2348,14 @@ class MainToolLoop:
             "committed_effect_count": max(0, int(committed_effect_count)),
             "would_call_count": max(0, int(would_call_count)),
             "persistence": str(persistence or "standard"),
+            "portions": {
+                state: [
+                    dict(item)
+                    for item in (portions or [])
+                    if item.get("state") == state
+                ]
+                for state in ("completed", "pending", "denied", "failed")
+            },
             "steps": max(0, int(steps)),
             "failures": max(0, int(failures)),
             "elapsed_ms": max(0, int(elapsed_ms)),

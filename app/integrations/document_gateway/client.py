@@ -107,6 +107,9 @@ class DocumentGatewayClient:
         review_decision_id: str,
         decision_kind: str,
         corrected_value: str | None = None,
+        operation_id: str | None = None,
+        tool_id: str | None = None,
+        arguments_hash: str | None = None,
     ) -> dict[str, Any]:
         return self._json(
             "POST",
@@ -119,7 +122,38 @@ class DocumentGatewayClient:
                 "review_decision_id": review_decision_id,
                 "decision_kind": decision_kind,
                 "corrected_value": corrected_value,
+                "operation_id": operation_id,
+                "tool_id": tool_id,
+                "arguments_hash": arguments_hash,
             },
+        )
+
+    def confirm_fields(
+        self,
+        *,
+        document_id: str,
+        source_version_id: str,
+        confirmations: list[dict[str, str]],
+        operation_id: str,
+        tool_id: str,
+        arguments_hash: str,
+    ) -> dict[str, Any]:
+        return self._json(
+            "POST",
+            f"/documents/{quote(document_id, safe='')}/field-confirmations",
+            json={
+                "source_version_id": source_version_id,
+                "confirmations": confirmations[:64],
+                "operation_id": operation_id,
+                "tool_id": tool_id,
+                "arguments_hash": arguments_hash,
+            },
+        )
+
+    def confirmed_field_decisions(self, *, operation_id: str) -> dict[str, Any]:
+        return self._json(
+            "GET",
+            f"/documents/tool-operations/{quote(operation_id, safe='')}/field-confirmations",
         )
 
     def classifications(self, *, document_id: str) -> dict[str, Any]:
@@ -158,6 +192,9 @@ class DocumentGatewayClient:
         document_id: str,
         idempotency_key: str,
         processing_tier: str = "default",
+        operation_id: str | None = None,
+        tool_id: str | None = None,
+        arguments_hash: str | None = None,
     ) -> dict[str, Any]:
         return self._json(
             "POST",
@@ -165,6 +202,9 @@ class DocumentGatewayClient:
             json={
                 "idempotency_key": str(idempotency_key)[:120],
                 "processing_tier": str(processing_tier),
+                "operation_id": operation_id,
+                "tool_id": tool_id,
+                "arguments_hash": arguments_hash,
             },
         )
 
@@ -183,11 +223,51 @@ class DocumentGatewayClient:
         document_id: str,
         field_name: str,
         proposed_value: str,
+        operation_id: str | None = None,
+        tool_id: str | None = None,
+        arguments_hash: str | None = None,
     ) -> dict[str, Any]:
         return self._json(
             "POST",
             f"/documents/{quote(document_id, safe='')}/metadata-proposals",
-            json={"field_name": field_name, "proposed_value": proposed_value},
+            json={
+                "field_name": field_name,
+                "proposed_value": proposed_value,
+                "operation_id": operation_id,
+                "tool_id": tool_id,
+                "arguments_hash": arguments_hash,
+            },
+        )
+
+    def tool_operation(self, *, operation_id: str) -> dict[str, Any] | None:
+        try:
+            return self._json(
+                "GET",
+                f"/documents/tool-operations/{quote(operation_id, safe='')}",
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return None
+            raise
+
+    def complete_tool_operation(
+        self,
+        *,
+        operation_id: str,
+        tool_id: str,
+        arguments_hash: str,
+        target_ref: str,
+        result_ref: str,
+    ) -> dict[str, Any]:
+        return self._json(
+            "POST",
+            f"/documents/tool-operations/{quote(operation_id, safe='')}/complete",
+            json={
+                "tool_id": tool_id,
+                "arguments_hash": arguments_hash,
+                "target_ref": target_ref,
+                "result_ref": result_ref,
+            },
         )
 
     def bind_metadata_review(

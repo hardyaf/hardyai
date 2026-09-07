@@ -1,3 +1,5 @@
+import copy
+import re
 from pathlib import Path
 from datetime import date, time
 
@@ -37,6 +39,254 @@ def _query_service(monkeypatch, *, config, response):
     )
     monkeypatch.setattr(service, "_build_calendar_service", lambda _credentials: api)
     return service, api
+
+
+class _TypedHttpError(Exception):
+    def __init__(self, status_code: int) -> None:
+        super().__init__(f"http-{status_code}")
+        self.status_code = status_code
+
+
+class _TypedRequest:
+    def __init__(self, callback):
+        self.headers = {}
+        self._callback = callback
+
+    def execute(self):
+        return self._callback(self.headers)
+
+
+class _TypedEventsResource:
+    def __init__(self) -> None:
+        self.events_by_id = {}
+        self.calls = []
+        self.effect_count = 0
+        self.patch_uncertain_after_effect = False
+        self.delete_uncertain_after_effect = False
+
+    def insert(self, **kwargs):
+        self.calls.append(("insert", copy.deepcopy(kwargs)))
+
+        def execute(_headers):
+            event_id = kwargs["body"]["id"]
+            if event_id in self.events_by_id:
+                raise _TypedHttpError(409)
+            event = copy.deepcopy(kwargs["body"])
+            event.update({"etag": "etag-1", "status": "confirmed"})
+            self.events_by_id[event_id] = event
+            self.effect_count += 1
+            return copy.deepcopy(event)
+
+        return _TypedRequest(execute)
+
+    def get(self, **kwargs):
+        self.calls.append(("get", dict(kwargs)))
+
+        def execute(_headers):
+            event = self.events_by_id.get(kwargs["eventId"])
+            if event is None:
+                raise _TypedHttpError(404)
+            return copy.deepcopy(event)
+
+        return _TypedRequest(execute)
+
+    def list(self, **kwargs):
+        self.calls.append(("list", dict(kwargs)))
+        return _TypedRequest(
+            lambda _headers: {"items": [copy.deepcopy(item) for item in self.events_by_id.values()]}
+        )
+
+    def patch(self, **kwargs):
+        self.calls.append(("patch", copy.deepcopy(kwargs)))
+
+        def execute(headers):
+            current = self.events_by_id[kwargs["eventId"]]
+            if headers.get("If-Match") != current["etag"]:
+                raise _TypedHttpError(412)
+            current.update(copy.deepcopy(kwargs["body"]))
+            current["etag"] = "etag-2"
+            self.effect_count += 1
+            if self.patch_uncertain_after_effect:
+                self.patch_uncertain_after_effect = False
+                raise TimeoutError("after provider commit")
+            return copy.deepcopy(current)
+
+        return _TypedRequest(execute)
+
+    def delete(self, **kwargs):
+        self.calls.append(("delete", dict(kwargs)))
+
+        def execute(headers):
+            current = self.events_by_id[kwargs["eventId"]]
+            if headers.get("If-Match") != current["etag"]:
+                raise _TypedHttpError(412)
+            del self.events_by_id[kwargs["eventId"]]
+            self.effect_count += 1
+            if self.delete_uncertain_after_effect:
+                self.delete_uncertain_after_effect = False
+                raise TimeoutError("after provider delete")
+            return None
+
+        return _TypedRequest(execute)
+
+
+class _TypedCalendarApi:
+    def __init__(self) -> None:
+        self.resource = _TypedEventsResource()
+
+    def events(self):
+        return self.resource
+
+
+def _typed_service(monkeypatch):
+    service = GoogleCalendarLiveService("unused.yaml")
+    api = _TypedCalendarApi()
+    config = {
+        "calendar": {
+            "default_timezone": "America/New_York",
+            "house_person_name": "House",
+            "people": [
+                {"person_name": "House", "calendar_id": "house-provider-id", "account_key": "house"}
+            ],
+        },
+        "oauth": {},
+    }
+    monkeypatch.setattr(service, "_load_permissions", lambda: config)
+    monkeypatch.setattr(service, "_authorized_calendar_service", lambda **_kwargs: api)
+    return service, api
+
+
+def test_typed_create_uses_deterministic_provider_id_and_reconciles_duplicate(monkeypatch):
+    service, api = _typed_service(monkeypatch)
+    arguments = service.canonicalize_typed_write(
+        tool_id="calendar.create_event",
+        arguments={
+            "title": "Dentist",
+            "start": "2026-09-03T10:00:00-04:00",
+            "end": "2026-09-03T11:00:00-04:00",
+            "all_day": False,
+            "timezone": "America/New_York",
+            "calendar_scope": "default",
+        },
+    )
+    operation_id = "toolop_v1_" + "a" * 64
+
+    first = service.execute_typed_create(
+        operation_id=operation_id,
+        arguments_hash="b" * 64,
+        arguments=arguments,
+        include_invites=False,
+    )
+    replay = service.execute_typed_create(
+        operation_id=operation_id,
+        arguments_hash="b" * 64,
+        arguments=arguments,
+        include_invites=False,
+    )
+
+    provider_id = first["payload"]["provider_event_id"]
+    assert provider_id == GoogleCalendarLiveService.typed_event_id(operation_id)
+    assert len(provider_id) == 58
+    assert re.fullmatch(r"[a-v0-9]+", provider_id)
+    insert = next(call for call in api.resource.calls if call[0] == "insert")
+    assert insert[1]["sendUpdates"] == "none"
+    assert insert[1]["body"]["extendedProperties"]["private"] == {
+        "jarvisOperationId": operation_id,
+        "jarvisArgumentsHash": "b" * 64,
+    }
+    assert replay["payload"]["idempotent_replay"] is True
+    assert api.resource.effect_count == 1
+
+
+def test_typed_invited_create_is_one_insert_with_send_updates_all(monkeypatch):
+    service, api = _typed_service(monkeypatch)
+    arguments = service.canonicalize_typed_write(
+        tool_id="calendar.create_event_with_invites",
+        arguments={
+            "title": "Planning",
+            "start": "2026-09-04T09:00:00-04:00",
+            "end": "2026-09-04T09:30:00-04:00",
+            "all_day": False,
+            "timezone": "America/New_York",
+            "calendar_scope": "House",
+            "invitee_emails": ["guest@example.com"],
+        },
+    )
+    result = service.execute_typed_create(
+        operation_id="toolop_v1_" + "c" * 64,
+        arguments_hash="d" * 64,
+        arguments=arguments,
+        include_invites=True,
+    )
+
+    assert result["status"] == "ok"
+    insert = next(call for call in api.resource.calls if call[0] == "insert")
+    assert insert[1]["sendUpdates"] == "all"
+    assert insert[1]["body"]["attendees"] == [{"email": "guest@example.com"}]
+
+
+def test_typed_update_and_delete_reconcile_uncertain_commits_without_repeat(monkeypatch):
+    service, api = _typed_service(monkeypatch)
+    create_arguments = service.canonicalize_typed_write(
+        tool_id="calendar.create_event",
+        arguments={
+            "title": "Original",
+            "start": "2026-09-05T10:00:00-04:00",
+            "end": "2026-09-05T11:00:00-04:00",
+            "all_day": False,
+            "timezone": "America/New_York",
+            "calendar_scope": "default",
+        },
+    )
+    created = service.execute_typed_create(
+        operation_id="toolop_v1_" + "e" * 64,
+        arguments_hash="f" * 64,
+        arguments=create_arguments,
+        include_invites=False,
+    )
+    target = created["payload"]
+    update_arguments = service.canonicalize_typed_write(
+        tool_id="calendar.update_event",
+        arguments={
+            "event_ref": target["event_ref"],
+            "event_start": target["event"]["start"],
+            "calendar_scope": "House",
+            "timezone": "America/New_York",
+            "patch": {"title": "Updated"},
+        },
+    )
+    api.resource.patch_uncertain_after_effect = True
+    updated = service.execute_typed_update(
+        operation_id="toolop_v1_" + "1" * 64,
+        arguments_hash="2" * 64,
+        arguments=update_arguments,
+    )
+
+    assert updated["status"] == "ok"
+    assert updated["payload"]["event"]["title"] == "Updated"
+    assert updated["payload"]["idempotent_replay"] is True
+    patch_request = next(call for call in api.resource.calls if call[0] == "patch")
+    assert "attendees" not in patch_request[1]["body"]
+
+    delete_arguments = service.canonicalize_typed_write(
+        tool_id="calendar.delete_event",
+        arguments={
+            "event_ref": updated["payload"]["event_ref"],
+            "event_start": updated["payload"]["event"]["start"],
+            "calendar_scope": "House",
+            "timezone": "America/New_York",
+        },
+    )
+    api.resource.delete_uncertain_after_effect = True
+    deleted = service.execute_typed_delete(
+        operation_id="toolop_v1_" + "3" * 64,
+        arguments_hash="4" * 64,
+        arguments=delete_arguments,
+    )
+
+    assert deleted["status"] == "ok"
+    assert deleted["payload"]["event"]["deleted"] is True
+    assert api.resource.effect_count == 3
 
 
 def test_calendar_update_helpers_preserve_date_for_all_day_conversion():

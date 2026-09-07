@@ -54,7 +54,26 @@ class UnixDocumentEnqueueClient:
         document_id: str,
         source_version_id: str,
         run_id: str,
+        operation_id: str | None = None,
+        processing_tier: str = "default",
+        arguments_hash: str | None = None,
     ) -> str:
+        if operation_id:
+            normalized_operation_id = str(operation_id).strip()
+            if not normalized_operation_id.startswith("toolop_v1_"):
+                raise ValueError("invalid operation id")
+            return self._request(
+                {
+                    "version": 1,
+                    "operation": "enqueue_document_tool_process",
+                    "document_id": _validated_uuid(document_id),
+                    "source_version_id": _validated_uuid(source_version_id),
+                    "run_id": _validated_uuid(run_id),
+                    "operation_id": normalized_operation_id,
+                    "processing_tier": str(processing_tier).strip().casefold(),
+                    "arguments_hash": _validated_sha256(arguments_hash),
+                }
+            )
         return self._request(
             {
                 "version": 1,
@@ -184,6 +203,33 @@ class DocumentEnqueueSocketServer:
                             document_id=_validated_uuid(request.get("document_id")),
                             source_version_id=_validated_uuid(request.get("source_version_id")),
                             run_id=_validated_uuid(request.get("run_id")),
+                        )
+                    elif operation == "enqueue_document_tool_process":
+                        if set(request) != {
+                            "version",
+                            "operation",
+                            "document_id",
+                            "source_version_id",
+                            "run_id",
+                            "operation_id",
+                            "processing_tier",
+                            "arguments_hash",
+                        }:
+                            raise ValueError("invalid_request_schema")
+                        operation_id = str(request.get("operation_id") or "").strip()
+                        processing_tier = str(request.get("processing_tier") or "").strip().casefold()
+                        if not operation_id.startswith("toolop_v1_") or processing_tier not in {
+                            "default",
+                            "review_fallback",
+                        }:
+                            raise ValueError("invalid_request_schema")
+                        job_id = owner.enqueuer.enqueue_processing(
+                            document_id=_validated_uuid(request.get("document_id")),
+                            source_version_id=_validated_uuid(request.get("source_version_id")),
+                            run_id=_validated_uuid(request.get("run_id")),
+                            operation_id=operation_id,
+                            processing_tier=processing_tier,
+                            arguments_hash=_validated_sha256(request.get("arguments_hash")),
                         )
                     else:
                         raise ValueError("unsupported_request")

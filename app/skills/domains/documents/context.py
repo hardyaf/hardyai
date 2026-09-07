@@ -5,7 +5,7 @@ from typing import Any, Callable
 
 from app.context.reference_resolver import ReferenceResolver
 from app.context.types import EntityRegistry
-from app.core.micro_jarvis import MicroDecision
+from app.core.types import RoutingDecision
 from app.core.types import Intent, SessionOwner
 from app.skills.domains.documents.query_service import DOCUMENT_INTENTS
 
@@ -134,7 +134,7 @@ class DocumentsContextContract:
         )
         if not matches or not document_ids:
             return decision
-        return MicroDecision(
+        return RoutingDecision(
             intent=Intent.DOCUMENTS_GET,
             confidence=0.99,
             entities={"document_id": document_ids[-1]},

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from app.core.main_jarvis import MainJarvis
-from app.core.micro_jarvis import MicroJarvis
 from tests.router_support import RegistryBackedTestRouter as JarvisRouter
 from app.core.session_store import SessionStore
 from app.core.state_machine import RuntimePowerController
@@ -58,7 +57,6 @@ def test_discord_bindings_isolate_sessions_personas_and_child_actions(tmp_path):
     )
     home = HomeService(sqlite_store=store, default_switch_names=["office test light"])
     router = JarvisRouter(
-        micro_jarvis=MicroJarvis(),
         main_jarvis=MainJarvis(),
         session_store=SessionStore(persistence=store),
         runtime_power=RuntimePowerController(),
@@ -82,7 +80,7 @@ def test_discord_bindings_isolate_sessions_personas_and_child_actions(tmp_path):
                         "auto_channel_session": True,
                         "channel_session_scope": "per_user",
                         "session_channel": "discord.guild.1.channel.2",
-                        "micro_command_explicit": True,
+                        "command_prefix_explicit": True,
                     },
             )
         )

@@ -33,12 +33,15 @@ from app.schemas.documents import (
     DocumentFieldsResponse,
     DocumentFieldDecisionRequest,
     DocumentFieldDecisionResponse,
+    DocumentFieldConfirmationsRequest,
+    DocumentFieldConfirmationsResponse,
     DocumentActionExecutionBindingRequest,
     DocumentActionProposalView,
     DocumentProposalsResponse,
     DocumentStructuredSearchResponse,
     DocumentIntelligenceResponse,
     RestrictedDocumentAccessRequest,
+    DocumentToolOperationCompleteRequest,
 )
 from app.restricted_documents.readiness import evaluate_restricted_workflow
 from app.skills.domains.documents.types import DocumentRecord
@@ -344,6 +347,9 @@ async def reprocess_document(
             owner_id=principal.user_id,
             idempotency_key=body.idempotency_key,
             processing_tier=body.processing_tier,
+            operation_id=body.operation_id,
+            tool_id=body.tool_id,
+            arguments_hash=body.arguments_hash,
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="document_not_found") from exc
@@ -461,6 +467,9 @@ async def create_document_metadata_proposal(
             field_name=body.field_name,
             proposed_value=body.proposed_value,
             sensitivity=record.sensitivity,
+            operation_id=body.operation_id,
+            tool_id=body.tool_id,
+            arguments_hash=body.arguments_hash,
         )
     except (ValueError, RuntimeError) as exc:
         code = str(getattr(exc, "code", "") or "metadata_proposal_rejected")
@@ -658,12 +667,107 @@ async def apply_document_field_decision(
             review_decision_id=body.review_decision_id,
             decision_kind=body.decision_kind,
             corrected_value=body.corrected_value,
+            operation_id=body.operation_id,
+            tool_id=body.tool_id,
+            arguments_hash=body.arguments_hash,
         )
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return DocumentFieldDecisionResponse(**result)
+
+
+@router.post(
+    "/{document_id}/field-confirmations",
+    response_model=DocumentFieldConfirmationsResponse,
+)
+async def apply_document_field_confirmations(
+    document_id: str,
+    body: DocumentFieldConfirmationsRequest,
+    request: Request,
+    principal: RequestPrincipal = Depends(require_operator),
+) -> DocumentFieldConfirmationsResponse:
+    container = _container(request)
+    _enabled(container)
+    if container.repository is None or container.field_corrections is None:
+        raise HTTPException(status_code=503, detail="document_field_corrections_unavailable")
+    canonical_id = _document_id(document_id)
+    record = container.repository.get(canonical_id, owner_id=principal.user_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="document_not_found")
+    try:
+        result = await asyncio.to_thread(
+            container.field_corrections.confirm_many,
+            record=record,
+            user_id=principal.user_id,
+            source_version_id=body.source_version_id,
+            confirmations=[item.model_dump() for item in body.confirmations],
+            operation_id=body.operation_id,
+            tool_id=body.tool_id,
+            arguments_hash=body.arguments_hash,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return DocumentFieldConfirmationsResponse(**result)
+
+
+@router.get("/tool-operations/{operation_id}")
+async def get_document_tool_operation(
+    operation_id: str,
+    request: Request,
+    principal: RequestPrincipal = Depends(require_operator),
+) -> dict[str, Any]:
+    del principal
+    container = _container(request)
+    _enabled(container)
+    row = container.repository.get_tool_operation(str(operation_id))
+    if row is None:
+        raise HTTPException(status_code=404, detail="document_tool_operation_not_found")
+    return row
+
+
+@router.get("/tool-operations/{operation_id}/field-confirmations")
+async def get_document_field_confirmation_result(
+    operation_id: str,
+    request: Request,
+    principal: RequestPrincipal = Depends(require_operator),
+) -> dict[str, Any]:
+    del principal
+    container = _container(request)
+    _enabled(container)
+    try:
+        row = container.repository.get_field_confirmation_result(operation_id=str(operation_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if row is None:
+        raise HTTPException(status_code=404, detail="document_tool_operation_not_found")
+    return row
+
+
+@router.post("/tool-operations/{operation_id}/complete")
+async def complete_document_tool_operation(
+    operation_id: str,
+    body: DocumentToolOperationCompleteRequest,
+    request: Request,
+    principal: RequestPrincipal = Depends(require_operator),
+) -> dict[str, Any]:
+    del principal
+    container = _container(request)
+    _enabled(container)
+    try:
+        return await asyncio.to_thread(
+            container.repository.complete_tool_operation,
+            operation_id=str(operation_id),
+            tool_id=body.tool_id,
+            arguments_hash=body.arguments_hash,
+            target_ref=body.target_ref,
+            result_ref=body.result_ref,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/{document_id}/proposals", response_model=DocumentProposalsResponse)

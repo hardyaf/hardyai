@@ -5,6 +5,11 @@ from datetime import datetime
 from typing import Any, Protocol
 
 
+REVIEW_NOTIFICATION_DISCORD_JOB = "review.notification.discord.v1"
+REVIEW_ACTION_EXECUTION_JOB = "review.action_execution.v1"
+REVIEW_OUTCOME_DISCORD_JOB = "review.outcome.discord.v1"
+
+
 class JobStatus(StrEnum):
     PENDING = "pending"
     RUNNING = "running"

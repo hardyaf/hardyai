@@ -15,10 +15,18 @@ from app.dependencies import (
 from app.services.document_proposal_execution_service import DocumentProposalExecutionService
 from app.reviews.repository import HumanReviewRepository
 from app.reviews.service import HumanReviewService
-from app.reviews.types import ReviewDecisionKind, ReviewState
+from app.reviews.types import ActionProposalState, ReviewDecisionKind, ReviewState
 
 
 router = APIRouter(prefix="/reviews", tags=["reviews"])
+
+
+def _content_free_action_proposal(value: dict[str, Any]) -> dict[str, Any]:
+    result = dict(value)
+    result["destination_arguments_present"] = result.pop("destination_arguments", None) is not None
+    result.pop("batch_manifest", None)
+    result.pop("transfer_manifest", None)
+    return result
 
 
 class ReviewDecisionRequest(BaseModel):
@@ -32,6 +40,33 @@ class ReviewExecutionRequest(BaseModel):
     proposal_id: str = Field(min_length=8, max_length=120)
     decision_id: str = Field(min_length=8, max_length=120)
     operation_id: str = Field(min_length=8, max_length=160, pattern=r"^[A-Za-z0-9_.:-]+$")
+
+
+@router.get("/action-proposals")
+async def list_action_proposals(
+    state: ActionProposalState | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+    _: RequestPrincipal = Depends(require_operator),
+    repository: HumanReviewRepository = Depends(get_human_review_repository),
+) -> dict[str, Any]:
+    return {
+        "proposals": [
+            _content_free_action_proposal(item)
+            for item in repository.list_action_proposals(state=state, limit=limit)
+        ]
+    }
+
+
+@router.get("/action-proposals/{proposal_id}")
+async def get_action_proposal(
+    proposal_id: str,
+    _: RequestPrincipal = Depends(require_operator),
+    repository: HumanReviewRepository = Depends(get_human_review_repository),
+) -> dict[str, Any]:
+    proposal = repository.get_action_proposal(proposal_id)
+    if proposal is None:
+        raise HTTPException(status_code=404, detail="action_proposal_not_found")
+    return {"proposal": _content_free_action_proposal(proposal)}
 
 
 @router.get("")

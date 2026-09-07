@@ -14,8 +14,7 @@ Define how the Jarvis system is structured.
 - validation + execution
 
 ### 3. Agent Layer
-- micro agents (fast)
-- main agent (reasoning)
+- Main reasoning with bounded typed-tool execution
 
 ### 4. Storage Layer
 - SQLite databases

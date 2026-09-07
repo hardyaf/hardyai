@@ -20,7 +20,13 @@ def _pick_first_text(container: dict[str, Any], keys: list[str]) -> str | None:
     return None
 
 
-LIGHT_INTENTS = {"home.set_switch"}
+LIGHT_INTENTS = {
+    "home.set_switch",
+    "home.list_devices",
+    "home.get_device_state",
+    "home.list_switches",
+    "home.get_switch_state",
+}
 
 
 def emit_context_entities(*, intent: str, result: dict[str, Any]) -> list[dict[str, Any]]:
@@ -29,7 +35,9 @@ def emit_context_entities(*, intent: str, result: dict[str, Any]) -> list[dict[s
     status = str(result.get("status") or "").strip().lower()
     if status not in {"ok", "partial"}:
         return []
-    switch_name = str(result.get("switch_name") or "").strip()
+    payload = result.get("payload") if isinstance(result.get("payload"), dict) else {}
+    device = payload.get("device") if isinstance(payload.get("device"), dict) else {}
+    switch_name = str(result.get("switch_name") or device.get("name") or "").strip()
     if not switch_name:
         return []
     aliases = _aliases_for_switch_name(switch_name)
@@ -44,6 +52,8 @@ def emit_context_entities(*, intent: str, result: dict[str, Any]) -> list[dict[s
                 "intent": intent,
                 "status": status,
                 "action": str(result.get("action") or "").strip().lower() or None,
+                "device_ref": str(device.get("device_ref") or "").strip() or None,
+                "simulated": payload.get("simulated") is True,
             },
         }
     ]
@@ -155,7 +165,7 @@ class LightsContextContract:
             missing = []
         decision.confidence = max(float(getattr(decision, "confidence", 0.0)), 0.88)
         if not missing and not has_blocking_ambiguity(decision):
-            decision.recommended_owner = SessionOwner.MICRO
+            decision.recommended_owner = SessionOwner.MAIN
         return decision
 
     def refine_missing_fields(

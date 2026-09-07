@@ -2,7 +2,7 @@ import pytest
 
 from app.context.reference_resolver import ReferenceResolver
 from app.context.types import EntityRegistry, TrackedEntity
-from app.core.micro_jarvis import MicroDecision
+from app.core.types import RoutingDecision
 from app.core.types import Intent, SessionOwner
 from app.skills.context_contracts import ToolArgumentCanonicalizer, default_skill_context_contracts
 
@@ -45,11 +45,11 @@ def test_documents_contract_binds_current_discord_attachment_to_read_action():
         "document_attachment_ids": ["doc-1"],
         "current_document_attachment_ids": ["doc-1"],
     }
-    decision = MicroDecision(
+    decision = RoutingDecision(
         intent=Intent.UNKNOWN,
         confidence=0.0,
         entities={},
-        ambiguity_flags=["micro_bypassed_unprefixed_discord"],
+        ambiguity_flags=["main_only_semantic_routing"],
         recommended_owner=SessionOwner.MAIN,
     )
 
@@ -83,7 +83,7 @@ def test_documents_contract_binds_semantic_followup_but_not_unrelated_recent_tur
     }
 
     def decision():
-        return MicroDecision(
+        return RoutingDecision(
             intent=Intent.UNKNOWN,
             confidence=0.0,
             entities={},
@@ -147,7 +147,7 @@ def test_documents_contract_binds_typed_ocr_escalation_to_recent_discord_attachm
         for item in default_skill_context_contracts(documents_enabled=True)
         if getattr(item, "contract_id", "") == "documents"
     )
-    decision = MicroDecision(
+    decision = RoutingDecision(
         intent=Intent.DOCUMENTS_ESCALATE_OCR,
         confidence=0.91,
         entities={},
@@ -171,7 +171,7 @@ def test_documents_contract_binds_typed_ocr_escalation_to_recent_discord_attachm
     assert "trusted_discord_attachment_binding" in bound.ambiguity_flags
 
     incomplete_correction = contract.bind_request_decision(
-        decision=MicroDecision(
+        decision=RoutingDecision(
             intent=Intent.DOCUMENTS_CORRECT_FIELD,
             confidence=0.91,
             entities={},
@@ -190,7 +190,7 @@ def test_documents_contract_binds_typed_ocr_escalation_to_recent_discord_attachm
     assert incomplete_correction.entities == {"document_id": "doc-1"}
 
     exact_correction = contract.bind_request_decision(
-        decision=MicroDecision(
+        decision=RoutingDecision(
             intent=Intent.DOCUMENTS_CORRECT_FIELD,
             confidence=0.91,
             entities={"field_name": "organization", "corrected_value": "Field Works"},
@@ -344,7 +344,7 @@ def test_lists_contract_resolves_deictic_followup_from_registry():
             )
         ]
     )
-    decision = MicroDecision(
+    decision = RoutingDecision(
         intent=Intent.LIST_GET_ITEMS,
         confidence=0.42,
         entities={"list_name": "that list"},
@@ -363,7 +363,7 @@ def test_lists_contract_resolves_deictic_followup_from_registry():
     assert updated.entities["list_name"] == "groceries"
     assert "deictic_list_reference" not in updated.ambiguity_flags
     assert "list_reference_resolved_from_context" in updated.ambiguity_flags
-    assert updated.recommended_owner == SessionOwner.MICRO
+    assert updated.recommended_owner == SessionOwner.MAIN
     assert updated.confidence >= 0.89
 
 
@@ -622,7 +622,7 @@ def test_calendar_contract_resolves_deictic_event_update_from_registry():
             )
         ]
     )
-    decision = MicroDecision(
+    decision = RoutingDecision(
         intent=Intent.CALENDAR_UPDATE_EVENT,
         confidence=0.94,
         entities={"event_reference": "that", "all_day": True},
@@ -682,7 +682,7 @@ def test_calendar_contract_parses_named_event_and_resolves_memory_handoff():
             }
         ],
     )
-    decision = MicroDecision(
+    decision = RoutingDecision(
         intent=Intent.CALENDAR_UPDATE_EVENT,
         confidence=0.94,
         entities={"event_reference": "that", "all_day": True},

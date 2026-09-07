@@ -6,19 +6,18 @@ from uuid import uuid4
 from app.core.action_execution import ActionExecutionService
 from app.core.domain_context import DomainContextService
 from app.core.main_turn_contract import normalize_main_turn_decision
-from app.core.micro_jarvis import MicroDecision
 from app.core.pending_interaction import PendingInteractionCoordinator
 from app.core.persistence_policy import persistence_policy
 from app.core.session_store import SessionRecord, SessionStore
 from app.core.session_transitions import SessionTransitionService
 from app.core.turn_finalizer import TurnFinalizationOptions, TurnFinalizer
-from app.core.types import MAIN_ACTION_INTENTS, Intent, SessionOwner, SessionState
+from app.core.types import MAIN_ACTION_INTENTS, Intent, RoutingDecision, SessionOwner, SessionState
 from app.schemas.api import AskRequest
 from app.services.event_log import EventLogService
 
 
 ToolFollowup = Callable[..., dict[str, Any] | None]
-RequestDecisionBinder = Callable[..., MicroDecision]
+RequestDecisionBinder = Callable[..., RoutingDecision]
 
 
 class MainTurnCommitmentCoordinator:
@@ -402,7 +401,7 @@ class MainTurnCommitmentCoordinator:
         original_intent = intent
         committed = bind_request_decision(
             session=session,
-            decision=MicroDecision(
+            decision=RoutingDecision(
                 intent=intent,
                 confidence=max(0.0, min(confidence, 1.0)),
                 entities=entities,
