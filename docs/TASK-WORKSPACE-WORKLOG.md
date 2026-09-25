@@ -6,16 +6,20 @@
 
 ## Current status
 
-Implementation and consolidated acceptance are complete through commit
-`4ef0239a5ddb87a23896a4f626684d6d21f540b1`. The final release images still need to be rebuilt and
-bound to the deployment commit; the last fully accepted runner image is
-`sha256:4fa3a3e587cd04b3de18396a89c6d758a35fa0f6357e8c66157d8ca32756cd3c`.
+Implementation, consolidated acceptance, deployment, and post-deployment verification are complete.
+The deployed release commit is `8d7f7d3f6a07c895561af7486a98b555df7933eb`. Exact images:
+
+- application: `sha256:da89146d907614c35ad5f6a347aa783f458856135adef41d5a1eb1813de950d6`
+- bounded runner: `sha256:3b7d27d24413b2874fc0de46db67dfde93393d62609e2a0348cf701bafe11d61`
+
+The local workspace is active at `http://192.168.1.127:8000/`. Authenticate with the existing local
+operator key; the browser exchanges it for the protected operator session cookie and CSRF token.
 
 The existing Google account was reauthorized without expanding scopes, and both Calendar Events and
 Gmail read-only access were verified. Live Calendar acceptance then passed using one clearly labeled,
 non-inviting recurring series. The series was deleted through the hash-bound local approval flow, the
 provider returned a deletion receipt, and an exact-title readback found no remaining fixture. No real
-household event was altered and no invitation was sent. Deployment is the remaining phase.
+household event was altered and no invitation was sent.
 
 ## Reuse map
 
@@ -104,9 +108,39 @@ household event was altered and no invitation was sent. Deployment is the remain
 - Content-minimized evidence is retained in the authorized Ubuntu acceptance staging directory. Key
   records include the affected pytest rerun, migration rehearsal, learning validation, composed task,
   budget/interruption aggregate, and cancellation results.
+- Final release packaging used a fresh public-tree-checked export. The app and runner passed their
+  syntax/import checks, the exact final source passed the 16 focused approval/task-workspace tests,
+  and the exact images passed candidate interface/authentication/worker smoke before production.
+- Production deployment first stopped before cutover when the host-only deployment helper used
+  `python`; commit `8d7f7d3` corrected it to `python3`. No container or release image had switched at
+  that point. The guarded rerun completed the online database backup and cutover.
+- Post-deployment verification through the LAN interface and its operator cookie/CSRF endpoints passed:
+  HTTP 200 rendered the workspace, a task durably paused for budget and resumed, bounded Python
+  published the exact JSON artifact, a persistent preference revision was read back and retired, and
+  the task-worker heartbeat remained visible. Core SQLite is at schema v15.
+- `gpt-oss:20b` was resident at 100% GPU on the RTX 3090 during the production task. Jarvis,
+  accelerator admission, task runner launcher, task worker, and action approval worker were healthy
+  or running on the exact application image after cutover.
+- Existing document/OCR services were not recreated or otherwise changed. Their pre-existing health
+  condition remains: Docling and PaddleOCR are healthy, while document-gateway and PaddleOCR-VL report
+  unhealthy and document-worker is restarting. This is compatibility debt outside this release, not
+  a regression attributed to the task workspace deployment.
 
-## Remaining work
+## Backup and rollback
 
-- Rebuild and record the final application and runner image IDs from the clean release commit.
-- Preserve the production online database backup and rollback image, deploy once with the protected
-  env file, activate the task profile, and complete the short actual-interface verification.
+- Online database backup:
+  `/home/codex/jarvis-poc/backups/task-workspace/releases/20260925T204016Z/jarvis_v2-20260925T204016Z.sqlite3`
+- Previous environment:
+  `/home/codex/jarvis-poc/backups/task-workspace/pre-ff69d8c-runtime.env`
+- Previous source archive:
+  `/home/codex/jarvis-poc/backups/task-workspace/pre-ff69d8c-source.tar.gz`
+- Rollback image: `jarvis-poc-app:rollback-20260925T204016Z`
+  (`sha256:6e289896975c7eb76f5b0a280441a4bbf2436d21628b187ba881d1a03048aa7c`)
+
+The normal rollback is image/config-only because the old reader was explicitly rehearsed against the
+v15 additive database. From `/home/codex/jarvis-poc`, stop the task profile services with the protected
+env file, restore `pre-ff69d8c-runtime.env` to `.env`, retag the rollback image as
+`jarvis-poc-app:local`, and recreate the prior Jarvis/admission services with
+`docker compose --env-file .env -f deploy/docker/compose.yaml ... --no-build`. Restore the database
+backup with `python3 scripts/manage_database.py --database data/jarvis_v2.db restore --replace <backup>`
+only for a full data rollback, after stopping all SQLite-writing Jarvis services.
