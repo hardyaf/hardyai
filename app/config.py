@@ -304,6 +304,7 @@ class Settings:
     plane_api_timeout_seconds: float
     operator_api_key: str
     operator_session_ttl_seconds: int
+    operator_session_cookie_secure: bool
     task_workspace_enabled: bool
     task_workspace_root: str
     task_model_name: str
@@ -822,6 +823,7 @@ settings = Settings(
         300,
         min(_as_int("JARVIS_OPERATOR_SESSION_TTL_SECONDS", 3600), 86400),
     ),
+    operator_session_cookie_secure=_as_bool("JARVIS_OPERATOR_SESSION_COOKIE_SECURE", False),
     task_workspace_enabled=_as_bool("TASK_WORKSPACE_ENABLED", False),
     task_workspace_root=os.getenv(
         "TASK_WORKSPACE_ROOT", "/opt/jarvis/data/task-workspaces"

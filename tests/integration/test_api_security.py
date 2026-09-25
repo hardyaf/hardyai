@@ -66,6 +66,7 @@ def test_operator_cookie_requires_csrf_for_mutation(monkeypatch):
         )
         assert login.status_code == 200
         csrf_token = login.json()["csrf_token"]
+        assert "Secure" not in login.headers["set-cookie"]
         assert client.get("/house/switches").status_code == 200
         assert (
             client.post(

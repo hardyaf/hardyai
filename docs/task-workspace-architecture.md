@@ -22,6 +22,10 @@ records store bounded observations, plans, and receipts. They are not provider m
 volume owns task-local script inputs, work files, and published artifacts; paths are scoped below a hash
 of the owner ID.
 
+The operator key is exchanged once for a signed HTTP-only, SameSite session cookie; mutations also
+require the bound CSRF token. `JARVIS_OPERATOR_SESSION_COOKIE_SECURE` must match the actual browser
+transport: false for the existing local HTTP endpoint and true when an HTTPS reverse proxy is used.
+
 ## Execution flow
 
 1. The API commits a task and `agent.task.v1` job before returning `202`.

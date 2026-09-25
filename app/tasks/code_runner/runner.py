@@ -80,7 +80,6 @@ class TaskCodeRunner:
 
         self._repository.mark_script_running(run_id=run_id)
         broker_token = secrets.token_urlsafe(32)
-        socket_path = ipc_root / "broker.sock"
         ordinal = 0
 
         def handle(request: dict[str, Any]) -> dict[str, Any]:
@@ -130,7 +129,14 @@ class TaskCodeRunner:
                 run_id=run_id,
             )
 
+        ipc_fd: int | None = None
         try:
+            # AF_UNIX pathname sockets are limited to roughly 108 bytes on Linux.
+            # Bind through an open directory descriptor so deeply nested task
+            # workspaces still create the socket inside the exact IPC directory
+            # mounted by the trusted launcher.
+            ipc_fd = os.open(ipc_root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            socket_path = Path(f"/proc/self/fd/{ipc_fd}/broker.sock")
             with TaskCapabilityBroker(
                 socket_path=socket_path,
                 token=broker_token,
@@ -150,13 +156,25 @@ class TaskCodeRunner:
                 "stderr": type(exc).__name__,
                 "exit_code": None,
             }
+        finally:
+            if ipc_fd is not None:
+                os.close(ipc_fd)
         artifacts = self._task_service.published_artifacts(
             owner_id=str(task["owner_id"]), task_id=str(task["task_id"])
         )
-        script_status = "completed"
-        if result.get("timed_out") is True:
+        boundary = self._repository.get_task(task_id=str(task["task_id"]))
+        interrupted = (
+            boundary is None
+            or str(boundary.get("status") or "") != "running"
+            or int(boundary.get("steering_revision") or 0)
+            != int(expected_steering_revision)
+        )
+        script_status = "interrupted" if interrupted else "completed"
+        if not interrupted and result.get("timed_out") is True:
             script_status = "timed_out"
-        elif int(result.get("exit_code") or 0) != 0 or result.get("status") != "ok":
+        elif not interrupted and (
+            int(result.get("exit_code") or 0) != 0 or result.get("status") != "ok"
+        ):
             script_status = "failed"
         persisted = self._repository.finish_script_run(
             run_id=run_id,
@@ -166,12 +184,20 @@ class TaskCodeRunner:
             stderr_text=str(result.get("stderr") or ""),
             artifacts=artifacts,
         )
+        response_status = "ok" if script_status == "completed" else "error"
+        if script_status == "interrupted":
+            response_status = "interrupted"
         return {
-            "status": "ok" if script_status == "completed" else "error",
+            "status": response_status,
             "run_id": run_id,
             "script_status": script_status,
             "exit_code": persisted.get("exit_code"),
             "stdout": persisted.get("stdout_text", ""),
             "stderr": persisted.get("stderr_text", ""),
             "artifacts": artifacts,
+            **(
+                {"error_code": "task_steering_changed"}
+                if script_status == "interrupted"
+                else {}
+            ),
         }

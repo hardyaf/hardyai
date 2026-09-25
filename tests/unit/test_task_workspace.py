@@ -6,6 +6,7 @@ import pytest
 
 from app.jobs.repository import DurableJobRepository
 from app.tasks.repository import TaskConflictError, TaskRepository
+from app.tasks.code_runner.runner import TaskCodeRunner
 from app.tasks.service import TaskApplicationService
 from app.tasks.worker import AgentTaskWorker
 
@@ -247,6 +248,61 @@ def test_owner_pause_wins_over_stale_worker_transition(tmp_path):
         )
     assert repository.get_task(task_id=task["task_id"])["status"] == "paused_user"
     assert paused["steering_revision"] == running["steering_revision"] + 1
+
+
+def test_python_run_is_recorded_interrupted_when_user_steers_during_execution(tmp_path):
+    repository, jobs, service = _runtime(tmp_path)
+    task = service.create_task(
+        owner_id="operator",
+        source_interface="task_workspace",
+        submission_id="submission-script-steering",
+        goal="Run a bounded procedure",
+    )["task"]
+    job = jobs.claim_jobs(
+        job_type="agent.task.v1",
+        worker_id="fixture-worker",
+        limit=1,
+        lease_seconds=60,
+    )[0]
+    running = repository.begin_run(
+        task_id=task["task_id"],
+        job_id=job["job_id"],
+        generation=task["run_generation"],
+    )
+
+    class SteeringLauncher:
+        def run(self, **_kwargs):
+            repository.pause(
+                task_id=task["task_id"],
+                owner_id="operator",
+                expected_revision=running["revision"],
+            )
+            return {
+                "status": "ok",
+                "exit_code": 0,
+                "stdout": "stale output",
+                "stderr": "",
+            }
+
+    runner = TaskCodeRunner(
+        repository=repository,
+        task_service=service,
+        capabilities=_Capabilities(),
+        launcher=SteeringLauncher(),
+    )
+
+    result = runner.run(
+        task=running,
+        agent_id="main",
+        logical_run_id="procedure-1",
+        source="print('stale output')",
+        expected_steering_revision=running["steering_revision"],
+    )
+
+    assert result["status"] == "interrupted"
+    assert result["script_status"] == "interrupted"
+    assert result["error_code"] == "task_steering_changed"
+    assert repository.list_script_runs(task_id=task["task_id"])[0]["status"] == "interrupted"
 
 
 def test_continue_rejects_a_task_that_is_already_running(tmp_path):

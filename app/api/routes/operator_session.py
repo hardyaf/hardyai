@@ -26,7 +26,7 @@ async def create_operator_session(
         key=OPERATOR_COOKIE_NAME,
         value=session_token,
         httponly=True,
-        secure=str(settings.app_env).strip().casefold() == "production",
+        secure=bool(getattr(settings, "operator_session_cookie_secure", False)),
         samesite="strict",
         max_age=max(60, int(settings.operator_session_ttl_seconds)),
         path="/",
