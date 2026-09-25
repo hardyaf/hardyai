@@ -164,6 +164,43 @@ def _call(name, arguments):
     }
 
 
+def test_task_worker_projects_the_established_jarvis_agent_identity(tmp_path):
+    repository, jobs, service = _runtime(tmp_path)
+    task = service.create_task(
+        owner_id="operator",
+        source_interface="task_workspace",
+        submission_id="submission-agent-identity",
+        goal="Discover authorized capabilities",
+    )["task"]
+
+    class CapturingCapabilities(_Capabilities):
+        agent_id = ""
+
+        def discover(self, **kwargs):
+            self.agent_id = str(kwargs.get("agent_id") or "")
+            return super().discover(**kwargs)
+
+    capabilities = CapturingCapabilities()
+    worker = AgentTaskWorker(
+        repository=repository,
+        jobs=jobs,
+        model=_Model(
+            [
+                _call("discover_capabilities", {"query": "documents"}),
+                _call("finish_task", {"result": "Done", "summary": "Done"}),
+            ]
+        ),
+        capabilities=capabilities,
+        code_runner=_CodeRunner(),
+    )
+
+    result = worker.run_once()[0]
+
+    assert result["status"] == "completed"
+    assert capabilities.agent_id == "jarvis"
+    assert repository.get_task(task_id=task["task_id"])["status"] == "completed"
+
+
 def test_budget_pause_and_continue_keep_same_task_and_plan(tmp_path):
     repository, jobs, service = _runtime(tmp_path, decisions=1)
     task = service.create_task(

@@ -250,10 +250,33 @@ def _fixture_events(detail: dict[str, Any], title: str) -> list[dict[str, Any]]:
 
 def _artifact_json(api: Api, task_id: str, name: str) -> dict[str, Any]:
     raw = api.request(f"/api/tasks/{task_id}/artifacts/{name}")
-    _assert(isinstance(raw, bytes), f"artifact_not_bytes:{name}")
-    parsed = json.loads(raw.decode("utf-8"))
+    parsed = raw if isinstance(raw, dict) else json.loads(raw.decode("utf-8"))
     _assert(isinstance(parsed, dict), f"artifact_not_object:{name}")
     return parsed
+
+
+def _validate_existing_learning(api: Api, label: str, task_id: str) -> dict[str, Any]:
+    suffix = "".join(character for character in label.casefold() if character.isalnum())[-16:]
+    preference_id = f"acceptance-pref-{suffix}"
+    skill_id = f"skill.acceptance.weekly_{suffix}"
+    detail = api.request(f"/api/tasks/{task_id}")
+    _assert(detail["task"]["status"] == "completed", "learning_task_not_completed")
+    _assert("Fixture complete." in str(detail["task"].get("final_result") or ""), "preference_not_applied")
+    _assert("acceptance-weekly-checklist.json" in {item["path"] for item in detail["artifacts"]}, "skill_artifact_missing")
+    artifact = _artifact_json(api, task_id, "acceptance-weekly-checklist.json")
+    _assert("Acceptance Week Plan" in json.dumps(artifact), "skill_answer_not_used")
+    tools = [item["task_tool"] for item in _tool_observations(detail)]
+    for expected in ("discover_capabilities", "load_skill", "ask_user", "run_python"):
+        _assert(expected in tools, f"learning_tool_missing:{expected}")
+    preference_history = api.request(f"/api/preferences/{preference_id}/history")["history"]
+    skill_history = api.request(f"/api/skills/{skill_id}/history")["history"]
+    _assert(len(preference_history) >= 3, "preference_history_missing")
+    _assert(len(skill_history) >= 3, "skill_history_missing")
+    return {
+        "preference_revisions": len(preference_history),
+        "skill_revisions": len(skill_history),
+        "task": _task_evidence(detail),
+    }
 
 
 def _run_learning(api: Api, label: str) -> tuple[dict[str, Any], dict[str, str]]:
@@ -292,9 +315,13 @@ def _run_learning(api: Api, label: str) -> tuple[dict[str, Any], dict[str, str]]
     instructions = (
         "# Acceptance weekly checklist\n\n"
         "Always ask the user for the checklist heading with `ask_user` before processing. "
-        "After the reply, use bounded Python to group the supplied dated facts by ISO week and "
-        "publish `acceptance-weekly-checklist.json`. Do not call provider tools. Finish with compact "
-        "Markdown bullets and the exact text `Fixture complete.`"
+        "After the reply, call `run_python` to group the supplied dated facts by ISO week. The "
+        "Python source must import `published_path` from `jarvis_task_api` and write JSON containing "
+        "the chosen heading and grouped facts to "
+        "`published_path('acceptance-weekly-checklist.json')`; a file in the work directory alone "
+        "is not a published artifact. Do not call provider tools. Do not finish until the tool result "
+        "lists that artifact. Finish with compact Markdown bullets and the exact text "
+        "`Fixture complete.`"
     )
     skill_first = api.request(
         "/api/skills",
@@ -329,7 +356,8 @@ def _run_learning(api: Api, label: str) -> tuple[dict[str, Any], dict[str, str]]
         (
             f"Discover and load the instruction-only skill `{skill_id}`. Use it to turn these facts "
             "into a weekly checklist: 2026-09-29 field setup; 2026-10-01 bring cones; "
-            "2026-10-06 roster check. Follow the skill exactly; the heading is intentionally absent."
+            "2026-10-06 roster check. Follow the skill exactly; the heading is intentionally absent. "
+            "The published artifact is required, and you must not finish if it is absent."
         ),
         title=f"{label} learning",
         decisions=16,
@@ -517,8 +545,14 @@ published_path('../escape.json') raises. Never print environment variables or fi
 """.strip()
     task = _create_task(api, goal, title=f"{label} composed capability task", seconds=480, decisions=24, calls=80)
     completed = _wait_task(api, task["task_id"], wanted={"completed", "failed", "paused_budget", "waiting_input"})
+    return _validate_lists_documents(api, completed)
+
+
+def _validate_lists_documents(api: Api, completed: dict[str, Any]) -> dict[str, Any]:
     _assert(completed["task"]["status"] == "completed", "lists_documents_task_not_completed")
-    artifact = _artifact_json(api, task["task_id"], artifact_name)
+    artifact = _artifact_json(
+        api, completed["task"]["task_id"], "acceptance-boundary.json"
+    )
     for field in ("network_blocked", "secrets_absent", "readonly_root", "workspace_escape_blocked"):
         _assert(artifact.get(field) is True, f"runner_boundary_failed:{field}")
     capabilities = [item["capability"] for item in _tool_observations(completed)]
@@ -526,6 +560,30 @@ published_path('../escape.json') raises. Never print environment variables or fi
     _assert("documents.status" in capabilities, "documents_status_missing")
     _assert("documents.search" in capabilities, "documents_search_missing")
     return _task_evidence(completed)
+
+
+def _resume_composed_task(api: Api, task_id: str) -> dict[str, Any]:
+    detail = api.request(f"/api/tasks/{task_id}")
+    if detail["task"]["status"] == "waiting_input":
+        api.request(
+            f"/api/tasks/{task_id}/messages",
+            method="POST",
+            body={
+                "expected_revision": detail["task"]["revision"],
+                "submission_id": str(uuid4()),
+                "content": (
+                    "The existing authorized Documents skill is `skill.documents.local`. "
+                    "Rediscover and load it, then continue the original task without asking again."
+                ),
+            },
+        )
+    completed = _wait_task(
+        api,
+        task_id,
+        wanted={"completed", "failed", "paused_budget", "waiting_input"},
+        timeout=1_200,
+    )
+    return _validate_lists_documents(api, completed)
 
 
 def _run_calendar(api: Api, label: str) -> tuple[dict[str, Any], str]:
@@ -703,6 +761,19 @@ def main() -> int:
     parser.add_argument("--label", required=True)
     parser.add_argument("--worker-container", default="jarvis-taskws-accept-task-worker-1")
     parser.add_argument("--allow-production", action="store_true")
+    parser.add_argument(
+        "--validate-learning-task",
+        help="Validate an already-completed learning task without another model run.",
+    )
+    parser.add_argument(
+        "--resume-composed-task",
+        help="Resume and validate a waiting Lists/Documents/Python task.",
+    )
+    parser.add_argument(
+        "--phases",
+        default="interface,learning,budget,interrupted_script,lists_documents_python,calendar,calendar_cleanup,cancel",
+        help="Comma-separated acceptance phases; defaults to the complete campaign.",
+    )
     args = parser.parse_args()
     if not args.label.startswith("ACCEPTANCE-"):
         raise SystemExit("label must start with ACCEPTANCE-")
@@ -710,6 +781,20 @@ def main() -> int:
         raise SystemExit("refusing production-like port without --allow-production")
 
     api = Api(args.base_url, _operator_key(args.env_file))
+    phases = {item.strip() for item in args.phases.split(",") if item.strip()}
+    allowed_phases = {
+        "interface",
+        "learning",
+        "budget",
+        "interrupted_script",
+        "lists_documents_python",
+        "calendar",
+        "calendar_cleanup",
+        "cancel",
+    }
+    unknown = phases - allowed_phases
+    if unknown:
+        raise SystemExit(f"unknown phases: {','.join(sorted(unknown))}")
     evidence: dict[str, Any] = {
         "started_at": datetime.now(UTC).isoformat(),
         "base_url": args.base_url,
@@ -718,22 +803,45 @@ def main() -> int:
     }
     learning_ids: dict[str, str] | None = None
     try:
-        evidence["results"]["interface"] = _static_checks(api)
-        learning, learning_ids = _run_learning(api, args.label)
-        evidence["results"]["learning"] = learning
-        evidence["results"]["budget"] = _run_budget(api, args.label)
-        evidence["results"]["interrupted_script"] = _run_interrupt(
-            api, args.label, args.worker_container
-        )
-        evidence["results"]["lists_documents_python"] = _run_lists_documents_python(
-            api, args.label
-        )
-        calendar, fixture_title = _run_calendar(api, args.label)
-        evidence["results"]["calendar"] = calendar
-        evidence["results"]["calendar_cleanup"] = _run_calendar_cleanup(
-            api, args.label, fixture_title
-        )
-        evidence["results"]["cancel"] = _run_cancel(api, args.label)
+        if args.validate_learning_task:
+            evidence["results"]["learning"] = _validate_existing_learning(
+                api, args.label, args.validate_learning_task
+            )
+            evidence["status"] = "passed"
+            return_code = 0
+            return return_code
+        if args.resume_composed_task:
+            evidence["results"]["lists_documents_python"] = _resume_composed_task(
+                api, args.resume_composed_task
+            )
+            evidence["status"] = "passed"
+            return_code = 0
+            return return_code
+        if "interface" in phases:
+            evidence["results"]["interface"] = _static_checks(api)
+        if "learning" in phases:
+            learning, learning_ids = _run_learning(api, args.label)
+            evidence["results"]["learning"] = learning
+        if "budget" in phases:
+            evidence["results"]["budget"] = _run_budget(api, args.label)
+        if "interrupted_script" in phases:
+            evidence["results"]["interrupted_script"] = _run_interrupt(
+                api, args.label, args.worker_container
+            )
+        if "lists_documents_python" in phases:
+            evidence["results"]["lists_documents_python"] = _run_lists_documents_python(
+                api, args.label
+            )
+        fixture_title = f"{args.label} AYSO Recurrence"
+        if "calendar" in phases:
+            calendar, fixture_title = _run_calendar(api, args.label)
+            evidence["results"]["calendar"] = calendar
+        if "calendar_cleanup" in phases:
+            evidence["results"]["calendar_cleanup"] = _run_calendar_cleanup(
+                api, args.label, fixture_title
+            )
+        if "cancel" in phases:
+            evidence["results"]["cancel"] = _run_cancel(api, args.label)
         evidence["status"] = "passed"
         return_code = 0
     except Exception as exc:

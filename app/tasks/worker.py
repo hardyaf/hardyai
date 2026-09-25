@@ -173,7 +173,7 @@ class AgentTaskWorker:
         lease_seconds: float = 240.0,
         max_steps_per_claim: int = 64,
         context_max_chars: int = 160_000,
-        agent_id: str = "main",
+        agent_id: str = "jarvis",
     ) -> None:
         self._repository = repository
         self._jobs = jobs

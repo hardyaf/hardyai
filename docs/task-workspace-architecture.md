@@ -40,6 +40,9 @@ transport: false for the existing local HTTP endpoint and true when an HTTPS rev
    next effect. Budget, user-input, approval, and user pauses complete the current job without retry spin;
    continuation enqueues a new generation for the same task.
 
+The worker uses the established `jarvis` agent identity when projecting skill authorization; it does not
+invent a parallel `main` identity that would silently hide Jarvis-scoped capabilities such as Documents.
+
 ## Python boundary
 
 Only `task-runner-launcher` mounts the Docker socket. It runs as the deployment UID with only the
