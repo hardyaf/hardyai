@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Jarvis Task Workspace</title>
+  <style>
+    :root { --ink:#14211a; --muted:#617067; --paper:#fffef9; --line:#d7ded5; --green:#205c45; --mint:#dcece2; --amber:#b66a20; --red:#9e3f35; --bg:#eef2ea; }
+    * { box-sizing:border-box; }
+    body { margin:0; color:var(--ink); background:linear-gradient(135deg,#e4eee5,#f5efe2 70%); font:15px/1.45 "Segoe UI",system-ui,sans-serif; min-height:100vh; }
+    header { padding:18px 24px; display:flex; align-items:center; gap:18px; justify-content:space-between; border-bottom:1px solid var(--line); background:rgba(255,254,249,.88); backdrop-filter:blur(12px); position:sticky; top:0; z-index:4; }
+    h1,h2,h3,p { margin-top:0; } h1 { font-size:1.35rem; margin:0; } h2 { font-size:1.05rem; } h3 { font-size:.92rem; }
+    nav { display:flex; gap:7px; } button,.button { border:1px solid var(--line); background:#f7f8f3; color:var(--ink); border-radius:9px; padding:8px 11px; cursor:pointer; font:inherit; text-decoration:none; }
+    button.primary { background:var(--green); color:white; border-color:var(--green); } button.danger { color:var(--red); } button:disabled { opacity:.45; cursor:not-allowed; }
+    main { max-width:1380px; margin:0 auto; padding:20px; }
+    .view { display:none; } .view.active { display:block; }
+    .grid { display:grid; grid-template-columns:340px minmax(0,1fr); gap:16px; }
+    .card { background:var(--paper); border:1px solid var(--line); border-radius:14px; padding:16px; box-shadow:0 8px 25px rgba(25,48,33,.06); }
+    .stack { display:grid; gap:12px; } .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+    textarea,input,select { width:100%; border:1px solid var(--line); border-radius:9px; padding:10px; background:white; color:var(--ink); font:inherit; } textarea { min-height:95px; resize:vertical; }
+    label { display:grid; gap:5px; color:var(--muted); font-size:.82rem; }
+    .task { width:100%; text-align:left; display:grid; gap:5px; background:white; } .task.selected { border-color:var(--green); box-shadow:0 0 0 2px var(--mint); }
+    .muted { color:var(--muted); } .small { font-size:.8rem; } .status { padding:3px 7px; border-radius:999px; background:var(--mint); font-size:.75rem; width:max-content; } .status.failed,.status.cancelled { background:#f4dcd7; } .status.paused_budget,.status.waiting_input,.status.waiting_approval,.status.paused_user { background:#f7e7c9; }
+    .budget { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; } .meter { padding:9px; border-radius:9px; background:#f4f6f1; } .meter b { display:block; font-size:1rem; }
+    .timeline { display:grid; gap:8px; max-height:460px; overflow:auto; } .event { border-left:3px solid var(--line); padding:4px 9px; } .event.effect { border-color:var(--amber); } .event.completed { border-color:var(--green); }
+    .message { padding:10px; border-radius:10px; white-space:pre-wrap; } .message.user { background:#eaf2ec; } .message.assistant { background:#f5f0e5; } .message.tool { background:#f4f5f3; font:12px/1.4 ui-monospace,monospace; max-height:150px; overflow:auto; }
+    pre { white-space:pre-wrap; word-break:break-word; background:#f3f5f1; padding:11px; border-radius:9px; max-height:300px; overflow:auto; }
+    .two { display:grid; grid-template-columns:1fr 1fr; gap:14px; } .learning-item { border:1px solid var(--line); border-radius:10px; padding:11px; }
+    dialog { border:1px solid var(--line); border-radius:14px; padding:20px; width:min(440px,90vw); } dialog::backdrop { background:rgba(10,20,14,.45); }
+    #notice { position:fixed; right:18px; bottom:18px; max-width:420px; padding:10px 14px; border-radius:9px; background:#183d2e; color:white; display:none; z-index:8; }
+    .empty { padding:28px; text-align:center; color:var(--muted); }
+    @media(max-width:850px){ .grid,.two{grid-template-columns:1fr}.budget{grid-template-columns:1fr} header{align-items:flex-start;flex-direction:column} }
+  </style>
+</head>
+<body>
+  <header>
+    <div><h1>Jarvis Task Workspace</h1><div class="muted small">Durable local work · inspect, redirect, resume, teach</div></div>
+    <nav>
+      <button data-view="tasks" class="primary">Tasks</button>
+      <button data-view="learning">Skills & preferences</button>
+      <a class="button" href="/dashboard">System dashboard</a>
+      <button id="loginButton">Sign in</button>
+    </nav>
+  </header>
+  <main>
+    <section id="tasksView" class="view active">
+      <div class="grid">
+        <aside class="stack">
+          <form id="createForm" class="card stack">
+            <h2>Assign a task</h2>
+            <textarea id="goal" required maxlength="40000" placeholder="What should Jarvis accomplish?"></textarea>
+            <button class="primary" type="submit">Start task</button>
+          </form>
+          <div class="card stack"><div class="row"><h2 style="margin:0">Tasks</h2><button id="refreshTasks">Refresh</button></div><div id="taskList" class="stack"><div class="empty">Sign in to load tasks.</div></div></div>
+        </aside>
+        <section id="taskDetail" class="card"><div class="empty">Select a task to inspect its work.</div></section>
+      </div>
+    </section>
+    <section id="learningView" class="view">
+      <div class="two">
+        <div class="card stack">
+          <h2>Persistent preferences</h2>
+          <form id="preferenceForm" class="stack">
+            <label>Scope<select id="preferenceScope"><option>general</option><option>project</option><option>skill</option></select></label>
+            <label>Rule<textarea id="preferenceRule" required placeholder="For example: Use compact bullet lists in final answers."></textarea></label>
+            <label>Skill ID (when scope is skill)<input id="preferenceSkill" placeholder="skill.example" /></label>
+            <button class="primary">Save preference</button>
+          </form>
+          <div id="preferenceList" class="stack"></div>
+        </div>
+        <div class="card stack">
+          <h2>Instruction-only skills</h2>
+          <form id="skillForm" class="stack">
+            <label>Skill ID<input id="skillId" required pattern="skill\.[a-z0-9][a-z0-9_.-]{0,153}" placeholder="skill.weekly_calendar_review" /></label>
+            <label>Title<input id="skillTitle" required placeholder="Weekly calendar review" /></label>
+            <label>Instructions<textarea id="skillInstructions" required placeholder="Describe the procedure, relevant capability names, examples, and restrictions."></textarea></label>
+            <button class="primary">Create or revise skill</button>
+          </form>
+          <div id="skillList" class="stack"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+  <dialog id="loginDialog"><form id="loginForm" class="stack"><h2>Operator sign in</h2><p class="muted">Enter the local operator key. It is exchanged once for an HTTP-only session and is not stored by this page.</p><input id="operatorKey" type="password" autocomplete="current-password" required /><div class="row"><button class="primary">Sign in</button><button type="button" id="closeLogin">Cancel</button></div></form></dialog>
+  <div id="notice"></div>
+  <script>
+    let csrf = "", selectedId = null, selected = null, pollTimer = null, editingPreferenceId = null;
+    const $ = id => document.getElementById(id);
+    const uid = () => crypto.randomUUID();
+    const esc = value => String(value ?? "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    function notice(message){ const n=$('notice'); n.textContent=message; n.style.display='block'; setTimeout(()=>n.style.display='none',4200); }
+    async function api(url, options={}) { options.credentials='same-origin'; options.headers={...(options.headers||{})}; if(options.method && !['GET','HEAD'].includes(options.method)){options.headers['X-CSRF-Token']=csrf; if(options.body)options.headers['Content-Type']='application/json';} const response=await fetch(url,options); if(response.status===401){$('loginDialog').showModal(); throw new Error('Sign in required');} if(!response.ok){let detail=response.statusText;try{detail=(await response.json()).detail||detail}catch{}throw new Error(detail)} if(response.status===204)return null; return response.json(); }
+    async function ensureSession(){ try{const data=await api('/operator/session');csrf=data.csrf_token||'';$('loginButton').textContent='Signed in';await refreshAll();}catch{$('loginDialog').showModal();} }
+    document.querySelectorAll('[data-view]').forEach(button=>button.onclick=()=>{document.querySelectorAll('.view').forEach(v=>v.classList.remove('active'));document.querySelectorAll('[data-view]').forEach(b=>b.classList.remove('primary'));$(button.dataset.view+'View').classList.add('active');button.classList.add('primary');if(button.dataset.view==='learning')loadLearning();});
+    $('loginButton').onclick=()=>$('loginDialog').showModal(); $('closeLogin').onclick=()=>$('loginDialog').close();
+    $('loginForm').onsubmit=async event=>{event.preventDefault();const key=$('operatorKey').value;const response=await fetch('/operator/session',{method:'POST',headers:{'X-Jarvis-Operator-Key':key},credentials:'same-origin'});if(!response.ok){notice('Authentication failed.');return}const data=await response.json();csrf=data.csrf_token||'';$('operatorKey').value='';$('loginDialog').close();$('loginButton').textContent='Signed in';await refreshAll();};
+    $('createForm').onsubmit=async event=>{event.preventDefault();try{const result=await api('/api/tasks',{method:'POST',body:JSON.stringify({submission_id:uid(),goal:$('goal').value})});$('goal').value='';selectedId=result.task.task_id;await refreshAll();notice('Task accepted; work continues in the background.')}catch(e){notice(e.message)}};
+    $('refreshTasks').onclick=()=>refreshAll();
+    async function refreshAll(){try{const data=await api('/api/tasks');renderTasks(data.tasks);if(selectedId)await loadDetail(selectedId);}catch(e){notice(e.message)}}
+    function renderTasks(tasks){const root=$('taskList');root.textContent='';if(!tasks.length){root.innerHTML='<div class="empty">No tasks yet.</div>';return}tasks.forEach(task=>{const b=document.createElement('button');b.className='task'+(task.task_id===selectedId?' selected':'');b.innerHTML=`<strong>${esc(task.title)}</strong><span class="status ${esc(task.status)}">${esc(task.status.replaceAll('_',' '))}</span><span class="muted small">${esc(task.progress_summary||task.goal.slice(0,110))}</span>`;b.onclick=()=>{selectedId=task.task_id;loadDetail(selectedId);renderTasks(tasks)};root.appendChild(b)});}
+    async function loadDetail(id){try{selected=await api('/api/tasks/'+encodeURIComponent(id));renderDetail(selected);schedulePoll();}catch(e){notice(e.message)}}
+    function schedulePoll(){clearTimeout(pollTimer);if(selected && ['queued','running'].includes(selected.task.status))pollTimer=setTimeout(()=>loadDetail(selectedId),1800);}
+    function meter(label,value){return `<div class="meter"><span class="muted small">${esc(label)}</span><b>${esc(value.remaining)} left</b><span class="small">${esc(value.used)} / ${esc(value.limit)}</span></div>`}
+    function renderDetail(data){const task=data.task,b=task.budget;const waiting=task.waiting_prompt?`<div class="learning-item"><strong>Jarvis needs you</strong><p>${esc(task.waiting_prompt)}</p></div>`:'';const artifacts=(data.artifacts||[]).map(a=>`<a class="button" href="/api/tasks/${encodeURIComponent(task.task_id)}/artifacts/${encodeURIComponent(a.path)}">${esc(a.path)} (${esc(a.size)} bytes)</a>`).join('');const messages=data.messages.map(m=>`<div class="message ${esc(m.role)}"><strong>${esc(m.role)}${m.tool_name?' · '+esc(m.tool_name):''}</strong><br>${esc(m.content)}</div>`).join('');const events=data.events.slice(-80).reverse().map(e=>`<div class="event ${e.event_type.includes('effect')?'effect':''} ${e.event_type.includes('completed')?'completed':''}"><strong>${esc(e.event_type)}</strong> <span class="muted small">${esc(e.created_at)}</span><div class="small">${esc(JSON.stringify(e.payload))}</div></div>`).join('');const effects=data.effects.map(e=>`<div class="event effect"><strong>${esc(e.tool_id)}</strong> · ${esc(e.state)}<div class="small">${esc(e.logical_operation_id)}</div></div>`).join('')||'<span class="muted">No external effects recorded.</span>';const runs=data.script_runs.map(r=>`<div class="event"><strong>Python ${esc(r.status)}</strong> · ${esc(r.run_id)}<pre>${esc(r.stdout_text||r.stderr_text||'No output')}</pre></div>`).join('')||'<span class="muted">No code runs yet.</span>';$('taskDetail').innerHTML=`<div class="stack"><div class="row"><h2 style="margin:0">${esc(task.title)}</h2><span class="status ${esc(task.status)}">${esc(task.status.replaceAll('_',' '))}</span></div><p>${esc(task.goal)}</p>${waiting}<div class="budget">${meter('active seconds',b.active_seconds)}${meter('model decisions',b.model_decisions)}${meter('capability calls',b.capability_calls)}</div><div class="row"><button id="pauseTask">Pause</button><button id="continueTask" class="primary">Continue + budget</button><button id="cancelTask" class="danger">Cancel</button><button id="deleteTask" class="danger">Delete history</button></div><form id="steerForm" class="row"><input id="steerText" style="flex:1" placeholder="Redirect, clarify, or correct this task…" required/><button class="primary">Send direction</button></form><div class="two"><div><h3>Plan</h3><pre>${esc(task.plan_markdown||'Jarvis has not published a plan yet.')}</pre><h3>Progress</h3><p>${esc(task.progress_summary||'Starting…')}</p><h3>Final result</h3><pre>${esc(task.final_result||'Not complete yet.')}</pre><h3>Artifacts</h3><div class="row">${artifacts||'<span class="muted">None published.</span>'}</div></div><div><h3>Completed effects</h3><div class="timeline">${effects}</div><h3>Code activity</h3><div class="timeline">${runs}</div></div></div><details><summary>Conversation and observations</summary><div class="stack" style="margin-top:10px">${messages}</div></details><details><summary>Durable event log</summary><div class="timeline" style="margin-top:10px">${events}</div></details><div id="approvals" class="stack"></div></div>`;
+      $('pauseTask').disabled=!['queued','running'].includes(task.status);$('cancelTask').disabled=['completed','cancelled'].includes(task.status);$('continueTask').disabled=['completed','cancelled','running','queued'].includes(task.status);$('deleteTask').disabled=!['completed','failed','cancelled'].includes(task.status);
+      $('pauseTask').onclick=()=>mutateTask('pause',{expected_revision:task.revision});$('cancelTask').onclick=()=>mutateTask('cancel',{expected_revision:task.revision});$('continueTask').onclick=()=>mutateTask('continue',{expected_revision:task.revision,submission_id:uid()});$('deleteTask').onclick=()=>deleteTask(task);$('steerForm').onsubmit=e=>{e.preventDefault();mutateTask('messages',{expected_revision:task.revision,submission_id:uid(),content:$('steerText').value})};if(task.status==='waiting_approval')loadApprovals(); }
+    async function mutateTask(action,body){try{await api(`/api/tasks/${encodeURIComponent(selectedId)}/${action}`,{method:'POST',body:JSON.stringify(body)});await refreshAll();}catch(e){notice(e.message);await refreshAll()}}
+    async function deleteTask(task){if(!confirm('Delete this task history and its workspace artifacts?'))return;try{await api(`/api/tasks/${encodeURIComponent(task.task_id)}?expected_revision=${task.revision}`,{method:'DELETE'});selectedId=null;selected=null;$('taskDetail').innerHTML='<div class="empty">Select a task to inspect its durable state.</div>';await refreshAll();notice('Task history deleted.')}catch(e){notice(e.message)}}
+    async function loadApprovals(){try{const data=await api('/reviews?state=pending&subject_type=action_proposal');const root=$('approvals');root.innerHTML='<h3>Pending approvals</h3>';data.reviews.forEach(review=>{const d=document.createElement('div');d.className='learning-item';d.innerHTML=`<strong>${esc(review.target_operation||review.subject_type)}</strong><p>${esc(review.subject_id||review.review_id)}</p><div class="row"><button class="primary">Approve</button><button class="danger">Reject</button></div>`;const [approve,reject]=d.querySelectorAll('button');approve.onclick=()=>decide(review,'approve');reject.onclick=()=>decide(review,'reject');root.appendChild(d)});}catch(e){notice(e.message)}}
+    async function decide(review,decision){try{await api(`/reviews/${encodeURIComponent(review.review_id)}/local-action-decision`,{method:'POST',body:JSON.stringify({proposal_id:review.subject_id,decision,bound_proposal_hash:review.item_hash,reason:`Local task workspace ${decision}`,idempotency_key:uid()})});notice(`Approval ${decision}d. Continue the task after the action receipt is recorded.`);await refreshAll();}catch(e){notice(e.message)}}
+    $('preferenceForm').onsubmit=async e=>{e.preventDefault();try{await api('/api/preferences',{method:'POST',body:JSON.stringify({scope:$('preferenceScope').value,rule_text:$('preferenceRule').value,skill_id:$('preferenceSkill').value||null,preference_id:editingPreferenceId,source_instruction:'Saved explicitly in the local task workspace.'})});$('preferenceRule').value='';editingPreferenceId=null;await loadLearning();notice('Preference saved as a new revision.')}catch(err){notice(err.message)}};
+    $('skillForm').onsubmit=async e=>{e.preventDefault();try{await api('/api/skills',{method:'POST',body:JSON.stringify({skill_id:$('skillId').value,title:$('skillTitle').value,instructions_markdown:$('skillInstructions').value,source_instruction:'Created or revised in the local task workspace.'})});await loadLearning();notice('Skill revision saved.')}catch(err){notice(err.message)}};
+    async function loadLearning(){try{const [p,s]=await Promise.all([api('/api/preferences'),api('/api/skills')]);renderPreferences(p.preferences);renderSkills(s.skills);}catch(e){notice(e.message)}}
+    async function restoreFromHistory(kind,id){try{const data=await api(`/api/${kind}/${encodeURIComponent(id)}/history`);const choices=data.history.map(x=>`${x.revision}: ${x.rule_text||x.title}`).join('\n');const revision=Number(prompt(`Choose a revision to restore:\n${choices}`));if(!Number.isInteger(revision))return;await api(`/api/${kind}/${encodeURIComponent(id)}/restore`,{method:'POST',body:JSON.stringify({revision})});await loadLearning();notice('A new active revision was created from history.')}catch(e){notice(e.message)}}
+    function renderPreferences(items){const root=$('preferenceList');root.textContent='';items.forEach(p=>{const d=document.createElement('div');d.className='learning-item';d.innerHTML=`<strong>${esc(p.scope)} · revision ${esc(p.revision)}</strong><p>${esc(p.rule_text)}</p><div class="row"><button>Edit</button><button>History / undo</button><button class="danger">Retire</button></div>`;const buttons=d.querySelectorAll('button');buttons[0].onclick=()=>{editingPreferenceId=p.preference_id;$('preferenceScope').value=p.scope;$('preferenceRule').value=p.rule_text;$('preferenceSkill').value=p.skill_id||''};buttons[1].onclick=()=>restoreFromHistory('preferences',p.preference_id);buttons[2].onclick=async()=>{await api('/api/preferences/'+encodeURIComponent(p.preference_id),{method:'DELETE'});loadLearning()};root.appendChild(d)});if(!items.length)root.innerHTML='<div class="empty">No stored preferences.</div>';}
+    function renderSkills(items){const root=$('skillList');root.textContent='';items.forEach(s=>{const d=document.createElement('div');d.className='learning-item';d.innerHTML=`<strong>${esc(s.title)} · revision ${esc(s.revision)}</strong><div class="muted small">${esc(s.skill_id)}</div><pre>${esc(s.instructions_markdown)}</pre><div class="row"><a class="button" href="/api/skills/${encodeURIComponent(s.skill_id)}/export">Export</a><button>Edit</button><button>History / undo</button><button class="danger">Retire</button></div>`;const buttons=d.querySelectorAll('button');buttons[0].onclick=()=>{$('skillId').value=s.skill_id;$('skillTitle').value=s.title;$('skillInstructions').value=s.instructions_markdown;scrollTo({top:0,behavior:'smooth'})};buttons[1].onclick=()=>restoreFromHistory('skills',s.skill_id);buttons[2].onclick=async()=>{await api('/api/skills/'+encodeURIComponent(s.skill_id),{method:'DELETE'});loadLearning()};root.appendChild(d)});if(!items.length)root.innerHTML='<div class="empty">No user-authored skills.</div>';}
+    ensureSession();
+  </script>
+</body>
+</html>

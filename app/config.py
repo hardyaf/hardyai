@@ -304,6 +304,24 @@ class Settings:
     plane_api_timeout_seconds: float
     operator_api_key: str
     operator_session_ttl_seconds: int
+    task_workspace_enabled: bool
+    task_workspace_root: str
+    task_model_name: str
+    task_model_timeout_seconds: float
+    task_model_num_ctx: int
+    task_model_num_predict: int
+    task_model_think: OllamaThinkMode
+    task_initial_budget_seconds: float
+    task_initial_model_decisions: int
+    task_initial_capability_calls: int
+    task_max_budget_seconds: float
+    task_worker_poll_seconds: float
+    task_worker_lease_seconds: float
+    task_worker_max_steps: int
+    task_context_max_chars: int
+    task_runner_base_url: str
+    task_runner_key_path: str
+    task_runner_timeout_seconds: float
     turn_max_concurrency: int
     turn_queue_capacity: int
     turn_timeout_seconds: float
@@ -803,6 +821,50 @@ settings = Settings(
     operator_session_ttl_seconds=max(
         300,
         min(_as_int("JARVIS_OPERATOR_SESSION_TTL_SECONDS", 3600), 86400),
+    ),
+    task_workspace_enabled=_as_bool("TASK_WORKSPACE_ENABLED", False),
+    task_workspace_root=os.getenv(
+        "TASK_WORKSPACE_ROOT", "/opt/jarvis/data/task-workspaces"
+    ).strip(),
+    task_model_name=os.getenv(
+        "TASK_MODEL_NAME", os.getenv("MAIN_REPAIR_MODEL_NAME", "gpt-oss:20b")
+    ).strip(),
+    task_model_timeout_seconds=max(
+        5.0, min(_as_float("TASK_MODEL_TIMEOUT_SECONDS", 180.0), 900.0)
+    ),
+    task_model_num_ctx=max(4096, min(_as_int("TASK_MODEL_NUM_CTX", 32768), 131072)),
+    task_model_num_predict=max(128, min(_as_int("TASK_MODEL_NUM_PREDICT", 2048), 16384)),
+    task_model_think=_as_ollama_think("TASK_MODEL_THINK", "medium"),
+    task_initial_budget_seconds=max(
+        1.0, min(_as_float("TASK_INITIAL_BUDGET_SECONDS", 300.0), 86400.0)
+    ),
+    task_initial_model_decisions=max(
+        1, min(_as_int("TASK_INITIAL_MODEL_DECISIONS", 32), 256)
+    ),
+    task_initial_capability_calls=max(
+        1, min(_as_int("TASK_INITIAL_CAPABILITY_CALLS", 100), 1000)
+    ),
+    task_max_budget_seconds=max(
+        300.0, min(_as_float("TASK_MAX_BUDGET_SECONDS", 86400.0), 604800.0)
+    ),
+    task_worker_poll_seconds=max(
+        0.1, min(_as_float("TASK_WORKER_POLL_SECONDS", 1.0), 30.0)
+    ),
+    task_worker_lease_seconds=max(
+        30.0, min(_as_float("TASK_WORKER_LEASE_SECONDS", 240.0), 1800.0)
+    ),
+    task_worker_max_steps=max(1, min(_as_int("TASK_WORKER_MAX_STEPS", 64), 256)),
+    task_context_max_chars=max(
+        8000, min(_as_int("TASK_CONTEXT_MAX_CHARS", 160000), 500000)
+    ),
+    task_runner_base_url=os.getenv(
+        "TASK_RUNNER_BASE_URL", "http://task-runner-launcher:8060"
+    ).rstrip("/"),
+    task_runner_key_path=os.getenv(
+        "TASK_RUNNER_KEY_PATH", "/run/secrets/task_runner_key"
+    ),
+    task_runner_timeout_seconds=max(
+        5.0, min(_as_float("TASK_RUNNER_TIMEOUT_SECONDS", 45.0), 330.0)
     ),
     turn_max_concurrency=max(1, min(_as_int("TURN_MAX_CONCURRENCY", 1), 8)),
     turn_queue_capacity=max(0, min(_as_int("TURN_QUEUE_CAPACITY", 8), 100)),

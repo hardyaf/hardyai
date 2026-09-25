@@ -81,6 +81,13 @@ from app.services.model_compute_budget_service import ModelComputeBudgetNotifica
 from app.research.decision_backend import OllamaResearchDecisionBackend
 from app.research.searxng import SearxngSearchProvider
 from app.research.service import WebResearchService
+from app.tasks.capabilities import TaskCapabilityBridge
+from app.tasks.code_runner.client import TaskRunnerLauncherClient
+from app.tasks.code_runner.runner import TaskCodeRunner
+from app.tasks.model import NativeTaskModelClient
+from app.tasks.repository import TaskRepository
+from app.tasks.service import TaskApplicationService
+from app.tasks.worker import AgentTaskWorker
 
 
 def _is_local_model_url(value: str) -> bool:
@@ -630,6 +637,59 @@ router = JarvisRouter(
     email_timezone=settings.email_agent_timezone,
     calendar_timezone_resolver=calendar_service.tool_timezone,
 )
+task_repository: TaskRepository | None = None
+task_service: TaskApplicationService | None = None
+task_worker: AgentTaskWorker | None = None
+if settings.task_workspace_enabled:
+    task_repository = TaskRepository(settings.database_path)
+    task_service = TaskApplicationService(
+        repository=task_repository,
+        jobs=job_repository,
+        workspace_root=settings.task_workspace_root,
+        initial_budget_seconds=settings.task_initial_budget_seconds,
+        initial_model_decisions=settings.task_initial_model_decisions,
+        initial_capability_calls=settings.task_initial_capability_calls,
+        max_budget_seconds=settings.task_max_budget_seconds,
+    )
+    task_capabilities = TaskCapabilityBridge(
+        repository=task_repository,
+        skill_registry=skill_registry,
+        authorized_executor=router.authorized_skill_executor,
+        available_runtime_dependencies=router.available_runtime_dependencies,
+        human_review_service=human_review_service,
+        human_review_repository=human_review_repository,
+    )
+    task_model = NativeTaskModelClient(
+        base_url=settings.local_model_url,
+        model=settings.task_model_name,
+        timeout_seconds=settings.task_model_timeout_seconds,
+        num_ctx=settings.task_model_num_ctx,
+        num_predict=settings.task_model_num_predict,
+        think=settings.task_model_think,
+        keep_alive_seconds=settings.main_model_keep_alive_seconds,
+    )
+    task_launcher = TaskRunnerLauncherClient(
+        base_url=settings.task_runner_base_url,
+        key_path=settings.task_runner_key_path,
+        timeout_seconds=settings.task_runner_timeout_seconds,
+    )
+    task_code_runner = TaskCodeRunner(
+        repository=task_repository,
+        task_service=task_service,
+        capabilities=task_capabilities,
+        launcher=task_launcher,
+    )
+    task_worker = AgentTaskWorker(
+        repository=task_repository,
+        jobs=job_repository,
+        model=task_model,
+        capabilities=task_capabilities,
+        code_runner=task_code_runner,
+        poll_seconds=settings.task_worker_poll_seconds,
+        lease_seconds=settings.task_worker_lease_seconds,
+        max_steps_per_claim=settings.task_worker_max_steps,
+        context_max_chars=settings.task_context_max_chars,
+    )
 action_execution_service = router.action_execution_service
 provenance_repository = ProvenanceRepository(settings.database_path)
 document_proposal_execution_service = (

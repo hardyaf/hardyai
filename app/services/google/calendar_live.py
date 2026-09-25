@@ -119,6 +119,12 @@ class GoogleCalendarLiveService:
             event_start=str(arguments.get("event_start") or ""),
             timezone_name=timezone_name,
         )
+        current = self._select_edit_target(
+            service=service,
+            binding=binding,
+            current=current,
+            edit_scope=str(arguments.get("edit_scope") or "single_event"),
+        )
         current_version = self._event_resource_version(str(current.get("etag") or ""))
         if supplied_version and supplied_version != current_version:
             raise ValueError("calendar_event_revision_stale")
@@ -208,6 +214,12 @@ class GoogleCalendarLiveService:
                 event_start=str(arguments.get("event_start") or ""),
                 timezone_name=timezone_name,
             )
+            current = self._select_edit_target(
+                service=service,
+                binding=binding,
+                current=current,
+                edit_scope=str(arguments.get("edit_scope") or "single_event"),
+            )
             revision = str(current.get("etag") or "")
             if self._event_resource_version(revision) != str(
                 arguments.get("resource_version") or ""
@@ -272,6 +284,12 @@ class GoogleCalendarLiveService:
                 event_ref=str(arguments.get("event_ref") or ""),
                 event_start=str(arguments.get("event_start") or ""),
                 timezone_name=timezone_name,
+            )
+            current = self._select_edit_target(
+                service=service,
+                binding=binding,
+                current=current,
+                edit_scope=str(arguments.get("edit_scope") or "single_event"),
             )
             revision = str(current.get("etag") or "")
             if self._event_resource_version(revision) != str(
@@ -419,21 +437,31 @@ class GoogleCalendarLiveService:
                     raise ValueError
         except Exception as exc:
             raise ValueError("calendar_event_start_invalid") from exc
-        response = (
-            service.events()
-            .list(
-                calendarId=binding.calendar_id,
-                timeMin=(local_start - timedelta(days=2)).isoformat(),
-                timeMax=(local_start + timedelta(days=2)).isoformat(),
-                singleEvents=True,
-                orderBy="startTime",
-                maxResults=100,
-                timeZone=timezone_name,
-                showDeleted=False,
-            )
-            .execute()
-        )
-        items = response.get("items", []) if isinstance(response, dict) else []
+        base_arguments = {
+            "calendarId": binding.calendar_id,
+            "timeMin": (local_start - timedelta(days=2)).isoformat(),
+            "timeMax": (local_start + timedelta(days=2)).isoformat(),
+            "singleEvents": True,
+            "orderBy": "startTime",
+            "maxResults": 2500,
+            "timeZone": timezone_name,
+            "showDeleted": False,
+        }
+        items: list[dict[str, Any]] = []
+        page_token = ""
+        for _ in range(100):
+            page_arguments = dict(base_arguments)
+            if page_token:
+                page_arguments["pageToken"] = page_token
+            response = service.events().list(**page_arguments).execute()
+            if not isinstance(response, dict):
+                raise ValueError("calendar_event_page_invalid")
+            items.extend(item for item in response.get("items", []) if isinstance(item, dict))
+            page_token = str(response.get("nextPageToken") or "").strip()
+            if not page_token:
+                break
+        else:
+            raise ValueError("calendar_event_page_limit")
         matches = [
             item
             for item in items
@@ -446,6 +474,101 @@ class GoogleCalendarLiveService:
         if len(matches) != 1:
             raise ValueError("calendar_event_ambiguous")
         return dict(matches[0])
+
+    def _select_edit_target(
+        self,
+        *,
+        service: Any,
+        binding: CalendarBinding,
+        current: dict[str, Any],
+        edit_scope: str,
+    ) -> dict[str, Any]:
+        scope = str(edit_scope or "single_event").strip().casefold()
+        recurring_parent = str(current.get("recurringEventId") or "").strip()
+        is_series_master = bool(current.get("recurrence")) and not recurring_parent
+        if scope == "single_event":
+            if recurring_parent or is_series_master:
+                raise ValueError("calendar_edit_scope_recurring_required")
+            return current
+        if scope == "occurrence":
+            if not recurring_parent:
+                raise ValueError("calendar_occurrence_required")
+            return current
+        if scope != "series":
+            raise ValueError("calendar_edit_scope_invalid")
+        if is_series_master:
+            return current
+        if not recurring_parent:
+            raise ValueError("calendar_series_required")
+        status, parent = self._get_exact_event(
+            service=service,
+            calendar_id=binding.calendar_id,
+            event_id=recurring_parent,
+        )
+        if status != "ok" or not parent:
+            raise ValueError("calendar_series_not_found")
+        return parent
+
+    def get_typed_event(
+        self,
+        *,
+        calendar_scope: str,
+        event_ref: str,
+        event_start: str,
+    ) -> dict[str, Any]:
+        """Read one exact event/occurrence through its opaque query projection."""
+
+        try:
+            config = self._load_permissions()
+            calendar_cfg = config.get("calendar") or {}
+            bindings = self._calendar_bindings(calendar_cfg)
+            binding, candidates, is_default = self._resolve_query_binding(
+                calendar_scope=calendar_scope,
+                bindings=bindings,
+                config=config,
+                calendar_cfg=calendar_cfg,
+            )
+            if binding is None:
+                return {
+                    "status": "needs_input",
+                    "message": "Choose one exact authorized Calendar scope.",
+                    "missing_fields": ["calendar_scope"],
+                    "candidates": candidates,
+                }
+            timezone_name = str(calendar_cfg.get("default_timezone") or "UTC").strip() or "UTC"
+            service = self._authorized_calendar_service(
+                config=config, binding=binding, include_write=False
+            )
+            event = self._resolve_typed_event(
+                service=service,
+                binding=binding,
+                event_ref=event_ref,
+                event_start=event_start,
+                timezone_name=timezone_name,
+            )
+            return {
+                "status": "ok",
+                "message": "Found the exact Calendar event.",
+                "untrusted": True,
+                "payload": {
+                    "event": self._query_event_projection(event=event, binding=binding),
+                    "calendar_scope": {
+                        "requested": calendar_scope,
+                        "display_name": binding.person_name,
+                        "resolved": True,
+                        "is_default": is_default,
+                        "candidates": [],
+                    },
+                },
+            }
+        except ValueError as exc:
+            return {"status": "error", "message": str(exc), "error_code": str(exc)}
+        except Exception as exc:
+            return {
+                "status": "retryable_error",
+                "message": "The live Calendar provider was unavailable.",
+                "error_code": type(exc).__name__,
+            }
 
     @classmethod
     def _event_ref(cls, *, event: dict[str, Any], binding: CalendarBinding) -> str:
@@ -517,6 +640,9 @@ class GoogleCalendarLiveService:
             body["attendees"] = [
                 {"email": str(value)} for value in arguments.get("invitee_emails") or []
             ]
+        recurrence = arguments.get("recurrence")
+        if isinstance(recurrence, dict):
+            body["recurrence"] = [self._recurrence_rule(recurrence)]
         return body
 
     def _typed_update_body(
@@ -555,7 +681,32 @@ class GoogleCalendarLiveService:
                     "dateTime": str(patch["end"]),
                     "timeZone": timezone_name,
                 }
+        if "recurrence" in patch:
+            recurrence = patch.get("recurrence")
+            body["recurrence"] = (
+                [] if recurrence is None else [self._recurrence_rule(dict(recurrence))]
+            )
         return body
+
+    @staticmethod
+    def _recurrence_rule(recurrence: dict[str, Any]) -> str:
+        pieces = [f"FREQ={str(recurrence['frequency']).upper()}"]
+        interval = int(recurrence.get("interval") or 1)
+        if interval != 1:
+            pieces.append(f"INTERVAL={interval}")
+        weekdays = recurrence.get("by_weekday") or []
+        if weekdays:
+            pieces.append("BYDAY=" + ",".join(str(item).upper() for item in weekdays))
+        if recurrence.get("count") is not None:
+            pieces.append(f"COUNT={int(recurrence['count'])}")
+        elif recurrence.get("until"):
+            raw = str(recurrence["until"])
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
+                pieces.append("UNTIL=" + raw.replace("-", ""))
+            else:
+                parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                pieces.append(parsed.astimezone(timezone.utc).strftime("UNTIL=%Y%m%dT%H%M%SZ"))
+        return "RRULE:" + ";".join(pieces)
 
     @classmethod
     def _typed_event_matches(
@@ -572,7 +723,15 @@ class GoogleCalendarLiveService:
             or str(private.get("jarvisArgumentsHash") or "") != arguments_hash
         ):
             return False
-        for field in ("id", "summary", "start", "end", "location", "description"):
+        for field in (
+            "id",
+            "summary",
+            "start",
+            "end",
+            "location",
+            "description",
+            "recurrence",
+        ):
             if field in expected and event.get(field) != expected.get(field):
                 return False
         if "attendees" in expected:
@@ -1358,13 +1517,33 @@ class GoogleCalendarLiveService:
                 "timeMax": end,
                 "singleEvents": True,
                 "orderBy": "startTime",
-                "maxResults": min(101, limit + 1),
+                "maxResults": min(2500, max(100, limit + 1)),
                 "timeZone": timezone_name,
                 "showDeleted": False,
             }
             if normalized_text:
                 request_arguments["q"] = normalized_text
-            response = service.events().list(**request_arguments).execute()
+            raw_items: list[dict[str, Any]] = []
+            next_page_token = ""
+            page_count = 0
+            coverage_complete = True
+            while True:
+                page_count += 1
+                page_arguments = dict(request_arguments)
+                if next_page_token:
+                    page_arguments["pageToken"] = next_page_token
+                response = service.events().list(**page_arguments).execute()
+                if not isinstance(response, dict):
+                    raise RuntimeError("calendar_page_invalid")
+                raw_items.extend(
+                    item for item in response.get("items", []) if isinstance(item, dict)
+                )
+                next_page_token = str(response.get("nextPageToken") or "").strip()
+                if not next_page_token:
+                    break
+                if page_count >= 100 or len(raw_items) >= 10_000:
+                    coverage_complete = False
+                    break
             if changed:
                 self._save_token_store(token_store_path, token_store)
         except Exception:
@@ -1385,22 +1564,24 @@ class GoogleCalendarLiveService:
                 is_default=is_default,
             )
 
-        raw_items = response.get("items", []) if isinstance(response, dict) else []
         projected = [
             self._query_event_projection(event=event, binding=binding)
             for event in raw_items
             if isinstance(event, dict)
             and str(event.get("status") or "confirmed").strip().casefold() != "cancelled"
         ]
-        # Google already guarantees chronological order for singleEvents +
-        # orderBy=startTime. Preserve that provider order (including its
-        # all-day/timed-event semantics) and reverse it for the bounded
-        # newest-first projection instead of re-sorting ISO strings locally.
-        if normalized_order == "newest":
-            projected.reverse()
-        truncated = len(projected) > limit or bool(
-            isinstance(response, dict) and str(response.get("nextPageToken") or "").strip()
+        # Sort across every fetched page. Provider page order is not a safe
+        # substitute for global ordering once pages are accumulated/reversed.
+        projected.sort(
+            key=lambda event: (
+                self._query_sort_instant(
+                    str(event.get("start") or ""), timezone_name=timezone_name
+                ),
+                str(event.get("event_ref") or ""),
+            ),
+            reverse=normalized_order == "newest",
         )
+        truncated = len(projected) > limit or not coverage_complete
         events = projected[:limit]
         return {
             "status": "ok",
@@ -1418,10 +1599,27 @@ class GoogleCalendarLiveService:
                 candidates=[],
                 source_kind="google_calendar_live",
                 synchronized=True,
-                coverage_complete=not truncated,
+                coverage_complete=coverage_complete and len(projected) <= limit,
                 truncated=truncated,
             ),
         }
+
+    @staticmethod
+    def _query_sort_instant(value: str, *, timezone_name: str) -> datetime:
+        normalized = str(value or "").strip()
+        try:
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", normalized):
+                return datetime.combine(
+                    date.fromisoformat(normalized),
+                    time.min,
+                    tzinfo=ZoneInfo(timezone_name),
+                ).astimezone(timezone.utc)
+            parsed = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=ZoneInfo(timezone_name))
+            return parsed.astimezone(timezone.utc)
+        except Exception:
+            return datetime.min.replace(tzinfo=timezone.utc)
 
     @classmethod
     def _resolve_query_binding(

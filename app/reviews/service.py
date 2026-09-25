@@ -36,7 +36,7 @@ _EFFECTS = {
 }
 _CARDINALITIES = {"single", "atomic_batch", "independent_batch"}
 _PERSISTENCE = {"standard", "redacted", "no_store"}
-_DESTINATION_PURPOSES = {"human_reviews", "operator_notices"}
+_DESTINATION_PURPOSES = {"human_reviews", "operator_notices", "task_workspace"}
 _FORBIDDEN_ARGUMENT_KEYS = {
     "api_key",
     "body",
@@ -531,7 +531,7 @@ class HumanReviewService:
         purpose = _bounded_text(
             destination_purpose, code="action_proposal_destination_invalid", maximum=64
         ).casefold()
-        if purpose != "human_reviews" or purpose not in _DESTINATION_PURPOSES:
+        if purpose not in {"human_reviews", "task_workspace"}:
             raise ValueError("action_proposal_destination_invalid")
         resource = _bounded_text(
             resource_version, code="action_proposal_resource_version_invalid"

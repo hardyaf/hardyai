@@ -42,6 +42,14 @@ class ReviewExecutionRequest(BaseModel):
     operation_id: str = Field(min_length=8, max_length=160, pattern=r"^[A-Za-z0-9_.:-]+$")
 
 
+class LocalActionDecisionRequest(BaseModel):
+    proposal_id: str = Field(min_length=8, max_length=120)
+    decision: Literal["approve", "reject"]
+    bound_proposal_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    reason: str = Field(min_length=1, max_length=500)
+    idempotency_key: str = Field(min_length=8, max_length=160)
+
+
 @router.get("/action-proposals")
 async def list_action_proposals(
     state: ActionProposalState | None = None,
@@ -120,6 +128,35 @@ async def decide_review(
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"decision": decision}
+
+
+@router.post("/{review_id}/local-action-decision")
+async def decide_local_action(
+    review_id: str,
+    body: LocalActionDecisionRequest,
+    principal: RequestPrincipal = Depends(require_operator),
+    service: HumanReviewService = Depends(get_human_review_service),
+) -> dict[str, Any]:
+    try:
+        return service.decide_action_proposal(
+            proposal_id=body.proposal_id,
+            review_id=review_id,
+            bound_proposal_hash=body.bound_proposal_hash,
+            decision=ReviewDecisionKind(body.decision),
+            actor_principal=principal.subject,
+            destination_purpose="task_workspace",
+            guild_id="",
+            channel_id="",
+            message_id="",
+            reason=body.reason,
+            idempotency_key=body.idempotency_key,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="action_proposal_not_found") from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/{review_id}/execute-document-action")

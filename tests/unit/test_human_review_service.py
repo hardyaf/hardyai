@@ -284,6 +284,56 @@ def test_action_decision_requires_bound_actor_channel_and_enqueues_execution_onc
     repository.close()
 
 
+def test_task_workspace_approval_is_hash_bound_without_discord_delivery(tmp_path) -> None:
+    repository = HumanReviewRepository(str(tmp_path / "core.db"))
+    service = HumanReviewService(repository)
+    descriptor = _action_descriptor()
+    created = service.create_action_proposal(
+        envelope=_action_envelope(descriptor, request_id="request-local-task"),
+        descriptor=descriptor,
+        resource_version="resource-v1",
+        approver_principal="operator",
+        expires_at=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+        destination_purpose="task_workspace",
+    )
+    proposal = created["proposal"]
+
+    assert created["notification_job"] is None
+    assert not repository.job_repository.list_jobs(
+        job_type="review.notification.discord.v1"
+    )
+    with pytest.raises(PermissionError, match="action_decision_actor_denied"):
+        service.decide_action_proposal(
+            proposal_id=proposal["proposal_id"],
+            review_id=proposal["review_id"],
+            bound_proposal_hash=proposal["proposal_hash"],
+            decision="approve",
+            actor_principal="someone-else",
+            destination_purpose="task_workspace",
+            guild_id="",
+            channel_id="",
+            message_id="",
+            reason="Wrong owner.",
+            idempotency_key="decision-local-wrong-owner",
+        )
+    decided = service.decide_action_proposal(
+        proposal_id=proposal["proposal_id"],
+        review_id=proposal["review_id"],
+        bound_proposal_hash=proposal["proposal_hash"],
+        decision="approve",
+        actor_principal="operator",
+        destination_purpose="task_workspace",
+        guild_id="",
+        channel_id="",
+        message_id="",
+        reason="Approved in the local task workspace.",
+        idempotency_key="decision-local-correct-owner",
+    )
+    assert decided["proposal"]["state"] == "approved"
+    assert decided["execution_job"]["job_type"] == "review.action_execution.v1"
+    repository.close()
+
+
 def test_rejection_is_terminal_and_clears_purpose_bound_arguments(tmp_path) -> None:
     repository = HumanReviewRepository(str(tmp_path / "core.db"))
     service = HumanReviewService(repository)

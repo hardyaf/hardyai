@@ -17,6 +17,7 @@ from app.api.routes.operator_session import router as operator_session_router
 from app.api.routes.jobs import router as jobs_router
 from app.api.routes.reviews import router as reviews_router
 from app.api.routes.provenance import router as provenance_router
+from app.api.routes.tasks import router as tasks_router
 from app.api.operator_auth import validate_security_configuration
 from app.api.security_headers import SECURITY_HEADERS
 from app.container import ApplicationContainer
@@ -186,6 +187,7 @@ def create_app(container: ApplicationContainer | None = None) -> FastAPI:
     application.include_router(jobs_router)
     application.include_router(reviews_router)
     application.include_router(provenance_router)
+    application.include_router(tasks_router)
     application.include_router(dashboard_router)
     return application
 

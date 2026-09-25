@@ -1,5 +1,10 @@
 # Qwen3.8 Main Model Migration Plan
 
+> **Current execution note (2026-09-25):** This remains the model-migration record, not the release gate
+> for the native task workspace. `JARVIS-TASK-WORKSPACE-IMPLEMENTATION-PLAN.md` supersedes repeated
+> benchmark, latency-comparison, and multiday observation requirements for this release. The protected
+> deployment configuration still selects the actual model; this task does not replace it implicitly.
+
 Status: phases 0-4 implemented; production cutover blocked by the single-GPU coexistence gate
 
 Last verified: 2026-08-26

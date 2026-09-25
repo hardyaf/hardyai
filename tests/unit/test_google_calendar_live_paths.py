@@ -8,7 +8,7 @@ from app.services.google.calendar_live import CalendarBinding, GoogleCalendarLiv
 
 class _FakeEventsResource:
     def __init__(self, response):
-        self.response = response
+        self.responses = response if isinstance(response, list) else [response]
         self.calls = []
 
     def list(self, **kwargs):
@@ -16,7 +16,8 @@ class _FakeEventsResource:
         return self
 
     def execute(self):
-        return self.response
+        index = min(len(self.calls) - 1, len(self.responses) - 1)
+        return self.responses[index]
 
 
 class _FakeCalendarApi:
@@ -484,24 +485,30 @@ def test_query_events_uses_exact_gog_style_provider_range_and_truthful_truncatio
             "oauth": {},
             "contacts": {"aliases": [{"name": "Alex", "aliases": ["Lex"]}]},
         },
-        response={
-            "items": [
-                {
-                    "id": "event-1",
-                    "summary": "Earlier practice",
-                    "start": {"dateTime": "2026-09-01T09:00:00-04:00"},
-                    "end": {"dateTime": "2026-09-01T10:00:00-04:00"},
-                    "location": "Field 1\nNorth gate",
-                },
-                {
-                    "id": "event-2",
-                    "summary": "Later practice",
-                    "start": {"dateTime": "2026-09-01T17:00:00-04:00"},
-                    "end": {"dateTime": "2026-09-01T18:00:00-04:00"},
-                },
-            ],
-            "nextPageToken": "provider-page-token",
-        },
+        response=[
+            {
+                "items": [
+                    {
+                        "id": "event-1",
+                        "summary": "Earlier practice",
+                        "start": {"dateTime": "2026-09-01T09:00:00-04:00"},
+                        "end": {"dateTime": "2026-09-01T10:00:00-04:00"},
+                        "location": "Field 1\nNorth gate",
+                    }
+                ],
+                "nextPageToken": "provider-page-token",
+            },
+            {
+                "items": [
+                    {
+                        "id": "event-2",
+                        "summary": "Later practice",
+                        "start": {"dateTime": "2026-09-01T17:00:00-04:00"},
+                        "end": {"dateTime": "2026-09-01T18:00:00-04:00"},
+                    }
+                ]
+            },
+        ],
     )
 
     result = service.query_events(
@@ -521,11 +528,23 @@ def test_query_events_uses_exact_gog_style_provider_range_and_truthful_truncatio
             "timeMax": "2026-09-02T04:00:00+00:00",
             "singleEvents": True,
             "orderBy": "startTime",
-            "maxResults": 2,
+            "maxResults": 100,
             "timeZone": "America/New_York",
             "showDeleted": False,
             "q": "practice",
-        }
+        },
+        {
+            "calendarId": "alex-provider-id",
+            "timeMin": "2026-09-01T04:00:00+00:00",
+            "timeMax": "2026-09-02T04:00:00+00:00",
+            "singleEvents": True,
+            "orderBy": "startTime",
+            "maxResults": 100,
+            "timeZone": "America/New_York",
+            "showDeleted": False,
+            "q": "practice",
+            "pageToken": "provider-page-token",
+        },
     ]
     payload = result["payload"]
     assert payload["events"][0]["title"] == "Later practice"
@@ -535,6 +554,37 @@ def test_query_events_uses_exact_gog_style_provider_range_and_truthful_truncatio
     assert payload["source"]["synchronized"] is True
     assert payload["source"]["coverage_complete"] is False
     assert result["untrusted"] is True
+
+
+def test_typed_recurrence_uses_structured_weekly_rrule(monkeypatch):
+    service, api = _typed_service(monkeypatch)
+    arguments = service.canonicalize_typed_write(
+        tool_id="calendar.create_event",
+        arguments={
+            "title": "Acceptance practice",
+            "start": "2026-09-29T18:00:00-04:00",
+            "end": "2026-09-29T19:00:00-04:00",
+            "all_day": False,
+            "timezone": "America/New_York",
+            "calendar_scope": "default",
+            "recurrence": {
+                "frequency": "weekly",
+                "interval": 1,
+                "count": 12,
+                "by_weekday": ["TU", "TH"],
+            },
+        },
+    )
+    result = service.execute_typed_create(
+        operation_id="toolop_v1_" + "8" * 64,
+        arguments_hash="9" * 64,
+        arguments=arguments,
+        include_invites=False,
+    )
+
+    assert result["status"] == "ok"
+    insert = next(call for call in api.resource.calls if call[0] == "insert")
+    assert insert[1]["body"]["recurrence"] == ["RRULE:FREQ=WEEKLY;BYDAY=TU,TH;COUNT=12"]
 
 
 def test_query_events_unknown_explicit_scope_never_falls_back_to_house(monkeypatch):

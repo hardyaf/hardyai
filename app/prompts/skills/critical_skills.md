@@ -1018,7 +1018,7 @@ main_tools:
           type: array
           minItems: 0
           maxItems: 100
-          items:
+          items: &calendar_event_projection
             type: object
             additionalProperties: false
             required: [event_ref, calendar_ref, resource_version, title, start, end, all_day, location, calendar_name]
@@ -1071,7 +1071,7 @@ main_tools:
               type: string
               minLength: 1
               maxLength: 64
-        calendar_scope:
+        calendar_scope: &calendar_scope_projection
           type: object
           additionalProperties: false
           required: [requested, display_name, resolved, is_default, candidates]
@@ -1115,6 +1115,42 @@ main_tools:
               maxLength: 64
         truncated:
           type: boolean
+  - tool_id: calendar.get_event
+    contract_version: 1
+    purpose: "Read back one exact event or expanded recurrence occurrence using event_ref and event_start from calendar.query_events."
+    interactive: true
+    effect: read
+    approval_rule: none
+    approval_conditions: []
+    idempotency: not_applicable
+    sensitivity: private
+    persistence: no_store
+    effect_cardinality: single
+    runtime_dependencies: []
+    transferable_observation_fields:
+      - pattern: /event
+        scope: cross_domain
+      - pattern: /calendar_scope
+        scope: same_domain
+    timeout_seconds: 30
+    max_result_items: 1
+    max_observation_chars: 4000
+    legacy_intents: []
+    input_schema:
+      type: object
+      additionalProperties: false
+      required: [event_ref, event_start, calendar_scope]
+      properties:
+        event_ref: {type: string, minLength: 16, maxLength: 100}
+        event_start: {type: string, minLength: 10, maxLength: 64}
+        calendar_scope: {type: string, minLength: 1, maxLength: 100}
+    observation_schema:
+      type: object
+      additionalProperties: false
+      required: [event, calendar_scope]
+      properties:
+        event: *calendar_event_projection
+        calendar_scope: *calendar_scope_projection
   - tool_id: calendar.create_event
     contract_version: 1
     purpose: "Create one event without attendees using exact start/end values. Never add invitees; use calendar.create_event_with_invites for outbound invitations. The server resolves the Calendar target, timezone, and resource version before operation identity."
@@ -1151,6 +1187,21 @@ main_tools:
         resource_version: {type: string, minLength: 16, maxLength: 100}
         location: {type: string, minLength: 1, maxLength: 300}
         description: {type: string, minLength: 1, maxLength: 2000}
+        recurrence: &calendar_recurrence
+          type: object
+          additionalProperties: false
+          required: [frequency]
+          properties:
+            frequency: {type: string, enum: [daily, weekly, monthly, yearly]}
+            interval: {type: integer, minimum: 1, maximum: 52}
+            count: {type: integer, minimum: 1, maximum: 366}
+            until: {type: string, minLength: 10, maxLength: 64}
+            by_weekday:
+              type: array
+              minItems: 1
+              maxItems: 7
+              uniqueItems: true
+              items: {type: string, enum: [MO, TU, WE, TH, FR, SA, SU]}
     observation_schema: &calendar_write_observation
       type: object
       additionalProperties: false
@@ -1239,7 +1290,7 @@ main_tools:
     input_schema:
       type: object
       additionalProperties: false
-      required: [event_ref, event_start, calendar_scope, timezone, patch]
+      required: [event_ref, event_start, calendar_scope, timezone, edit_scope, patch]
       properties:
         event_ref: {type: string, minLength: 16, maxLength: 100}
         event_start: {type: string, minLength: 10, maxLength: 64}
@@ -1247,6 +1298,7 @@ main_tools:
         timezone: {type: string, minLength: 1, maxLength: 64}
         calendar_ref: {type: string, minLength: 16, maxLength: 100}
         resource_version: {type: string, minLength: 16, maxLength: 100}
+        edit_scope: {type: string, enum: [single_event, occurrence, series]}
         patch:
           type: object
           additionalProperties: false
@@ -1259,6 +1311,22 @@ main_tools:
             all_day: {type: boolean}
             location: {type: string, minLength: 1, maxLength: 300}
             description: {type: string, minLength: 1, maxLength: 2000}
+            recurrence:
+              type: object
+              additionalProperties: false
+              required: [frequency]
+              properties:
+                frequency: {type: string, enum: [daily, weekly, monthly, yearly]}
+                interval: {type: integer, minimum: 1, maximum: 52}
+                count: {type: integer, minimum: 1, maximum: 366}
+                until: {type: string, minLength: 10, maxLength: 64}
+                by_weekday:
+                  type: array
+                  minItems: 1
+                  maxItems: 7
+                  uniqueItems: true
+                  items: {type: string, enum: [MO, TU, WE, TH, FR, SA, SU]}
+            clear_recurrence: {type: boolean}
     observation_schema: *calendar_write_observation
   - tool_id: calendar.delete_event
     contract_version: 1
@@ -1280,7 +1348,7 @@ main_tools:
     input_schema:
       type: object
       additionalProperties: false
-      required: [event_ref, event_start, calendar_scope, timezone]
+      required: [event_ref, event_start, calendar_scope, timezone, edit_scope]
       properties:
         event_ref: {type: string, minLength: 16, maxLength: 100}
         event_start: {type: string, minLength: 10, maxLength: 64}
@@ -1288,6 +1356,7 @@ main_tools:
         timezone: {type: string, minLength: 1, maxLength: 64}
         calendar_ref: {type: string, minLength: 16, maxLength: 100}
         resource_version: {type: string, minLength: 16, maxLength: 100}
+        edit_scope: {type: string, enum: [single_event, occurrence, series]}
     observation_schema: *calendar_write_observation
 ---
 

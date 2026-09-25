@@ -4,9 +4,10 @@ Jarvis is a modular household assistant platform. It is not a coding-agent-only 
 POC coordinates conversation, lists, calendars, home controls, email triage, private notes, bounded
 web research, session memory, and action verification through registered skill domains.
 
-The v0 deployment works. The present engineering focus is a safe first-pass agent loop with explicit
-authorization, inspectable state, bounded concurrency, durable writes, and clean separation between
-Main reasoning, skills, sessions, memory, and adapters.
+The local deployment includes a native durable task workspace with explicit authorization, inspectable
+state, bounded concurrency, durable writes, user steering, budget pause/resume, instruction-only skills,
+versioned preferences, and isolated Python composition. Main remains the semantic model plane; provider
+authority stays in typed domain capabilities.
 
 ## Current runtime decisions
 
@@ -16,14 +17,35 @@ Main reasoning, skills, sessions, memory, and adapters.
 - Every production Compose command must include `--env-file .env`; otherwise model, Discord, and bind
   settings can silently fall back to disabled or loopback defaults.
 - The production GPU profile is sized for an NVIDIA RTX 3090 with 24 GB VRAM.
-- Main is the only semantic model plane. Main repair and conversation are migrating from
-  `gpt-oss:20b` to `qwen3.8:27b` under the gated
-  [Main model migration plan](docs/QWEN38-MAIN-MIGRATION-PLAN.md). The protected Hardybot `.env`
-  remains authoritative during rollout; `gpt-oss:20b` is retained as the rollback model.
+- Main is the only semantic model plane. The protected deployment `.env` selects the active model;
+  model-migration documents are historical rollout records and do not override that configuration.
 - SQLite is authoritative for sessions, skills, domain state, action tickets, and the durable job
   ledger. Runtime data and protected configuration never belong in Git.
 - Optional web research is SearXNG-only, snippets-only, read-only, bounded, and disabled by default.
 - Action-ticket verification and autonomous remediation are feature-flagged off by default.
+- The task API acknowledges immediately and `task-worker` continues through the existing leased job
+  ledger. Generated Python runs in a fixed, non-root, offline image; only the trusted launcher receives
+  Docker control, and provider access returns through a task-scoped authorization broker.
+
+## Local task workspace
+
+After signing in with the local operator key, open `/` (or `/workspace`) to assign and supervise work.
+The prior operational dashboard remains at `/dashboard`. The workspace provides Tasks, Task detail, and
+Skills/preferences views. Task detail exposes plan, progress, budgets, questions/approvals, effect
+receipts, code runs, artifacts, the durable event log, and controls for redirection, pause, cancellation,
+budget extension, and continuation.
+
+Enable the release path with `TASK_WORKSPACE_ENABLED=true` and start the `tasks` Compose profile. Build
+the fixed runner image separately so the launcher can pin it by tag or digest:
+
+```text
+docker build -f deploy/docker/task-runner.Dockerfile -t jarvis-task-runner:local .
+docker compose --env-file .env -f deploy/docker/compose.yaml --profile tasks up -d --no-build jarvis task-runner-launcher task-worker
+```
+
+The runner secret is a random local file mounted only into `task-worker` and
+`task-runner-launcher`. The API and generated containers never receive Docker's socket or provider
+credentials. See [`docs/task-workspace-architecture.md`](docs/task-workspace-architecture.md).
 
 ## Request and authorization boundaries
 

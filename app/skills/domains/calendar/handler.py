@@ -16,13 +16,17 @@ from app.skills.tool_contracts import (
 CALENDAR_TYPED_TOOLS = frozenset(
     {
         "calendar.query_events",
+        "calendar.get_event",
         "calendar.create_event",
         "calendar.create_event_with_invites",
         "calendar.update_event",
         "calendar.delete_event",
     }
 )
-CALENDAR_WRITE_TOOLS = CALENDAR_TYPED_TOOLS - {"calendar.query_events"}
+CALENDAR_WRITE_TOOLS = CALENDAR_TYPED_TOOLS - {
+    "calendar.query_events",
+    "calendar.get_event",
+}
 
 
 def describe_capability(
@@ -86,6 +90,18 @@ class CalendarToolHandler:
         scope = str(arguments.get("calendar_scope") or "").strip()
         if not scope:
             raise ToolArgumentCanonicalizationError("calendar_scope_missing")
+        if normalized_tool_id == "calendar.get_event":
+            event_ref = str(arguments.get("event_ref") or "").strip().casefold()
+            event_start = str(arguments.get("event_start") or "").strip()
+            if not re.fullmatch(r"calendar_event_v1_[0-9a-f]{32}", event_ref):
+                raise ToolArgumentCanonicalizationError("calendar_event_ref_invalid")
+            if not event_start:
+                raise ToolArgumentCanonicalizationError("calendar_event_start_invalid")
+            return {
+                "calendar_scope": scope,
+                "event_ref": event_ref,
+                "event_start": event_start,
+            }
         time_basis = str(arguments.get("time_basis") or "").strip().casefold()
         if time_basis not in {"local_calendar", "absolute"}:
             raise ToolArgumentCanonicalizationError("calendar_time_basis_invalid")
@@ -125,6 +141,12 @@ class CalendarToolHandler:
                 text=str(arguments.get("text") or "").strip() or None,
                 order=str(arguments.get("order") or "oldest"),
                 limit=int(arguments.get("limit", 20)),
+            )
+        if envelope.tool_id == "calendar.get_event":
+            return service.get_typed_event(
+                calendar_scope=str(arguments.get("calendar_scope") or ""),
+                event_ref=str(arguments.get("event_ref") or ""),
+                event_start=str(arguments.get("event_start") or ""),
             )
         result = service.execute_typed_write(
             tool_id=envelope.tool_id,
@@ -179,10 +201,18 @@ class CalendarToolHandler:
                     raise ToolArgumentCanonicalizationError("calendar_invitees_forbidden")
             else:
                 canonical["invitee_emails"] = self._invitee_emails(invitees)
+            if arguments.get("recurrence") is not None:
+                canonical["recurrence"] = self._canonical_recurrence(
+                    arguments.get("recurrence"), timezone_name=timezone_name
+                )
             return canonical
 
         canonical["event_ref"] = str(arguments.get("event_ref") or "").strip().casefold()
         canonical["event_start"] = str(arguments.get("event_start") or "").strip()
+        edit_scope = str(arguments.get("edit_scope") or "single_event").strip().casefold()
+        if edit_scope not in {"single_event", "occurrence", "series"}:
+            raise ToolArgumentCanonicalizationError("calendar_edit_scope_invalid")
+        canonical["edit_scope"] = edit_scope
         if not re.fullmatch(r"calendar_event_v1_[0-9a-f]{32}", canonical["event_ref"]):
             raise ToolArgumentCanonicalizationError("calendar_event_ref_invalid")
         if not canonical["event_start"]:
@@ -194,7 +224,16 @@ class CalendarToolHandler:
         if not isinstance(raw_patch, Mapping) or not raw_patch:
             raise ToolArgumentCanonicalizationError("calendar_patch_invalid")
         patch = dict(raw_patch)
-        allowed = {"title", "start", "end", "all_day", "location", "description"}
+        allowed = {
+            "title",
+            "start",
+            "end",
+            "all_day",
+            "location",
+            "description",
+            "recurrence",
+            "clear_recurrence",
+        }
         if set(patch) - allowed:
             raise ToolArgumentCanonicalizationError("calendar_patch_field_forbidden")
         timing = {"start", "end", "all_day"} & set(patch)
@@ -220,8 +259,75 @@ class CalendarToolHandler:
                 if not value or len(value) > maximum:
                     raise ToolArgumentCanonicalizationError(f"calendar_patch_{field}_invalid")
                 normalized_patch[field] = value
+        if "recurrence" in patch and patch.get("clear_recurrence") is True:
+            raise ToolArgumentCanonicalizationError("calendar_recurrence_patch_ambiguous")
+        if "recurrence" in patch or "clear_recurrence" in patch:
+            if edit_scope != "series":
+                raise ToolArgumentCanonicalizationError(
+                    "calendar_recurrence_update_requires_series"
+                )
+            if "clear_recurrence" in patch:
+                if patch.get("clear_recurrence") is not True:
+                    raise ToolArgumentCanonicalizationError(
+                        "calendar_clear_recurrence_invalid"
+                    )
+                normalized_patch["recurrence"] = None
+            else:
+                normalized_patch["recurrence"] = self._canonical_recurrence(
+                    patch.get("recurrence"), timezone_name=timezone_name
+                )
         canonical["patch"] = normalized_patch
         return canonical
+
+    @staticmethod
+    def _canonical_recurrence(value: Any, *, timezone_name: str) -> dict[str, Any]:
+        if not isinstance(value, Mapping):
+            raise ToolArgumentCanonicalizationError("calendar_recurrence_invalid")
+        recurrence = dict(value)
+        allowed = {"frequency", "interval", "count", "until", "by_weekday"}
+        if set(recurrence) - allowed:
+            raise ToolArgumentCanonicalizationError("calendar_recurrence_field_forbidden")
+        frequency = str(recurrence.get("frequency") or "").strip().casefold()
+        if frequency not in {"daily", "weekly", "monthly", "yearly"}:
+            raise ToolArgumentCanonicalizationError("calendar_recurrence_frequency_invalid")
+        interval = recurrence.get("interval", 1)
+        if isinstance(interval, bool) or not isinstance(interval, int) or not 1 <= interval <= 52:
+            raise ToolArgumentCanonicalizationError("calendar_recurrence_interval_invalid")
+        count = recurrence.get("count")
+        until = str(recurrence.get("until") or "").strip()
+        if count is not None and until:
+            raise ToolArgumentCanonicalizationError("calendar_recurrence_end_ambiguous")
+        if count is not None and (
+            isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= 366
+        ):
+            raise ToolArgumentCanonicalizationError("calendar_recurrence_count_invalid")
+        if until:
+            try:
+                if re.fullmatch(r"\d{4}-\d{2}-\d{2}", until):
+                    date.fromisoformat(until)
+                else:
+                    parsed = datetime.fromisoformat(until.replace("Z", "+00:00"))
+                    if parsed.tzinfo is None:
+                        raise ValueError
+                    parsed.astimezone(ZoneInfo(timezone_name))
+            except Exception as exc:
+                raise ToolArgumentCanonicalizationError("calendar_recurrence_until_invalid") from exc
+        raw_days = recurrence.get("by_weekday") or []
+        if not isinstance(raw_days, (list, tuple)) or len(raw_days) > 7:
+            raise ToolArgumentCanonicalizationError("calendar_recurrence_weekdays_invalid")
+        days = [str(item or "").strip().upper() for item in raw_days]
+        if any(day not in {"MO", "TU", "WE", "TH", "FR", "SA", "SU"} for day in days):
+            raise ToolArgumentCanonicalizationError("calendar_recurrence_weekday_invalid")
+        if len(days) != len(set(days)) or (days and frequency != "weekly"):
+            raise ToolArgumentCanonicalizationError("calendar_recurrence_weekdays_invalid")
+        result: dict[str, Any] = {"frequency": frequency, "interval": interval}
+        if count is not None:
+            result["count"] = count
+        if until:
+            result["until"] = until
+        if days:
+            result["by_weekday"] = days
+        return result
 
     @staticmethod
     def _canonical_event_spec(

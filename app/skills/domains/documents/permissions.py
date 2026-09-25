@@ -55,7 +55,12 @@ class DocumentRequestAccessPolicy:
     def authorized(cls, context: dict[str, object]) -> bool:
         principal_kind = cls._principal_kind(context)
         source = cls._source(context)
-        if principal_kind in {"operator", "test"} and source in {"dashboard", "web", "test"}:
+        if principal_kind in {"operator", "test"} and source in {
+            "dashboard",
+            "web",
+            "test",
+            "task_workspace",
+        }:
             return True
         return (
             principal_kind == "discord_adapter"

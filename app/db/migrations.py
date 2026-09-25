@@ -9,8 +9,8 @@ from app.db.domain_schema import create_email_agent_schema
 from app.db.review_schema import ensure_action_approval_schema, ensure_review_schema
 
 
-LATEST_SCHEMA_VERSION = 14
-CORE_SCHEMA_READER_VERSION = 14
+LATEST_SCHEMA_VERSION = 15
+CORE_SCHEMA_READER_VERSION = 15
 
 
 # Tests may replace this content-free hook to prove that every version-8 step
@@ -958,6 +958,199 @@ def _migration_014_email_reasoning_led_writes(conn: sqlite3.Connection) -> None:
     _notify_migration_step(14, "record_reader_compatibility")
 
 
+def _migration_015_durable_task_workspace(conn: sqlite3.Connection) -> None:
+    """Add the native task aggregate without replacing the durable job ledger."""
+
+    _execute_sql_batch(
+        conn,
+        """
+        CREATE TABLE IF NOT EXISTS agent_tasks (
+            task_id TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            source_interface TEXT NOT NULL,
+            session_id TEXT,
+            submission_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            goal TEXT NOT NULL,
+            status TEXT NOT NULL,
+            revision INTEGER NOT NULL DEFAULT 1,
+            steering_revision INTEGER NOT NULL DEFAULT 0,
+            run_generation INTEGER NOT NULL DEFAULT 1,
+            active_job_id TEXT,
+            plan_markdown TEXT NOT NULL DEFAULT '',
+            progress_summary TEXT NOT NULL DEFAULT '',
+            final_result TEXT,
+            error_code TEXT,
+            waiting_prompt TEXT,
+            workspace_ref TEXT NOT NULL,
+            budget_seconds_total REAL NOT NULL,
+            budget_seconds_used REAL NOT NULL DEFAULT 0,
+            model_decisions_limit INTEGER NOT NULL,
+            model_decisions_used INTEGER NOT NULL DEFAULT 0,
+            capability_calls_limit INTEGER NOT NULL,
+            capability_calls_used INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            started_at TEXT,
+            completed_at TEXT,
+            cancelled_at TEXT,
+            UNIQUE(owner_id, submission_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_agent_tasks_owner_updated
+            ON agent_tasks(owner_id, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_agent_tasks_status_updated
+            ON agent_tasks(status, updated_at);
+
+        CREATE TABLE IF NOT EXISTS task_events (
+            event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id TEXT NOT NULL,
+            sequence INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(task_id) REFERENCES agent_tasks(task_id) ON DELETE CASCADE,
+            UNIQUE(task_id, sequence)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_task_events_task_event
+            ON task_events(task_id, event_id);
+
+        CREATE TABLE IF NOT EXISTS task_messages (
+            message_id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            sequence INTEGER NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL DEFAULT '',
+            tool_name TEXT,
+            tool_call_id TEXT,
+            tool_calls_json TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(task_id) REFERENCES agent_tasks(task_id) ON DELETE CASCADE,
+            UNIQUE(task_id, sequence)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_task_messages_task_sequence
+            ON task_messages(task_id, sequence);
+
+        CREATE TABLE IF NOT EXISTS task_budget_grants (
+            grant_id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            submission_id TEXT NOT NULL,
+            added_seconds REAL NOT NULL,
+            added_model_decisions INTEGER NOT NULL,
+            added_capability_calls INTEGER NOT NULL,
+            created_by TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(task_id) REFERENCES agent_tasks(task_id) ON DELETE CASCADE,
+            UNIQUE(task_id, submission_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS task_effect_receipts (
+            receipt_id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            logical_operation_id TEXT NOT NULL,
+            provider_operation_id TEXT NOT NULL,
+            tool_id TEXT NOT NULL,
+            arguments_hash TEXT NOT NULL,
+            state TEXT NOT NULL,
+            result_json TEXT NOT NULL DEFAULT '{}',
+            run_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(task_id) REFERENCES agent_tasks(task_id) ON DELETE CASCADE,
+            UNIQUE(task_id, logical_operation_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_task_effects_task_state
+            ON task_effect_receipts(task_id, state);
+
+        CREATE TABLE IF NOT EXISTS task_script_runs (
+            run_id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            logical_run_id TEXT NOT NULL,
+            source_sha256 TEXT NOT NULL,
+            source_ref TEXT NOT NULL,
+            workspace_ref TEXT NOT NULL,
+            steering_revision INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            exit_code INTEGER,
+            stdout_text TEXT NOT NULL DEFAULT '',
+            stderr_text TEXT NOT NULL DEFAULT '',
+            artifacts_json TEXT NOT NULL DEFAULT '[]',
+            started_at TEXT,
+            completed_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(task_id) REFERENCES agent_tasks(task_id) ON DELETE CASCADE,
+            UNIQUE(task_id, logical_run_id, source_sha256)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_task_script_runs_task
+            ON task_script_runs(task_id, created_at);
+
+        CREATE TABLE IF NOT EXISTS user_preferences (
+            preference_id TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            owner_id TEXT NOT NULL,
+            scope TEXT NOT NULL,
+            skill_id TEXT,
+            rule_text TEXT NOT NULL,
+            source_instruction TEXT NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0, 1)),
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(preference_id, revision)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_user_preferences_effective
+            ON user_preferences(owner_id, active, scope, skill_id);
+
+        CREATE TABLE IF NOT EXISTS user_skill_revisions (
+            skill_id TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            owner_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            instructions_markdown TEXT NOT NULL,
+            base_skill_id TEXT,
+            active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0, 1)),
+            source_instruction TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(owner_id, skill_id, revision)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_user_skill_revisions_effective
+            ON user_skill_revisions(owner_id, active, skill_id);
+
+        CREATE TABLE IF NOT EXISTS task_channel_bindings (
+            owner_id TEXT NOT NULL,
+            source_interface TEXT NOT NULL,
+            channel_key TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(owner_id, source_interface, channel_key),
+            FOREIGN KEY(task_id) REFERENCES agent_tasks(task_id) ON DELETE CASCADE
+        );
+        """,
+    )
+    conn.execute(
+        """
+        INSERT INTO schema_reader_compatibility (
+            schema_version, minimum_reader_version, change_class, description
+        ) VALUES (
+            15, 14, 'additive',
+            'Adds the durable task workspace, explicit preferences, and user skill revisions.'
+        )
+        ON CONFLICT(schema_version) DO UPDATE SET
+            minimum_reader_version=excluded.minimum_reader_version,
+            change_class=excluded.change_class,
+            description=excluded.description
+        """
+    )
+    _notify_migration_step(15, "record_reader_compatibility")
+
+
 def _execute_sql_batch(conn: sqlite3.Connection, sql: str) -> None:
     """Execute a fixed DDL batch without sqlite3.executescript's implicit commit."""
 
@@ -993,6 +1186,7 @@ _MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     12: _migration_012_action_approval_proposals,
     13: _migration_013_home_operation_idempotency,
     14: _migration_014_email_reasoning_led_writes,
+    15: _migration_015_durable_task_workspace,
 }
 
 

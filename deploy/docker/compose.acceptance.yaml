@@ -1,0 +1,21 @@
+services:
+  accelerator-admission:
+    environment:
+      OLLAMA_BACKEND_URL: http://ollama:11434
+
+  jarvis:
+    environment:
+      DISCORD_ENABLED: "false"
+      CALENDAR_INBOX_ENABLED: "false"
+      EMAIL_AGENT_SYNC_ENABLED: "false"
+      CLOCK_SCHEDULER_ENABLED: "false"
+    ports: !override
+      - "${ACCEPTANCE_BIND_ADDRESS:-127.0.0.1}:${ACCEPTANCE_PORT:-18000}:8000"
+
+networks:
+  accelerator-backend:
+    external: true
+    name: "${ACCEPTANCE_ACCELERATOR_BACKEND_NETWORK:?set the existing accelerator backend network}"
+  documents-control:
+    external: true
+    name: "${ACCEPTANCE_DOCUMENTS_CONTROL_NETWORK:?set the existing documents control network}"

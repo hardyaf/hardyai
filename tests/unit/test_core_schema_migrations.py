@@ -281,14 +281,14 @@ def test_current_core_schema_initializes_at_reader_version(tmp_path: Path) -> No
     connection = sqlite3.connect(tmp_path / "current.db")
     connection.row_factory = sqlite3.Row
     try:
-        assert initialize_schema(connection) == LATEST_SCHEMA_VERSION == 14
+        assert initialize_schema(connection) == LATEST_SCHEMA_VERSION == 15
         assert evaluate_schema_reader_compatibility(connection).compatible is True
     finally:
         connection.close()
 
 
-def test_fresh_version14_schema_has_typed_tools_and_operation_ledgers(tmp_path: Path) -> None:
-    path = tmp_path / "fresh-v14.db"
+def test_fresh_version15_schema_has_task_workspace_and_operation_ledgers(tmp_path: Path) -> None:
+    path = tmp_path / "fresh-v15.db"
     connection = sqlite3.connect(path)
     connection.row_factory = sqlite3.Row
     try:
@@ -307,6 +307,23 @@ def test_fresh_version14_schema_has_typed_tools_and_operation_ledgers(tmp_path: 
             "SELECT minimum_reader_version, change_class FROM schema_reader_compatibility "
             "WHERE schema_version = 14"
         ).fetchone()) == (7, "additive")
+        assert tuple(connection.execute(
+            "SELECT minimum_reader_version, change_class FROM schema_reader_compatibility "
+            "WHERE schema_version = 15"
+        ).fetchone()) == (14, "additive")
+        for table in (
+            "agent_tasks",
+            "task_events",
+            "task_messages",
+            "task_budget_grants",
+            "task_effect_receipts",
+            "task_script_runs",
+            "user_preferences",
+            "user_skill_revisions",
+        ):
+            assert connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+            ).fetchone() is not None
         assert {"idempotency_key", "operation_identity_hash", "parent_manifest_hash"}.issubset(
             _column_names(connection, "email_tool_operations")
         )

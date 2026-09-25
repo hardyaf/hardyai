@@ -1,5 +1,10 @@
 # Email Reasoning and Inbox Management Plan
 
+> **Current execution note (2026-09-25):** This document remains the Email domain record. The native
+> task workspace plan supersedes its phase-only and multiday observation gates for the task-runtime
+> release. Email identity, mailbox/channel authorization, protected tokens, approval, rate, idempotency,
+> and provider-reconciliation requirements are unchanged.
+
 Status: `mailbox_state_discord_canary_pending`; E0-E4 deployed, E5 deterministic/provider gates complete, corrected Discord end-to-end canary pending
 
 Prepared: 2026-08-31

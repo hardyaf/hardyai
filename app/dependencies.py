@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import Request
+from fastapi import HTTPException, Request
 
 from app.container import ApplicationContainer
 from app.core.action_execution import ActionExecutionService
@@ -22,6 +22,8 @@ from app.reviews.repository import HumanReviewRepository
 from app.reviews.service import HumanReviewService
 from app.services.document_proposal_execution_service import DocumentProposalExecutionService
 from app.provenance.repository import ProvenanceRepository
+from app.tasks.repository import TaskRepository
+from app.tasks.service import TaskApplicationService
 
 
 def get_container(request: Request) -> ApplicationContainer:
@@ -107,3 +109,17 @@ def get_document_proposal_execution_service(
 
 def get_provenance_repository(request: Request) -> ProvenanceRepository:
     return get_container(request).provenance_repository
+
+
+def get_task_repository(request: Request) -> TaskRepository:
+    repository = get_container(request).task_repository
+    if repository is None:
+        raise HTTPException(status_code=503, detail="task_workspace_disabled")
+    return repository
+
+
+def get_task_service(request: Request) -> TaskApplicationService:
+    service = get_container(request).task_service
+    if service is None:
+        raise HTTPException(status_code=503, detail="task_workspace_disabled")
+    return service

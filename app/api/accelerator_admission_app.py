@@ -4,6 +4,7 @@ import asyncio
 import hmac
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -206,7 +207,7 @@ def _ollama_payload(value: dict[str, Any]) -> dict[str, Any]:
 
 
 def _ollama_chat_payload(value: dict[str, Any]) -> dict[str, Any]:
-    """Allow only bounded, non-streaming typed-step chat submissions."""
+    """Allow bounded native Ollama tool conversations through admission."""
 
     allowed_keys = {
         "model",
@@ -224,46 +225,64 @@ def _ollama_chat_payload(value: dict[str, Any]) -> dict[str, Any]:
     if model not in _ALLOWED_MODELS:
         raise HTTPException(status_code=400, detail="accelerator_model_not_allowed")
     messages = value.get("messages")
-    if not isinstance(messages, list) or not 1 <= len(messages) <= 32:
+    if not isinstance(messages, list) or not 1 <= len(messages) <= 128:
         raise HTTPException(status_code=400, detail="accelerator_chat_messages_invalid")
-    sanitized_messages: list[dict[str, str]] = []
+    sanitized_messages: list[dict[str, Any]] = []
     total_content_chars = 0
     for message in messages:
-        if not isinstance(message, dict) or set(message) - {"role", "content"}:
+        if not isinstance(message, dict):
             raise HTTPException(status_code=400, detail="accelerator_chat_message_invalid")
         role = str(message.get("role") or "").strip().casefold()
-        content = message.get("content")
-        if role not in {"system", "user", "assistant"} or not isinstance(content, str):
+        allowed_message_fields = {"role", "content"}
+        if role == "assistant":
+            allowed_message_fields.update({"tool_calls", "thinking"})
+        elif role == "tool":
+            allowed_message_fields.update({"tool_name", "tool_call_id"})
+        if set(message) - allowed_message_fields or role not in {
+            "system",
+            "user",
+            "assistant",
+            "tool",
+        }:
+            raise HTTPException(status_code=400, detail="accelerator_chat_message_invalid")
+        content = message.get("content", "")
+        if not isinstance(content, str):
             raise HTTPException(status_code=400, detail="accelerator_chat_message_invalid")
         total_content_chars += len(content)
         if total_content_chars > 500_000:
             raise HTTPException(status_code=400, detail="accelerator_chat_content_invalid")
-        sanitized_messages.append({"role": role, "content": content})
+        sanitized_message: dict[str, Any] = {"role": role, "content": content}
+        if role == "assistant":
+            thinking = message.get("thinking")
+            if thinking is not None:
+                if not isinstance(thinking, str) or len(thinking) > 100_000:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="accelerator_chat_message_invalid",
+                    )
+                total_content_chars += len(thinking)
+                sanitized_message["thinking"] = thinking
+            raw_calls = message.get("tool_calls")
+            if raw_calls is not None:
+                sanitized_message["tool_calls"] = _sanitize_chat_tool_calls(raw_calls)
+        if role == "tool":
+            tool_name = str(message.get("tool_name") or "").strip()
+            tool_call_id = str(message.get("tool_call_id") or "").strip()
+            if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,127}", tool_name):
+                raise HTTPException(status_code=400, detail="accelerator_chat_message_invalid")
+            sanitized_message["tool_name"] = tool_name
+            if tool_call_id:
+                if len(tool_call_id) > 160:
+                    raise HTTPException(status_code=400, detail="accelerator_chat_message_invalid")
+                sanitized_message["tool_call_id"] = tool_call_id
+        sanitized_messages.append(sanitized_message)
     if value.get("stream") is not False:
         raise HTTPException(status_code=400, detail="accelerator_streaming_disabled")
     options = value.get("options")
     if options is not None and not isinstance(options, dict):
         raise HTTPException(status_code=400, detail="accelerator_options_invalid")
 
-    tools = value.get("tools")
-    if not isinstance(tools, list) or len(tools) != 1:
-        raise HTTPException(status_code=400, detail="accelerator_chat_typed_wrapper_required")
-    tool = tools[0]
-    if not isinstance(tool, dict) or set(tool) != {"type", "function"} or tool.get("type") != "function":
-        raise HTTPException(status_code=400, detail="accelerator_chat_tool_invalid")
-    function = tool.get("function")
-    if (
-        not isinstance(function, dict)
-        or set(function) - {"name", "description", "parameters"}
-        or function.get("name") != "submit_model_step"
-        or not isinstance(function.get("description"), str)
-        or not isinstance(function.get("parameters"), dict)
-        or len(json.dumps(function, ensure_ascii=True, separators=(",", ":"))) > 65_536
-    ):
-        raise HTTPException(status_code=400, detail="accelerator_chat_tool_invalid")
-    parameters = function["parameters"]
-    if parameters.get("type") != "object" or not isinstance(parameters.get("properties"), dict):
-        raise HTTPException(status_code=400, detail="accelerator_chat_tool_invalid")
+    tools = _sanitize_chat_tools(value.get("tools"))
 
     sanitized = {key: item for key, item in value.items() if key in allowed_keys}
     sanitized["messages"] = sanitized_messages
@@ -275,6 +294,97 @@ def _ollama_chat_payload(value: dict[str, Any]) -> dict[str, Any]:
             raise HTTPException(status_code=400, detail="accelerator_think_invalid") from exc
         if sanitized["think"] is None:
             raise HTTPException(status_code=400, detail="accelerator_think_invalid")
+    return sanitized
+
+
+def _sanitize_chat_tool_calls(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or not 1 <= len(value) <= 32:
+        raise HTTPException(status_code=400, detail="accelerator_chat_tool_calls_invalid")
+    sanitized: list[dict[str, Any]] = []
+    for raw_call in value:
+        if not isinstance(raw_call, dict) or set(raw_call) - {"id", "type", "function"}:
+            raise HTTPException(status_code=400, detail="accelerator_chat_tool_calls_invalid")
+        function = raw_call.get("function")
+        if not isinstance(function, dict) or set(function) - {"index", "name", "arguments"}:
+            raise HTTPException(status_code=400, detail="accelerator_chat_tool_calls_invalid")
+        name = str(function.get("name") or "").strip()
+        arguments = function.get("arguments")
+        if (
+            not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,127}", name)
+            or not isinstance(arguments, dict)
+            or len(json.dumps(arguments, ensure_ascii=True, separators=(",", ":"))) > 65_536
+        ):
+            raise HTTPException(status_code=400, detail="accelerator_chat_tool_calls_invalid")
+        call: dict[str, Any] = {
+            "function": {"name": name, "arguments": arguments},
+        }
+        function_index = function.get("index")
+        if function_index is not None:
+            if isinstance(function_index, bool) or not isinstance(function_index, int) or not (
+                0 <= function_index <= 31
+            ):
+                raise HTTPException(status_code=400, detail="accelerator_chat_tool_calls_invalid")
+            call["function"]["index"] = function_index
+        call_id = str(raw_call.get("id") or "").strip()
+        if call_id:
+            if len(call_id) > 160:
+                raise HTTPException(status_code=400, detail="accelerator_chat_tool_calls_invalid")
+            call["id"] = call_id
+        call_type = str(raw_call.get("type") or "").strip()
+        if call_type:
+            if call_type != "function":
+                raise HTTPException(status_code=400, detail="accelerator_chat_tool_calls_invalid")
+            call["type"] = "function"
+        sanitized.append(call)
+    return sanitized
+
+
+def _sanitize_chat_tools(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or not 1 <= len(value) <= 48:
+        raise HTTPException(status_code=400, detail="accelerator_chat_tools_invalid")
+    sanitized: list[dict[str, Any]] = []
+    names: set[str] = set()
+    encoded_chars = 0
+    for tool in value:
+        if (
+            not isinstance(tool, dict)
+            or set(tool) != {"type", "function"}
+            or tool.get("type") != "function"
+        ):
+            raise HTTPException(status_code=400, detail="accelerator_chat_tool_invalid")
+        function = tool.get("function")
+        if not isinstance(function, dict) or set(function) - {
+            "name",
+            "description",
+            "parameters",
+        }:
+            raise HTTPException(status_code=400, detail="accelerator_chat_tool_invalid")
+        name = str(function.get("name") or "").strip()
+        description = function.get("description")
+        parameters = function.get("parameters")
+        if (
+            not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,127}", name)
+            or name in names
+            or not isinstance(description, str)
+            or len(description) > 2_000
+            or not isinstance(parameters, dict)
+            or parameters.get("type") != "object"
+            or not isinstance(parameters.get("properties"), dict)
+        ):
+            raise HTTPException(status_code=400, detail="accelerator_chat_tool_invalid")
+        normalized = {
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": description,
+                "parameters": parameters,
+            },
+        }
+        encoded_chars += len(json.dumps(normalized, ensure_ascii=True, separators=(",", ":")))
+        if encoded_chars > 262_144:
+            raise HTTPException(status_code=400, detail="accelerator_chat_tools_invalid")
+        names.add(name)
+        sanitized.append(normalized)
     return sanitized
 
 

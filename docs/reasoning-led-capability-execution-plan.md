@@ -1,14 +1,20 @@
 # Reasoning-Led Capability Execution Plan
 
-Status: `implementation_complete_batch_gate_pending`; P0A-P2, P5A, P6, and P7 are complete; P3/P5 observation debt remains; P5C-P5E and P8-P10 implementations await the consolidated authoritative gates; P11 is prepared but unexecuted
+> **Superseded execution process (2026-09-25):** This remains a historical design and rollout record.
+> For current work, `JARVIS-TASK-WORKSPACE-IMPLEMENTATION-PLAN.md` supersedes its phase-only
+> authorization, changed-file allowlists, wrapper-only model protocol, fixed skill-selection/repeat
+> limits, and latency or multiday promotion gates. Its deterministic identity, authorization, approval,
+> schema-validation, idempotency, and receipt boundaries remain applicable.
+
+Status: `superseded_by_native_task_workspace`; retained as an architecture-history record only
 
 Prepared: 2026-08-30
 
 Current phase: `P10A-P10B implementation complete locally; P11 consolidated certification runbook ready`
 
-Authority: this plan records the approved architecture. A later instruction to begin work authorizes
-only the named phase or subphase. Completing one phase does not authorize the next phase, production
-deployment, protected-configuration changes, or removal of rollback code.
+Authority: the native task workspace plan now governs implementation, acceptance, and deployment.
+The phase-only authorization and promotion gates below are historical and must not be used to block
+or redefine current task-runtime work. Deterministic authorization and effect-integrity rules remain.
 
 ## Objective
 

@@ -17,13 +17,19 @@ router = APIRouter(tags=["dashboard"])
 
 _DASHBOARD_PATH = (Path(__file__).resolve().parents[2] / "ui" / "dashboard.html").resolve()
 _STATUS_DASHBOARD_PATH = (Path(__file__).resolve().parents[2] / "ui" / "status_dashboard.html").resolve()
+_TASK_WORKSPACE_PATH = (Path(__file__).resolve().parents[2] / "ui" / "task_workspace.html").resolve()
 
 
-@router.get("/", include_in_schema=False)
 @router.get("/dashboard", include_in_schema=False)
 @router.get("/voice-test", include_in_schema=False)
 async def dashboard() -> FileResponse:
     return FileResponse(_DASHBOARD_PATH)
+
+
+@router.get("/", include_in_schema=False)
+@router.get("/workspace", include_in_schema=False)
+async def task_workspace() -> FileResponse:
+    return FileResponse(_TASK_WORKSPACE_PATH)
 
 
 @router.get("/status-dashboard", include_in_schema=False)

@@ -70,6 +70,7 @@ _INITIAL_CROSS_DOMAIN_TRANSFER_KEYS: dict[str, frozenset[str] | str] = {
     "lists.list_collections": _ALL_TOP_LEVEL_TRANSFER_KEYS,
     "lists.get_collection": _ALL_TOP_LEVEL_TRANSFER_KEYS,
     "calendar.query_events": frozenset({"events"}),
+    "calendar.get_event": frozenset({"event"}),
     "home.list_devices": frozenset({"devices"}),
     "home.get_device_state": frozenset({"device", "state", "truth_scope"}),
     "research.search_web": frozenset({"results"}),

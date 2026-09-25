@@ -31,7 +31,7 @@ services:
     networks: [accelerator-backend]
 
   accelerator-admission:
-    image: jarvis-poc-app:local
+    image: "${JARVIS_APP_IMAGE:-jarvis-poc-app:local}"
     restart: unless-stopped
     init: true
     user: "${JARVIS_UID:-1001}:${JARVIS_GID:-1001}"
@@ -98,7 +98,7 @@ services:
       start_period: 30s
 
   jarvis:
-    image: jarvis-poc-app:local
+    image: "${JARVIS_APP_IMAGE:-jarvis-poc-app:local}"
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile
@@ -207,6 +207,13 @@ services:
       DOCUMENTS_LOCAL_ONLY: "true"
       DOCUMENT_GATEWAY_BASE_URL: http://document-gateway:8010
       DOCUMENT_GATEWAY_OPERATOR_KEY_PATH: /run/secrets/jarvis_operator_api_key
+      TASK_WORKSPACE_ENABLED: "${TASK_WORKSPACE_ENABLED:-false}"
+      TASK_WORKSPACE_ROOT: /opt/jarvis/data/task-workspaces
+      TASK_MODEL_NAME: "${TASK_MODEL_NAME:-gpt-oss:20b}"
+      TASK_MODEL_TIMEOUT_SECONDS: "${TASK_MODEL_TIMEOUT_SECONDS:-180}"
+      TASK_MODEL_NUM_CTX: "${TASK_MODEL_NUM_CTX:-32768}"
+      TASK_MODEL_NUM_PREDICT: "${TASK_MODEL_NUM_PREDICT:-2048}"
+      TASK_MODEL_THINK: "${TASK_MODEL_THINK:-medium}"
     ports:
       - "${JARVIS_BIND_ADDRESS:-127.0.0.1}:8000:8000"
     networks: [default, accelerator-control, documents-control, discord-ingress-control]
@@ -247,6 +254,133 @@ services:
       retries: 12
       start_period: 20s
 
+  task-worker:
+    image: "${JARVIS_APP_IMAGE:-jarvis-poc-app:local}"
+    profiles: ["tasks"]
+    restart: unless-stopped
+    init: true
+    user: "${JARVIS_UID:-1001}:${JARVIS_GID:-1001}"
+    depends_on:
+      accelerator-admission:
+        condition: service_healthy
+      task-runner-launcher:
+        condition: service_healthy
+    env_file:
+      - ../../.env
+    environment:
+      APP_ENV: production
+      DATABASE_PATH: /opt/jarvis/data/jarvis_v2.db
+      MEMORY_MODE: sqlite
+      SKILL_ARTIFACT_AUTO_COMPILE_ENABLED: "false"
+      LOCAL_MODEL_URL: http://accelerator-admission:8040
+      ACCELERATOR_ADMISSION_REQUIRED: "true"
+      ACCELERATOR_ADMISSION_API_KEY_PATH: /run/secrets/accelerator_admission_api_key
+      MAIN_REPAIR_MODEL_ENABLED: "${JARVIS_MODELS_ENABLED:-false}"
+      MAIN_REPAIR_MODEL_PROVIDER: ollama
+      MAIN_REPAIR_MODEL_NAME: "${JARVIS_MAIN_MODEL:-qwen3.8:27b}"
+      CALENDAR_GOOGLE_ENABLED: "${CALENDAR_GOOGLE_ENABLED:-false}"
+      GOOGLE_PERMISSIONS_PATH: /opt/jarvis/secrets/live/google_permissions.yaml
+      EMAIL_AGENT_PERMISSIONS_PATH: /opt/jarvis/secrets/live/email_agent_permissions.yaml
+      DOCUMENTS_ENABLED: "${DOCUMENTS_ENABLED:-false}"
+      DOCUMENT_GATEWAY_BASE_URL: http://document-gateway:8010
+      DOCUMENT_GATEWAY_OPERATOR_KEY_PATH: /run/secrets/jarvis_operator_api_key
+      TASK_WORKSPACE_ENABLED: "true"
+      TASK_WORKSPACE_ROOT: /opt/jarvis/data/task-workspaces
+      TASK_MODEL_NAME: "${TASK_MODEL_NAME:-gpt-oss:20b}"
+      TASK_MODEL_TIMEOUT_SECONDS: "${TASK_MODEL_TIMEOUT_SECONDS:-180}"
+      TASK_MODEL_NUM_CTX: "${TASK_MODEL_NUM_CTX:-32768}"
+      TASK_MODEL_NUM_PREDICT: "${TASK_MODEL_NUM_PREDICT:-2048}"
+      TASK_MODEL_THINK: "${TASK_MODEL_THINK:-medium}"
+      TASK_RUNNER_BASE_URL: http://task-runner-launcher:8060
+      TASK_RUNNER_KEY_PATH: /run/secrets/task_runner_key
+    command: ["python", "-m", "app.workers.agent_task_worker"]
+    volumes:
+      - ../../data:/opt/jarvis/data
+      - ../../secrets/live:/opt/jarvis/secrets/live:ro
+      - type: bind
+        source: ${DOCUMENTS_SECRETS_ROOT:-/etc/hardyai/documents-required}/jarvis_operator_api_key
+        target: /run/secrets/jarvis_operator_api_key
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${DOCUMENTS_SECRETS_ROOT:-/etc/hardyai/documents-required}/accelerator_admission_api_key
+        target: /run/secrets/accelerator_admission_api_key
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${TASK_RUNNER_SECRETS_ROOT:-/etc/hardyai/task-runner}/task_runner_key
+        target: /run/secrets/task_runner_key
+        read_only: true
+        bind:
+          create_host_path: false
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks: [default, accelerator-control, documents-control, task-control]
+
+  task-runner-launcher:
+    image: "${JARVIS_APP_IMAGE:-jarvis-poc-app:local}"
+    profiles: ["tasks"]
+    restart: unless-stopped
+    init: true
+    user: "0:0"
+    environment:
+      APP_ENV: production
+      TASK_RUNNER_KEY_FILE: /run/secrets/task_runner_key
+      TASK_RUNNER_IMAGE: "${TASK_RUNNER_IMAGE:-jarvis-task-runner:local}"
+      TASK_WORKSPACE_HOST_ROOT: "${TASK_WORKSPACE_HOST_ROOT:?set TASK_WORKSPACE_HOST_ROOT to the absolute deployment data/task-workspaces path}"
+      DOCKER_SOCKET_PATH: /var/run/docker.sock
+    command:
+      - python
+      - -m
+      - uvicorn
+      - app.tasks.code_runner.launcher_app:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8060"
+      - --workers
+      - "1"
+      - --no-access-log
+    volumes:
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+        read_only: false
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${TASK_WORKSPACE_HOST_ROOT:?set TASK_WORKSPACE_HOST_ROOT to the absolute deployment data/task-workspaces path}
+        target: ${TASK_WORKSPACE_HOST_ROOT:?set TASK_WORKSPACE_HOST_ROOT to the absolute deployment data/task-workspaces path}
+        read_only: false
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${TASK_RUNNER_SECRETS_ROOT:-/etc/hardyai/task-runner}/task_runner_key
+        target: /run/secrets/task_runner_key
+        read_only: true
+        bind:
+          create_host_path: false
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks: [task-control]
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import json,urllib.request; payload=json.load(urllib.request.urlopen('http://127.0.0.1:8060/health',timeout=3)); raise SystemExit(0 if payload.get('status') == 'ok' else 1)
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
   searxng:
     image: searxng/searxng@sha256:892cf809341915a4b7710d3c9045005b4c377d51335a089b6d4da0b28750788d
     profiles: ["research"]
@@ -260,7 +394,7 @@ services:
     security_opt: ["no-new-privileges:true"]
 
   ticket-review:
-    image: jarvis-poc-app:local
+    image: "${JARVIS_APP_IMAGE:-jarvis-poc-app:local}"
     profiles: ["tickets"]
     restart: unless-stopped
     init: true
@@ -297,7 +431,7 @@ services:
     networks: [default, accelerator-control]
 
   action-approval-worker:
-    image: jarvis-poc-app:local
+    image: "${JARVIS_APP_IMAGE:-jarvis-poc-app:local}"
     profiles: ["approvals"]
     restart: unless-stopped
     init: true
@@ -343,7 +477,7 @@ services:
     networks: [default, accelerator-control, documents-control, discord-ingress-control]
 
   plane-sync:
-    image: jarvis-poc-app:local
+    image: "${JARVIS_APP_IMAGE:-jarvis-poc-app:local}"
     profiles: ["plane"]
     restart: unless-stopped
     init: true
@@ -367,7 +501,7 @@ services:
     security_opt: ["no-new-privileges:true"]
 
   email-spam-worker:
-    image: jarvis-poc-app:local
+    image: "${JARVIS_APP_IMAGE:-jarvis-poc-app:local}"
     profiles: ["email-spam"]
     restart: "no"
     init: true
@@ -396,7 +530,7 @@ services:
     security_opt: ["no-new-privileges:true"]
 
   email-operations-worker:
-    image: jarvis-poc-app:local
+    image: "${JARVIS_APP_IMAGE:-jarvis-poc-app:local}"
     profiles: ["email-operations"]
     restart: unless-stopped
     init: true
@@ -569,7 +703,7 @@ services:
       start_period: 45s
 
   document-worker:
-    image: jarvis-poc-app:local
+    image: "${JARVIS_APP_IMAGE:-jarvis-poc-app:local}"
     profiles: ["documents"]
     restart: unless-stopped
     mem_limit: 512m
@@ -704,7 +838,7 @@ services:
       start_period: 10s
 
   document-gateway:
-    image: jarvis-poc-app:local
+    image: "${JARVIS_APP_IMAGE:-jarvis-poc-app:local}"
     profiles: ["documents"]
     restart: unless-stopped
     mem_limit: 512m
@@ -806,7 +940,7 @@ services:
       start_period: 30s
 
   discord-attachment-ingress:
-    image: jarvis-poc-app:local
+    image: "${JARVIS_APP_IMAGE:-jarvis-poc-app:local}"
     profiles: ["discord-attachments"]
     restart: unless-stopped
     init: true
@@ -1084,3 +1218,5 @@ networks:
   discord-ingress-control:
     internal: true
   discord-attachment-egress:
+  task-control:
+    internal: true

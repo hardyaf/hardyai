@@ -339,26 +339,28 @@ class HumanReviewRepository:
             ).fetchone()
             if review_row is None or str(review_row["item_hash"]) != request.proposal_hash:
                 raise ValueError("action_proposal_review_conflict")
-            notification_payload = {
-                "proposal_id": proposal_id,
-                "review_id": review_id,
-                "operation_id": request.operation_id,
-                "authorization_binding": request.authorization_binding,
-                "batch_manifest_hash": request.batch_manifest_hash,
-                "transfer_binding_hash": request.transfer_binding_hash,
-                "destination_purpose": request.destination_purpose,
-            }
-            notification_job = self._jobs.enqueue_job(
-                job_type=REVIEW_NOTIFICATION_DISCORD_JOB,
-                aggregate_id=proposal_id,
-                idempotency_key=(
-                    "review-notification-discord:v1:"
-                    f"{proposal_id}:{review_id}:{request.destination_purpose}"
-                ),
-                payload=notification_payload,
-                max_attempts=5,
-                cursor=cur,
-            )
+            notification_job = None
+            if request.destination_purpose == "human_reviews":
+                notification_payload = {
+                    "proposal_id": proposal_id,
+                    "review_id": review_id,
+                    "operation_id": request.operation_id,
+                    "authorization_binding": request.authorization_binding,
+                    "batch_manifest_hash": request.batch_manifest_hash,
+                    "transfer_binding_hash": request.transfer_binding_hash,
+                    "destination_purpose": request.destination_purpose,
+                }
+                notification_job = self._jobs.enqueue_job(
+                    job_type=REVIEW_NOTIFICATION_DISCORD_JOB,
+                    aggregate_id=proposal_id,
+                    idempotency_key=(
+                        "review-notification-discord:v1:"
+                        f"{proposal_id}:{review_id}:{request.destination_purpose}"
+                    ),
+                    payload=notification_payload,
+                    max_attempts=5,
+                    cursor=cur,
+                )
         return {
             "proposal": self._proposal(proposal_row),
             "review": self._item(review_row),
@@ -524,7 +526,7 @@ class HumanReviewRepository:
                 raise ValueError("action_decision_destination_mismatch")
             if str(proposal["approver_principal"]) != actor_principal:
                 raise PermissionError("action_decision_actor_denied")
-            if (
+            if destination_purpose != "task_workspace" and (
                 str(proposal["notification_guild_id"] or "") != guild_id
                 or str(proposal["notification_channel_id"] or "") != channel_id
                 or not str(proposal["notification_message_id"] or "")
@@ -785,22 +787,23 @@ class HumanReviewRepository:
                         """,
                         (observed, receipt, proposal["decision_id"]),
                     )
-            self._jobs.enqueue_job(
-                job_type=REVIEW_OUTCOME_DISCORD_JOB,
-                aggregate_id=proposal_id,
-                idempotency_key=f"review-outcome-discord:v1:{proposal_id}:{target.value}",
-                payload={
-                    "proposal_id": proposal_id,
-                    "review_id": str(proposal["review_id"]),
-                    "operation_id": str(proposal["operation_id"]),
-                    "authorization_binding": str(proposal["authorization_binding"]),
-                    "state": target.value,
-                    "destination_purpose": str(proposal["destination_purpose"]),
-                },
-                max_attempts=5,
-                priority=40,
-                cursor=cur,
-            )
+            if str(proposal["destination_purpose"]) == "human_reviews":
+                self._jobs.enqueue_job(
+                    job_type=REVIEW_OUTCOME_DISCORD_JOB,
+                    aggregate_id=proposal_id,
+                    idempotency_key=f"review-outcome-discord:v1:{proposal_id}:{target.value}",
+                    payload={
+                        "proposal_id": proposal_id,
+                        "review_id": str(proposal["review_id"]),
+                        "operation_id": str(proposal["operation_id"]),
+                        "authorization_binding": str(proposal["authorization_binding"]),
+                        "state": target.value,
+                        "destination_purpose": str(proposal["destination_purpose"]),
+                    },
+                    max_attempts=5,
+                    priority=40,
+                    cursor=cur,
+                )
             row = cur.execute(
                 "SELECT * FROM action_proposals WHERE proposal_id=?", (proposal_id,)
             ).fetchone()

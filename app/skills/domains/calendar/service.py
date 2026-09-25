@@ -242,6 +242,26 @@ class CalendarService:
             limit=normalized_limit,
         )
 
+    def get_typed_event(
+        self,
+        *,
+        calendar_scope: str,
+        event_ref: str,
+        event_start: str,
+    ) -> dict[str, object]:
+        if self._google_live is None:
+            return {
+                "status": "error",
+                "source": "local_stub",
+                "message": "Exact event readback requires the live Google provider.",
+                "error_code": "google_calendar_required",
+            }
+        return self._google_live.get_typed_event(
+            calendar_scope=calendar_scope,
+            event_ref=event_ref,
+            event_start=event_start,
+        )
+
     def add_event(
         self,
         event_title: str,

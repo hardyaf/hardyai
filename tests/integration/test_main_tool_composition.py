@@ -412,7 +412,7 @@ def _run(loop: MainToolLoop, text: str, *, approval: bool = False) -> dict[str, 
         agent_id="jarvis",
         source_interface="discord",
         request_context={
-            "discord_channel_id": "1538572080482754692",
+            "discord_channel_id": "111111111111111111",
             "available_runtime_dependencies": dependencies,
         },
     )
