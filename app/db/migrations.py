@@ -1139,7 +1139,7 @@ def _migration_015_durable_task_workspace(conn: sqlite3.Connection) -> None:
         INSERT INTO schema_reader_compatibility (
             schema_version, minimum_reader_version, change_class, description
         ) VALUES (
-            15, 14, 'additive',
+            15, 12, 'additive',
             'Adds the durable task workspace, explicit preferences, and user skill revisions.'
         )
         ON CONFLICT(schema_version) DO UPDATE SET

@@ -310,7 +310,7 @@ def test_fresh_version15_schema_has_task_workspace_and_operation_ledgers(tmp_pat
         assert tuple(connection.execute(
             "SELECT minimum_reader_version, change_class FROM schema_reader_compatibility "
             "WHERE schema_version = 15"
-        ).fetchone()) == (14, "additive")
+        ).fetchone()) == (12, "additive")
         for table in (
             "agent_tasks",
             "task_events",
@@ -700,8 +700,8 @@ def test_migration12_is_atomic_preserves_rows_and_reopens_idempotently(
         ).fetchone() is None
 
         monkeypatch.setattr(migrations_module, "_MIGRATION_STEP_HOOK", None)
-        assert initialize_schema(connection) == 14
-        assert initialize_schema(connection) == 14
+        assert initialize_schema(connection) == LATEST_SCHEMA_VERSION
+        assert initialize_schema(connection) == LATEST_SCHEMA_VERSION
         assert connection.execute(
             "SELECT COUNT(*) FROM schema_reader_compatibility WHERE schema_version=12"
         ).fetchone()[0] == 1
@@ -760,8 +760,8 @@ def test_migration13_is_atomic_preserves_home_rows_and_retries(
         assert connection.execute("SELECT COUNT(*) FROM switch_actions_log").fetchone()[0] == 1
 
         monkeypatch.setattr(migrations_module, "_MIGRATION_STEP_HOOK", None)
-        assert initialize_schema(connection) == 14
-        assert initialize_schema(connection) == 14
+        assert initialize_schema(connection) == LATEST_SCHEMA_VERSION
+        assert initialize_schema(connection) == LATEST_SCHEMA_VERSION
         assert {"operation_id", "arguments_hash"}.issubset(
             _column_names(connection, "switch_actions_log")
         )
@@ -804,8 +804,8 @@ def test_migration14_is_atomic_preserves_p5f_rows_and_retries(
         ).fetchone()[0] == "email.apply_labels"
 
         monkeypatch.setattr(migrations_module, "_MIGRATION_STEP_HOOK", None)
-        assert initialize_schema(connection) == 14
-        assert initialize_schema(connection) == 14
+        assert initialize_schema(connection) == LATEST_SCHEMA_VERSION
+        assert initialize_schema(connection) == LATEST_SCHEMA_VERSION
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
         parent = connection.execute(
             "SELECT tool_id, idempotency_key, parent_manifest_hash "
@@ -823,7 +823,7 @@ def test_p1_reader_accepts_complete_additive_newer_chain_without_migration(tmp_p
     path = tmp_path / "newer.db"
     _newer_database(
         path,
-        version=14,
+        version=16,
         rows=(
             (8, 7, "additive"),
             (9, 7, "additive"),
@@ -832,13 +832,15 @@ def test_p1_reader_accepts_complete_additive_newer_chain_without_migration(tmp_p
             (12, 7, "additive"),
             (13, 7, "additive"),
             (14, 7, "additive"),
+            (15, 12, "additive"),
+            (16, 15, "additive"),
         ),
     )
     connection = sqlite3.connect(path)
     connection.row_factory = sqlite3.Row
     try:
         assert initialize_schema(connection) == LATEST_SCHEMA_VERSION
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 14
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 16
         assert connection.execute("SELECT value FROM canary").fetchone()[0] == "unchanged"
     finally:
         connection.close()

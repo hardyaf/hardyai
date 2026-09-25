@@ -42,8 +42,9 @@ of the real admission gateway; its temporary container and data were removed.
 ## Decisions and progress
 
 - Preserve existing document/OCR pipelines and all account/resource/credential boundaries.
-- Use an additive schema migration whose compatibility record permits the prior v14 binary to read the
-  upgraded database during image rollback.
+- Use an additive schema migration whose compatibility record permits the actually deployed v12 binary
+  to read the upgraded database during image rollback. The first disposable rehearsal caught and
+  corrected the candidate's initially over-strict v14 reader floor before deployment.
 - The local workspace uses the existing exact-action proposal ledger for invitations/destructive work.
   Local decisions bind the operator and proposal hash; completed approval effects resolve from the
   action receipt and are never invoked again by the task worker.
