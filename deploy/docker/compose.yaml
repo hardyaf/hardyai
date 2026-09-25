@@ -326,7 +326,9 @@ services:
     profiles: ["tasks"]
     restart: unless-stopped
     init: true
-    user: "0:0"
+    user: "${JARVIS_UID:-1001}:${JARVIS_GID:-1001}"
+    group_add:
+      - "${DOCKER_GID:?set DOCKER_GID to the numeric group owner of the Docker socket}"
     environment:
       APP_ENV: production
       TASK_RUNNER_KEY_FILE: /run/secrets/task_runner_key

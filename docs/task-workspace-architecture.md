@@ -38,9 +38,10 @@ of the owner ID.
 
 ## Python boundary
 
-Only `task-runner-launcher` mounts the Docker socket. Its API accepts task/run/workspace references and a
-one-run broker token; image, command, mounts, network mode, UID, memory, CPU, process, filesystem, and
-timeout policy are fixed by trusted configuration. Generated code is non-root, has a read-only root,
+Only `task-runner-launcher` mounts the Docker socket. It runs as the deployment UID with only the
+socket's supplemental group. Its API accepts task/run/workspace references and a one-run broker token;
+image, command, mounts, network mode, UID, memory, CPU, process, filesystem, and timeout policy are
+fixed by trusted configuration. Generated code is non-root, has a read-only root,
 no network, no secrets, immutable source input, a per-run writable work directory, and the task's
 published-artifact directory. Provider calls cross a Unix socket to the worker and repeat task owner,
 scope, budget, pause, steering, lease, schema, authorization, approval, and operation-identity checks.
