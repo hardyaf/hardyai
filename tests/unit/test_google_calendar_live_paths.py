@@ -62,6 +62,7 @@ class _TypedEventsResource:
         self.events_by_id = {}
         self.calls = []
         self.effect_count = 0
+        self.normalize_recurrence_order = False
         self.patch_uncertain_after_effect = False
         self.delete_uncertain_after_effect = False
 
@@ -73,6 +74,8 @@ class _TypedEventsResource:
             if event_id in self.events_by_id:
                 raise _TypedHttpError(409)
             event = copy.deepcopy(kwargs["body"])
+            if self.normalize_recurrence_order and event.get("recurrence"):
+                event["recurrence"] = ["RRULE:FREQ=WEEKLY;COUNT=12;BYDAY=TU,TH"]
             event.update({"etag": "etag-1", "status": "confirmed"})
             self.events_by_id[event_id] = event
             self.effect_count += 1
@@ -585,6 +588,47 @@ def test_typed_recurrence_uses_structured_weekly_rrule(monkeypatch):
     assert result["status"] == "ok"
     insert = next(call for call in api.resource.calls if call[0] == "insert")
     assert insert[1]["body"]["recurrence"] == ["RRULE:FREQ=WEEKLY;BYDAY=TU,TH;COUNT=12"]
+
+
+def test_typed_recurrence_reconciles_provider_rrule_component_order(monkeypatch):
+    service, api = _typed_service(monkeypatch)
+    api.resource.normalize_recurrence_order = True
+    arguments = service.canonicalize_typed_write(
+        tool_id="calendar.create_event",
+        arguments={
+            "title": "Acceptance practice",
+            "start": "2026-09-29T18:00:00-04:00",
+            "end": "2026-09-29T19:00:00-04:00",
+            "all_day": False,
+            "timezone": "America/New_York",
+            "calendar_scope": "default",
+            "recurrence": {
+                "frequency": "weekly",
+                "interval": 1,
+                "count": 12,
+                "by_weekday": ["TU", "TH"],
+            },
+        },
+    )
+    operation_id = "toolop_v1_" + "7" * 64
+
+    created = service.execute_typed_create(
+        operation_id=operation_id,
+        arguments_hash="6" * 64,
+        arguments=arguments,
+        include_invites=False,
+    )
+    replay = service.execute_typed_create(
+        operation_id=operation_id,
+        arguments_hash="6" * 64,
+        arguments=arguments,
+        include_invites=False,
+    )
+
+    assert created["status"] == "ok"
+    assert replay["status"] == "ok"
+    assert replay["payload"]["idempotent_replay"] is True
+    assert api.resource.effect_count == 1
 
 
 def test_query_events_unknown_explicit_scope_never_falls_back_to_house(monkeypatch):

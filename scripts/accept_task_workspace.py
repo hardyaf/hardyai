@@ -663,6 +663,15 @@ unrelated calendar titles into the artifact.
 """.strip()
     task = _create_task(api, goal, title=f"{label} calendar recurrence", seconds=600, decisions=32, calls=100)
     completed = _wait_task(api, task["task_id"], wanted={"completed", "failed", "paused_budget", "waiting_input", "waiting_approval"}, timeout=1_200)
+    return _validate_calendar(api, completed, fixture_title, artifact_name)
+
+
+def _validate_calendar(
+    api: Api,
+    completed: dict[str, Any],
+    fixture_title: str,
+    artifact_name: str = "calendar-checklist.json",
+) -> tuple[dict[str, Any], str]:
     _assert(completed["task"]["status"] == "completed", "calendar_task_not_completed")
     observations = _tool_observations(completed)
     query_calls = [item for item in observations if item["capability"] == "calendar.query_events"]
@@ -681,6 +690,35 @@ unrelated calendar titles into the artifact.
     artifact = _artifact_json(api, task["task_id"], artifact_name)
     _assert(int(artifact.get("verified_occurrence_count", artifact.get("occurrence_count", 0))) == 12, "calendar_artifact_count_invalid")
     return _task_evidence(completed), fixture_title
+
+
+def _resume_calendar_task(api: Api, task_id: str, label: str) -> tuple[dict[str, Any], str]:
+    detail = api.request(f"/api/tasks/{task_id}")
+    if detail["task"]["status"] == "waiting_input":
+        api.request(
+            f"/api/tasks/{task_id}/messages",
+            method="POST",
+            body={
+                "expected_revision": detail["task"]["revision"],
+                "submission_id": str(uuid4()),
+                "content": (
+                    "The existing Google Calendar account has been reauthorized and both Calendar "
+                    "Events and Gmail read-only were verified. Retry the original Calendar workflow "
+                    "now. Reuse all prior observations and do not ask again."
+                ),
+            },
+        )
+    completed = _wait_task(
+        api,
+        task_id,
+        wanted={"completed", "failed", "paused_budget", "waiting_input", "waiting_approval"},
+        timeout=1_200,
+    )
+    return _validate_calendar(
+        api,
+        completed,
+        f"{label} AYSO Recurrence",
+    )
 
 
 def _run_calendar_cleanup(api: Api, label: str, fixture_title: str) -> dict[str, Any]:
@@ -822,6 +860,10 @@ def main() -> int:
         help="Resume and validate a waiting Lists/Documents/Python task.",
     )
     parser.add_argument(
+        "--resume-calendar-task",
+        help="Resume and validate a waiting Calendar acceptance task.",
+    )
+    parser.add_argument(
         "--phases",
         default="interface,learning,budget,interrupted_script,lists_documents_python,calendar,calendar_cleanup,cancel",
         help="Comma-separated acceptance phases; defaults to the complete campaign.",
@@ -866,6 +908,12 @@ def main() -> int:
             evidence["results"]["lists_documents_python"] = _resume_composed_task(
                 api, args.resume_composed_task
             )
+            evidence["status"] = "passed"
+            return_code = 0
+            return return_code
+        if args.resume_calendar_task:
+            calendar, _ = _resume_calendar_task(api, args.resume_calendar_task, args.label)
+            evidence["results"]["calendar"] = calendar
             evidence["status"] = "passed"
             return_code = 0
             return return_code

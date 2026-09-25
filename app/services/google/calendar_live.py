@@ -730,10 +730,13 @@ class GoogleCalendarLiveService:
             "end",
             "location",
             "description",
-            "recurrence",
         ):
             if field in expected and event.get(field) != expected.get(field):
                 return False
+        if "recurrence" in expected and cls._normalized_recurrence_lines(
+            event.get("recurrence")
+        ) != cls._normalized_recurrence_lines(expected.get("recurrence")):
+            return False
         if "attendees" in expected:
             desired = sorted(
                 str(item.get("email") or "").casefold()
@@ -747,6 +750,22 @@ class GoogleCalendarLiveService:
             if desired != actual:
                 return False
         return True
+
+    @staticmethod
+    def _normalized_recurrence_lines(value: Any) -> list[str]:
+        normalized: list[str] = []
+        for item in value if isinstance(value, list) else []:
+            line = str(item or "").strip()
+            prefix, separator, body = line.partition(":")
+            if separator and prefix.casefold() == "rrule":
+                pieces = sorted(
+                    piece.strip().upper()
+                    for piece in body.split(";")
+                    if piece.strip()
+                )
+                line = "RRULE:" + ";".join(pieces)
+            normalized.append(line)
+        return sorted(normalized)
 
     @staticmethod
     def _execute_conditional(request: Any, *, revision: str) -> Any:
