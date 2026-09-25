@@ -6,18 +6,16 @@
 
 ## Current status
 
-Implementation is feature-complete at commit `b3b98de4e92b67625804f7ab4eb76a7ec63030f5`.
-The exact candidate application image is
-`sha256:c72a4d165a7cc5e477a2493f31fd283614702df53fbe255a0a640aa1daf8191d`; the runner image is
+Implementation and consolidated acceptance are complete through commit
+`4ef0239a5ddb87a23896a4f626684d6d21f540b1`. The final release images still need to be rebuilt and
+bound to the deployment commit; the last fully accepted runner image is
 `sha256:4fa3a3e587cd04b3de18396a89c6d758a35fa0f6357e8c66157d8ca32756cd3c`.
 
-The consolidated acceptance campaign is complete except for live Calendar provider scenarios.
-The candidate and production containers both reach the existing Google configuration, but refreshing
-the existing token returns `invalid_grant`. No Calendar fixture was created and no household event was
-altered. Deployment has not started because the controlling plan requires the primary Calendar proving
-case to pass before cutover. The existing Google account must be reauthorized; then rerun only the
-Calendar create/readback/cleanup scenarios, bind the final source commit to rebuilt image IDs, and
-continue with backup, deployment, and post-deployment UI verification.
+The existing Google account was reauthorized without expanding scopes, and both Calendar Events and
+Gmail read-only access were verified. Live Calendar acceptance then passed using one clearly labeled,
+non-inviting recurring series. The series was deleted through the hash-bound local approval flow, the
+provider returned a deletion receipt, and an exact-title readback found no remaining fixture. No real
+household event was altered and no invitation was sent. Deployment is the remaining phase.
 
 ## Reuse map
 
@@ -82,9 +80,24 @@ continue with backup, deployment, and post-deployment UI verification.
   Its verified artifact reported all four isolation checks true even though the model's final prose
   misstated one field; acceptance correctly trusted the artifact and task records rather than prose.
 - Candidate Calendar tool schema enforcement correctly rejected timezone-free timestamps and empty
-  optional text. With corrected arguments, the live provider returned a retryable unavailable result.
-  A content-free diagnostic isolated this to Google OAuth `RefreshError: invalid_grant` in both the
-  candidate and the unchanged production container. No create effect or external fixture exists.
+  optional text. A content-free diagnostic isolated the subsequent provider failure to Google OAuth
+  `RefreshError: invalid_grant`; the account was reauthorized with its existing scopes, and Calendar
+  Events plus Gmail read-only were verified before provider acceptance resumed.
+- Live Calendar acceptance created exactly one clearly labeled, non-inviting weekly TU/TH series,
+  expanded and verified all 12 occurrences across the daylight-saving transition, read one exact
+  occurrence through `calendar.get_event`, and published the six-week JSON checklist with bounded
+  Python. Google normalized RRULE component order; canonical recurrence comparison now recognizes that
+  equivalent provider representation and reconciles the deterministic retry without a duplicate.
+- Cleanup exposed two approval-boundary defects before release. The approved-action executor now
+  recognizes only the exact authenticated local operator/Jarvis/task-workspace tuple instead of trying
+  to resolve it as an external Discord identity, while external approvals retain their existing
+  identity reauthorization. The task worker also deterministically reconciles terminal approval
+  outcomes into task effect receipts at restart/resume, rather than depending on another model call.
+  Focused Ubuntu checks passed all 16 task-workspace and approval-restart tests after these fixes.
+- The exact acceptance Calendar series was deleted through local approval. Its proposal reached
+  `executed` with a provider receipt, and the final exact-title query returned zero fixture events.
+  The temporary OAuth callback/tunnel and diagnostic helpers were stopped/removed; the protected
+  pre-reauthorization token backup remains available to the operator.
 - During acceptance, Ollama exposed a stale NVIDIA container handle and fell back to CPU. Recreating
   only the existing Ollama service restored RTX 3090 visibility; the same paused durable task then
   completed successfully on GPU. Verify GPU execution again during post-deployment smoke testing.
@@ -94,10 +107,6 @@ continue with backup, deployment, and post-deployment UI verification.
 
 ## Remaining work
 
-- Reauthorize the existing Google Calendar OAuth account without changing account permissions.
-- Rerun only Calendar query/recurrence/readback, bounded artifact, exact-series approval cleanup, and
-  the already-written cancellation phase if Calendar changes touch shared task execution.
-- Commit the final acceptance-controller/worklog updates, rebuild and record exact final image IDs,
-  and run only packaging/readiness checks needed to bind those images to the accepted source.
+- Rebuild and record the final application and runner image IDs from the clean release commit.
 - Preserve the production online database backup and rollback image, deploy once with the protected
   env file, activate the task profile, and complete the short actual-interface verification.
