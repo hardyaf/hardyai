@@ -13,6 +13,10 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+_APPLICATION_IMAGE_REFERENCES = {
+    "jarvis-poc-app:local",
+    "${JARVIS_APP_IMAGE:-jarvis-poc-app:local}",
+}
 
 
 def _sha256(path: Path) -> str:
@@ -47,7 +51,7 @@ def build_manifest(
     resolved_digests: dict[str, str] = {}
     unresolved: list[str] = []
     for service, image in images.items():
-        if image == "jarvis-poc-app:local":
+        if image in _APPLICATION_IMAGE_REFERENCES:
             resolved_digests[service] = application_digest
         elif "@sha256:" in image:
             resolved_digests[service] = "sha256:" + image.rsplit("@sha256:", 1)[1]

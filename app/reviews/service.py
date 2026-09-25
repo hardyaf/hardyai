@@ -662,6 +662,12 @@ class HumanReviewService:
         reason: str,
         idempotency_key: str,
     ) -> dict[str, Any]:
+        normalized_destination = _bounded_text(
+            destination_purpose,
+            code="action_decision_destination_invalid",
+            maximum=64,
+        ).casefold()
+        local_workspace = normalized_destination == "task_workspace"
         return self.repository.decide_action_proposal(
             proposal_id=_bounded_text(proposal_id, code="action_proposal_id_invalid"),
             review_id=_bounded_text(review_id, code="action_review_id_invalid"),
@@ -672,12 +678,22 @@ class HumanReviewService:
             actor_principal=_bounded_text(
                 actor_principal, code="action_decision_actor_invalid"
             ),
-            destination_purpose=_bounded_text(
-                destination_purpose, code="action_decision_destination_invalid", maximum=64
-            ).casefold(),
-            guild_id=_bounded_text(guild_id, code="action_decision_guild_invalid"),
-            channel_id=_bounded_text(channel_id, code="action_decision_channel_invalid"),
-            message_id=_bounded_text(message_id, code="action_decision_message_invalid"),
+            destination_purpose=normalized_destination,
+            guild_id=(
+                "" if local_workspace else _bounded_text(
+                    guild_id, code="action_decision_guild_invalid"
+                )
+            ),
+            channel_id=(
+                "" if local_workspace else _bounded_text(
+                    channel_id, code="action_decision_channel_invalid"
+                )
+            ),
+            message_id=(
+                "" if local_workspace else _bounded_text(
+                    message_id, code="action_decision_message_invalid"
+                )
+            ),
             reason=_bounded_text(reason, code="action_decision_reason_invalid", maximum=500),
             idempotency_key=_bounded_text(
                 idempotency_key, code="action_decision_idempotency_key_invalid"

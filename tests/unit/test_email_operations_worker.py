@@ -193,7 +193,7 @@ def test_readiness_never_calls_the_provider(tmp_path):
         "worker_enabled": True,
         "managed_label_count": 2,
         "legacy_claim_eligible_count": 0,
-        "schema_version": 14,
+        "schema_version": 15,
         "schema_ready": True,
         "supported_row_kinds": True,
         "unsupported_row_count": 0,
@@ -216,7 +216,7 @@ def test_readiness_database_inspection_is_read_only(tmp_path):
 
     assert database.read_bytes() == before
     assert inspection == {
-        "schema_version": 14,
+        "schema_version": 15,
         "schema_ready": True,
         "supported_row_kinds": True,
         "unsupported_row_count": 0,

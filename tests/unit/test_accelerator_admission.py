@@ -93,7 +93,7 @@ def _typed_chat_payload(model: str) -> dict:
     }
 
 
-def test_accelerator_chat_payload_allows_only_typed_step_wrapper() -> None:
+def test_accelerator_chat_payload_allows_bounded_native_tools() -> None:
     from app.api import accelerator_admission_app as admission_app
 
     model = sorted(admission_app._ALLOWED_MODELS)[0]
@@ -102,13 +102,16 @@ def test_accelerator_chat_payload_allows_only_typed_step_wrapper() -> None:
     assert admission_app._ollama_chat_payload(payload) == payload
 
     payload["tools"][0]["function"]["name"] = "lists.add_items"
+    assert admission_app._ollama_chat_payload(payload) == payload
+
+    payload["tools"][0]["function"]["name"] = "lists/add_items"
     try:
         admission_app._ollama_chat_payload(payload)
     except HTTPException as exc:
         assert exc.status_code == 400
         assert exc.detail == "accelerator_chat_tool_invalid"
     else:
-        raise AssertionError("business tool unexpectedly crossed the chat admission boundary")
+        raise AssertionError("invalid native tool name crossed the chat admission boundary")
 
 
 def test_accelerator_chat_route_uses_typed_lane_lease_and_chat_upstream(monkeypatch) -> None:

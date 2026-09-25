@@ -27,6 +27,7 @@ from app.provenance.repository import ProvenanceRepository
 from app.services.document_proposal_execution_service import DocumentProposalExecutionService
 from app.tasks.repository import TaskRepository
 from app.tasks.service import TaskApplicationService
+from app.tasks.worker import AgentTaskWorker
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +59,7 @@ class ApplicationContainer:
     runtime_power: RuntimePowerController
     task_repository: TaskRepository | None = None
     task_service: TaskApplicationService | None = None
+    task_worker: AgentTaskWorker | None = None
 
     @classmethod
     def from_default_runtime(cls) -> "ApplicationContainer":
@@ -90,4 +92,5 @@ class ApplicationContainer:
             runtime_power=runtime.runtime_power,
             task_repository=runtime.task_repository,
             task_service=runtime.task_service,
+            task_worker=runtime.task_worker,
         )

@@ -213,7 +213,15 @@ def test_research_markdown_publishes_one_bounded_untrusted_read_tool() -> None:
     assert descriptor.tool_id == "research.search_web"
     assert descriptor.effect == "read"
     assert descriptor.persistence == "no_store"
-    assert descriptor.transferable_observation_fields == ()
+    transfer_scopes = {
+        item.pattern: item.scope for item in descriptor.transferable_observation_fields
+    }
+    assert transfer_scopes["/results"] == "cross_domain"
+    assert all(
+        scope == "same_domain"
+        for pattern, scope in transfer_scopes.items()
+        if pattern != "/results"
+    )
     assert descriptor.max_result_items == 8
     projected = descriptor.to_model_projection(availability_note="Available.")
     assert projected["tool_id"] == "research.search_web"

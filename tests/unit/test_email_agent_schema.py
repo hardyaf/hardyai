@@ -9,13 +9,13 @@ from app.db.migrations import initialize_schema
 from app.skills.domains.email_agent.storage import EmailAgentSQLiteStorage
 
 
-def test_fresh_email_storage_uses_core_version14_schema_authority(tmp_path):
+def test_fresh_email_storage_uses_current_core_schema_authority(tmp_path):
     path = tmp_path / "email.db"
     storage = EmailAgentSQLiteStorage(str(path))
     storage.close()
 
     with sqlite3.connect(path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 14
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 15
         parent_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(email_tool_operations)")
         }

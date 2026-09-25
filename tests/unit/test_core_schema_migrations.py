@@ -310,7 +310,7 @@ def test_fresh_version15_schema_has_task_workspace_and_operation_ledgers(tmp_pat
         assert tuple(connection.execute(
             "SELECT minimum_reader_version, change_class FROM schema_reader_compatibility "
             "WHERE schema_version = 15"
-        ).fetchone()) == (12, "additive")
+        ).fetchone()) == (10, "additive")
         for table in (
             "agent_tasks",
             "task_events",
@@ -832,14 +832,14 @@ def test_p1_reader_accepts_complete_additive_newer_chain_without_migration(tmp_p
             (12, 7, "additive"),
             (13, 7, "additive"),
             (14, 7, "additive"),
-            (15, 12, "additive"),
+            (15, 10, "additive"),
             (16, 15, "additive"),
         ),
     )
     connection = sqlite3.connect(path)
     connection.row_factory = sqlite3.Row
     try:
-        assert initialize_schema(connection) == LATEST_SCHEMA_VERSION
+        assert initialize_schema(connection) == 16
         assert connection.execute("PRAGMA user_version").fetchone()[0] == 16
         assert connection.execute("SELECT value FROM canary").fetchone()[0] == "unchanged"
     finally:

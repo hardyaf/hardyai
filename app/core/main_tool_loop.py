@@ -1887,7 +1887,29 @@ class MainToolLoop:
             return "null" in normalized_text.split()
         if isinstance(value, int):
             token = str(value).casefold()
-            return bool(token and token in normalized_text.split())
+            number_words = {
+                0: "zero",
+                1: "one",
+                2: "two",
+                3: "three",
+                4: "four",
+                5: "five",
+                6: "six",
+                7: "seven",
+                8: "eight",
+                9: "nine",
+                10: "ten",
+                11: "eleven",
+                12: "twelve",
+            }
+            request_tokens = set(normalized_text.split())
+            return bool(
+                token
+                and (
+                    token in request_tokens
+                    or number_words.get(value) in request_tokens
+                )
+            )
         if isinstance(value, float):
             token = str(value).casefold()
             return bool(token and token in normalized_text)
