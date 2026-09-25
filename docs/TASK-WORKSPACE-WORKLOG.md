@@ -6,11 +6,18 @@
 
 ## Current status
 
-Implementation is feature-complete and the release candidate is being prepared for consolidated
-acceptance. Authorized Ubuntu connectivity is restored. Deployment topology, running image, enabled
-capability configuration, and non-secret model inventory were inspected without changing production.
-One native `gpt-oss:20b` assistant-tool-result-assistant round trip passed through a disposable instance
-of the real admission gateway; its temporary container and data were removed.
+Implementation is feature-complete at commit `b3b98de4e92b67625804f7ab4eb76a7ec63030f5`.
+The exact candidate application image is
+`sha256:c72a4d165a7cc5e477a2493f31fd283614702df53fbe255a0a640aa1daf8191d`; the runner image is
+`sha256:4fa3a3e587cd04b3de18396a89c6d758a35fa0f6357e8c66157d8ca32756cd3c`.
+
+The consolidated acceptance campaign is complete except for live Calendar provider scenarios.
+The candidate and production containers both reach the existing Google configuration, but refreshing
+the existing token returns `invalid_grant`. No Calendar fixture was created and no household event was
+altered. Deployment has not started because the controlling plan requires the primary Calendar proving
+case to pass before cutover. The existing Google account must be reauthorized; then rerun only the
+Calendar create/readback/cleanup scenarios, bind the final source commit to rebuilt image IDs, and
+continue with backup, deployment, and post-deployment UI verification.
 
 ## Reuse map
 
@@ -55,8 +62,42 @@ of the real admission gateway; its temporary container and data were removed.
   single-event/occurrence/series write scope. No request-specific AYSO or schedule handler was added.
 - Complete one consolidated acceptance campaign after implementation, per the controlling plan.
 
+## Acceptance and deployment evidence
+
+- One native `gpt-oss:20b` assistant/tool/result/assistant round trip passed through a disposable
+  instance of the real admission gateway.
+- The additive migration was rehearsed twice on a disposable copy of the deployed v12 database:
+  v12 to v15 preserved record counts, the migration was idempotent, and the deployed v12 reader
+  accepted the v15 database for image rollback.
+- The one consolidated automated run initially reported 866 passing and 31 failing tests. Focused
+  fixes passed 130 affected tests; 17 remaining failures are unchanged legacy `/ask` phrase-router
+  expectations superseded by the reasoning-led Main boundary. Do not rerun the full suite unless a
+  later fix creates a concrete wider risk.
+- Integrated candidate acceptance passed for local interface authentication, durable task creation,
+  instruction-only skill discovery/load/edit/version restore, ask/resume, persistent preferences,
+  budget pause/continue, user redirection, interrupted-script recovery, browser-session reconstruction,
+  Lists and Documents composition, provider receipts, bounded Python, published artifacts, workspace
+  escape/credential/root-filesystem boundaries, and cancellation.
+- The composed task reused one task across input, budget, user pause, worker restart, and continuation.
+  Its verified artifact reported all four isolation checks true even though the model's final prose
+  misstated one field; acceptance correctly trusted the artifact and task records rather than prose.
+- Candidate Calendar tool schema enforcement correctly rejected timezone-free timestamps and empty
+  optional text. With corrected arguments, the live provider returned a retryable unavailable result.
+  A content-free diagnostic isolated this to Google OAuth `RefreshError: invalid_grant` in both the
+  candidate and the unchanged production container. No create effect or external fixture exists.
+- During acceptance, Ollama exposed a stale NVIDIA container handle and fell back to CPU. Recreating
+  only the existing Ollama service restored RTX 3090 visibility; the same paused durable task then
+  completed successfully on GPU. Verify GPU execution again during post-deployment smoke testing.
+- Content-minimized evidence is retained in the authorized Ubuntu acceptance staging directory. Key
+  records include the affected pytest rerun, migration rehearsal, learning validation, composed task,
+  budget/interruption aggregate, and cancellation results.
+
 ## Remaining work
 
-- Run the single migration-copy check and consolidated candidate acceptance campaign.
-- Fix only observed failures, then bind the release commit to the tested image IDs.
-- Preserve the production backup/rollback image, deploy once, and complete live UI verification.
+- Reauthorize the existing Google Calendar OAuth account without changing account permissions.
+- Rerun only Calendar query/recurrence/readback, bounded artifact, exact-series approval cleanup, and
+  the already-written cancellation phase if Calendar changes touch shared task execution.
+- Commit the final acceptance-controller/worklog updates, rebuild and record exact final image IDs,
+  and run only packaging/readiness checks needed to bind those images to the accepted source.
+- Preserve the production online database backup and rollback image, deploy once with the protected
+  env file, activate the task profile, and complete the short actual-interface verification.

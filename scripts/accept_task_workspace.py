@@ -564,6 +564,20 @@ def _validate_lists_documents(api: Api, completed: dict[str, Any]) -> dict[str, 
 
 def _resume_composed_task(api: Api, task_id: str) -> dict[str, Any]:
     detail = api.request(f"/api/tasks/{task_id}")
+    if detail["task"]["status"] == "paused_user":
+        continued = api.request(
+            f"/api/tasks/{task_id}/continue",
+            method="POST",
+            body={
+                "expected_revision": detail["task"]["revision"],
+                "submission_id": str(uuid4()),
+                "add_seconds": 0,
+                "add_model_decisions": 0,
+                "add_capability_calls": 0,
+            },
+        )
+        _assert(continued.get("accepted") is True, "composed_user_continue_not_accepted")
+        detail = api.request(f"/api/tasks/{task_id}")
     if detail["task"]["status"] == "waiting_input":
         api.request(
             f"/api/tasks/{task_id}/messages",
@@ -583,6 +597,40 @@ def _resume_composed_task(api: Api, task_id: str) -> dict[str, Any]:
         wanted={"completed", "failed", "paused_budget", "waiting_input"},
         timeout=1_200,
     )
+    if completed["task"]["status"] == "paused_budget":
+        steered = api.request(
+            f"/api/tasks/{task_id}/messages",
+            method="POST",
+            body={
+                "expected_revision": completed["task"]["revision"],
+                "submission_id": str(uuid4()),
+                "content": (
+                    "Do not retry Documents status: its denial without a bound document is valid "
+                    "evidence, and Documents search already succeeded. Do not rediscover or reload "
+                    "skills. Complete only the remaining bounded Python boundary check, including "
+                    "the Lists read through jarvis_task_api and the published acceptance-boundary.json "
+                    "artifact, then finish with evidence."
+                ),
+            },
+        )["task"]
+        continued = api.request(
+            f"/api/tasks/{task_id}/continue",
+            method="POST",
+            body={
+                "expected_revision": steered["revision"],
+                "submission_id": str(uuid4()),
+                "add_seconds": 900,
+                "add_model_decisions": 8,
+                "add_capability_calls": 10,
+            },
+        )
+        _assert(continued.get("accepted") is True, "composed_budget_continue_not_accepted")
+        completed = _wait_task(
+            api,
+            task_id,
+            wanted={"completed", "failed", "paused_budget", "waiting_input"},
+            timeout=1_200,
+        )
     return _validate_lists_documents(api, completed)
 
 
@@ -594,11 +642,15 @@ def _run_calendar(api: Api, label: str) -> tuple[dict[str, Any], str]:
 Use the Calendar skill and bounded Python for this non-inviting acceptance fixture.
 
 1. Query the default calendar for the complete local day 2026-10-06 in America/New_York using
-local_calendar boundaries and limit 2. Separately query 2026-09-29 through the exclusive end
-2026-11-06 for text `AYSO`, oldest first, limit 100. These must be two calls to the same query
-capability with different arguments. Note truncation/coverage truthfully.
+start `2026-10-06T00:00:00-04:00`, end `2026-10-07T00:00:00-04:00`, time_basis
+`local_calendar`, oldest first, and limit 2. Omit the optional text argument entirely for this
+unfiltered query; never send an empty optional string. Separately query from
+`2026-09-29T00:00:00-04:00` through the exclusive end `2026-11-06T00:00:00-05:00` for text
+`AYSO`, time_basis `local_calendar`, oldest first, limit 100. These must be two calls to the same
+query capability with different arguments. Note truncation/coverage truthfully.
 2. Create exactly one event series titled `{fixture_title}` on the default calendar, with no
-attendees or invitees. First event: 2026-09-29 18:00-19:00 America/New_York. Recurrence: weekly,
+attendees or invitees. First event: `2026-09-29T18:00:00-04:00` through
+`2026-09-29T19:00:00-04:00`, timezone `America/New_York`. Recurrence: weekly,
 interval 1, count 12, by weekdays TU and TH. Use logical operation id
 `acceptance-calendar-create-{label.casefold()}`.
 3. Query the exact fixture title over 2026-09-29 through exclusive end 2026-11-06 with limit 100
