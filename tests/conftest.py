@@ -16,9 +16,6 @@ os.environ["APP_ENV"] = "test"
 os.environ["DATABASE_PATH"] = str(_TEST_RUNTIME_DIR / f"jarvis_pytest_{os.getpid()}.db")
 os.environ["MEMORY_MODE"] = "sqlite"
 os.environ["MEMORY_MARKDOWN_PATH"] = str(_TEST_RUNTIME_DIR / "memory_markdown")
-# Compatibility-router tests exercise the explicit non-Main path. Tests of
-# active reasoning-led execution construct that mode directly.
-os.environ["MAIN_TOOL_EXECUTION_MODE"] = "off"
 os.environ["HOUSE_SWITCH_NAMES"] = (
     "office test light,kitchen light,living room lamp,bedroom lamp"
 )
