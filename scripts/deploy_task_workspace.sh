@@ -19,7 +19,7 @@ mkdir -p "$BACKUP_DIR/$stamp"
 old_app_id="$(docker image inspect jarvis-poc-app:local --format '{{.Id}}')"
 docker tag "$old_app_id" "jarvis-poc-app:rollback-$stamp"
 cp --preserve=mode,timestamps .env "$BACKUP_DIR/$stamp/runtime.env"
-python scripts/manage_database.py --database data/jarvis_v2.db backup \
+python3 scripts/manage_database.py --database data/jarvis_v2.db backup \
   --destination "$BACKUP_DIR/$stamp"
 
 docker tag "$RELEASE_APP_IMAGE" jarvis-poc-app:local
