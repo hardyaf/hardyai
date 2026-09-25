@@ -32,6 +32,22 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Ignore the cached house token and request a fresh consent grant.",
     )
+    parser.add_argument(
+        "--listen-port",
+        type=int,
+        default=0,
+        help="OAuth callback port; use a fixed port when forwarding from a remote host.",
+    )
+    parser.add_argument(
+        "--bind-address",
+        default="127.0.0.1",
+        help="OAuth callback bind address. The browser redirect remains localhost.",
+    )
+    parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Print the authorization URL instead of opening a browser on this host.",
+    )
     return parser
 
 
@@ -64,13 +80,32 @@ def main() -> int:
     if args.force_consent or GMAIL_READONLY_SCOPE not in cached_scopes:
         working_store.pop(account_key, None)
 
-    credentials, working_store, _ = calendar_live._load_or_authorize_credentials(
-        oauth_cfg=oauth_config,
-        account_key=account_key,
-        scopes=scopes,
-        token_store=working_store,
-        allow_interactive=True,
-    )
+    if args.no_browser or args.listen_port or args.bind_address != "127.0.0.1":
+        from google_auth_oauthlib.flow import InstalledAppFlow
+
+        client_config = calendar_live._resolve_client_config(oauth_config)
+        flow = InstalledAppFlow.from_client_config(client_config, scopes=scopes)
+        flow.redirect_uri = str(
+            oauth_config.get("redirect_uri") or "http://localhost:8080/oauth2/callback"
+        )
+        credentials = flow.run_local_server(
+            host="localhost",
+            bind_addr=str(args.bind_address or "127.0.0.1"),
+            port=max(0, int(args.listen_port)),
+            access_type="offline",
+            prompt="consent",
+            include_granted_scopes="true",
+            open_browser=not args.no_browser,
+        )
+        working_store[account_key] = json.loads(credentials.to_json())
+    else:
+        credentials, working_store, _ = calendar_live._load_or_authorize_credentials(
+            oauth_cfg=oauth_config,
+            account_key=account_key,
+            scopes=scopes,
+            token_store=working_store,
+            allow_interactive=True,
+        )
 
     try:
         from googleapiclient.discovery import build
