@@ -671,41 +671,153 @@ def _validate_calendar(
     completed: dict[str, Any],
     fixture_title: str,
     artifact_name: str = "calendar-checklist.json",
+    *,
+    require_artifact: bool = True,
 ) -> tuple[dict[str, Any], str]:
     _assert(completed["task"]["status"] == "completed", "calendar_task_not_completed")
     observations = _tool_observations(completed)
     query_calls = [item for item in observations if item["capability"] == "calendar.query_events"]
     _assert(len(query_calls) >= 3, "calendar_query_composition_missing")
+    _assert(
+        any(item["capability"] == "calendar.get_event" for item in observations),
+        "calendar_get_event_missing",
+    )
     events = _fixture_events(completed, fixture_title)
     _assert(len(events) == 12, f"calendar_occurrence_count:{len(events)}")
     starts = [str(item.get("start") or "") for item in events]
     _assert(any("-05:00" in value and "T18:00" in value for value in starts), "calendar_dst_local_time_missing")
     create_effects = [
         item for item in completed.get("effects", [])
-        if item.get("tool_id") == "calendar.create_event" and item.get("state") == "committed"
+        if item.get("tool_id") == "calendar.create_event"
     ]
     _assert(len(create_effects) == 1, "calendar_create_effect_not_exactly_once")
     create_result = create_effects[0].get("result") or {}
+    if create_effects[0].get("state") == "no_effect":
+        _assert(
+            (create_result.get("payload") or {}).get("idempotent_replay") is True,
+            "calendar_create_no_effect_not_replay",
+        )
+        _assert(
+            (create_result.get("_operation_receipt") or {}).get("status") == "committed",
+            "calendar_create_reconciled_receipt_missing",
+        )
+    else:
+        _assert(create_effects[0].get("state") == "committed", "calendar_create_not_committed")
     _assert("@" not in json.dumps(create_result.get("payload", {})), "calendar_fixture_contains_attendee")
-    artifact = _artifact_json(api, task["task_id"], artifact_name)
-    _assert(int(artifact.get("verified_occurrence_count", artifact.get("occurrence_count", 0))) == 12, "calendar_artifact_count_invalid")
+    if require_artifact:
+        artifact = _artifact_json(api, completed["task"]["task_id"], artifact_name)
+        _assert(
+            int(artifact.get("verified_occurrence_count", artifact.get("occurrence_count", 0))) == 12,
+            "calendar_artifact_count_invalid",
+        )
     return _task_evidence(completed), fixture_title
+
+
+def _run_calendar_artifact_completion(
+    api: Api,
+    label: str,
+    source_task_id: str,
+    artifact_task_id: str | None = None,
+) -> dict[str, Any]:
+    """Complete the read/Python proof when a terminal provider task omitted its artifact."""
+
+    print("stage calendar-artifact-completion", flush=True)
+    fixture_title = f"{label} AYSO Recurrence"
+    source = api.request(f"/api/tasks/{source_task_id}")
+    source_evidence, _ = _validate_calendar(
+        api,
+        source,
+        fixture_title,
+        require_artifact=False,
+    )
+    artifact_name = "calendar-checklist.json"
+    if artifact_task_id:
+        task = {"task_id": artifact_task_id}
+    else:
+        task = _create_task(
+            api,
+            f"""
+Complete only the missing read-only artifact proof for the already verified fixture
+`{fixture_title}`. Do not create, update, or delete any Calendar event and do not call any
+mutating capability.
+
+1. Query the default calendar from `2026-09-29T00:00:00-04:00` through the exclusive end
+`2026-11-06T00:00:00-05:00` for the exact text `{fixture_title}`, using time_basis
+`local_calendar`, oldest first, and limit 100. Verify exactly 12 expanded occurrences and that
+the November occurrences remain at 18:00 local time after daylight-saving changes.
+2. Read one exact occurrence back with calendar.get_event.
+3. Run bounded Python to publish `{artifact_name}`. The Python source MUST contain
+`from jarvis_task_api import published_path` and MUST write the JSON directly to
+`published_path('{artifact_name}')`. Writing only to the work directory does not count. The JSON
+must contain `fixture_title`, `verified_occurrence_count` equal to 12, and `weeks`, a list of six
+two-date lists containing, in order: 2026-09-29/2026-10-01, 2026-10-06/2026-10-08,
+2026-10-13/2026-10-15, 2026-10-20/2026-10-22, 2026-10-27/2026-10-29, and
+2026-11-03/2026-11-05. Do not include any unrelated event title or content.
+4. Inspect the run_python result. Do not call finish_task unless its artifacts list contains
+`{artifact_name}`. Then finish with readback and artifact evidence.
+""".strip(),
+            title=f"{label} calendar artifact completion",
+            seconds=420,
+            decisions=20,
+            calls=30,
+        )
+    completed = _wait_task(
+        api,
+        task["task_id"],
+        wanted={"completed", "failed", "paused_budget", "waiting_input", "waiting_approval"},
+        timeout=900,
+    )
+    _assert(completed["task"]["status"] == "completed", "calendar_artifact_task_not_completed")
+    observations = _tool_observations(completed)
+    _assert(
+        any(item["capability"] == "calendar.query_events" for item in observations),
+        "calendar_artifact_query_missing",
+    )
+    _assert(not completed.get("effects"), "calendar_artifact_task_created_effect")
+    artifact = _artifact_json(api, task["task_id"], artifact_name)
+    _assert(artifact.get("fixture_title") == fixture_title, "calendar_artifact_title_invalid")
+    _assert(int(artifact.get("verified_occurrence_count", 0)) == 12, "calendar_artifact_count_invalid")
+    expected_weeks = [
+        ["2026-09-29", "2026-10-01"],
+        ["2026-10-06", "2026-10-08"],
+        ["2026-10-13", "2026-10-15"],
+        ["2026-10-20", "2026-10-22"],
+        ["2026-10-27", "2026-10-29"],
+        ["2026-11-03", "2026-11-05"],
+    ]
+    _assert(artifact.get("weeks") == expected_weeks, "calendar_artifact_weeks_invalid")
+    return {
+        "provider_task": source_evidence,
+        "artifact_task": _task_evidence(completed),
+    }
 
 
 def _resume_calendar_task(api: Api, task_id: str, label: str) -> tuple[dict[str, Any], str]:
     detail = api.request(f"/api/tasks/{task_id}")
     if detail["task"]["status"] == "waiting_input":
+        waiting_prompt = str(detail["task"].get("waiting_prompt") or "")
+        if "get_event" in waiting_prompt:
+            content = (
+                "Proceed with the original workflow. First retry the exact calendar.create_event "
+                "using the same logical operation ID and identical arguments so the existing "
+                "deterministic series is reconciled as an idempotent success. Then call "
+                "calendar.get_event with only calendar_scope, event_ref, and event_start; omit "
+                "calendar_ref because it is not an input field. Complete the bounded Python "
+                "artifact and finish without asking again."
+            )
+        else:
+            content = (
+                "The existing Google Calendar account has been reauthorized and both Calendar "
+                "Events and Gmail read-only were verified. Retry the original Calendar workflow "
+                "now. Reuse all prior observations and do not ask again."
+            )
         api.request(
             f"/api/tasks/{task_id}/messages",
             method="POST",
             body={
                 "expected_revision": detail["task"]["revision"],
                 "submission_id": str(uuid4()),
-                "content": (
-                    "The existing Google Calendar account has been reauthorized and both Calendar "
-                    "Events and Gmail read-only were verified. Retry the original Calendar workflow "
-                    "now. Reuse all prior observations and do not ask again."
-                ),
+                "content": content,
             },
         )
     completed = _wait_task(
@@ -721,76 +833,171 @@ def _resume_calendar_task(api: Api, task_id: str, label: str) -> tuple[dict[str,
     )
 
 
-def _run_calendar_cleanup(api: Api, label: str, fixture_title: str) -> dict[str, Any]:
+def _run_calendar_cleanup(
+    api: Api,
+    label: str,
+    fixture_title: str,
+    *,
+    task_id: str | None = None,
+    event_ref: str | None = None,
+    approval_already_executed: bool = False,
+) -> dict[str, Any]:
     print("stage calendar-cleanup-approval", flush=True)
-    task = _create_task(
+    if task_id:
+        _assert(bool(event_ref), "calendar_cleanup_resume_event_ref_missing")
+        task = {"task_id": task_id}
+        current = api.request(f"/api/tasks/{task_id}")
+        if current["task"]["status"] == "waiting_input":
+            if approval_already_executed:
+                content = (
+                    "The formal local approval has already executed successfully and has a provider "
+                    "receipt. Reconcile it now by calling calendar.delete_event again with the exact "
+                    "same arguments and logical operation ID "
+                    f"`acceptance-calendar-cleanup-{label.casefold()}-v2`; this replay cannot delete "
+                    "twice. Then repeat the exact calendar.query_events call from the plan, verify "
+                    "that the fixture is absent, and finish. Do not ask for approval again."
+                )
+            else:
+                content = (
+                    f"The exact fixture series reference is `{event_ref}`. I confirm deletion "
+                    "of only that clearly labeled acceptance fixture. The authorized Calendar "
+                    "skill is available; the prior denial was argument validation, not access. "
+                    "Call calendar.delete_event with exactly calendar_scope `default`, event_ref "
+                    f"`{event_ref}`, event_start `2026-09-29T18:00:00-04:00`, timezone "
+                    "`America/New_York`, and edit_scope `series`, plus the original logical "
+                    "operation ID. MUST omit the optional calendar_ref and resource_version "
+                    "fields entirely. Then follow the deterministic local approval flow. Do not "
+                    "touch any other event and do not ask again."
+                )
+            api.request(
+                f"/api/tasks/{task_id}/messages",
+                method="POST",
+                body={
+                    "expected_revision": current["task"]["revision"],
+                    "submission_id": str(uuid4()),
+                    "content": content,
+                },
+            )
+    else:
+        known_ref = (
+            f"The previously verified series reference is `{event_ref}`; use it only after the "
+            "query confirms the exact fixture title. "
+            if event_ref
+            else ""
+        )
+        task = _create_task(
+            api,
+            (
+                "Call calendar.query_events with exactly calendar_scope `default`, time_start "
+                "`2026-09-29T00:00:00-04:00`, time_end `2026-11-06T00:00:00-05:00`, "
+                f"time_basis `local_calendar`, text `{fixture_title}`, oldest_first true, and limit "
+                "100. Omit calendar_ref and every other optional field. "
+                f"{known_ref}Select only that clearly labeled fixture. Call calendar.delete_event "
+                "with calendar_scope `default`, its event_ref, event_start "
+                "`2026-09-29T18:00:00-04:00`, timezone `America/New_York`, edit_scope `series`, "
+                "and stable logical operation id "
+                f"`acceptance-calendar-cleanup-{label.casefold()}-v2`. MUST omit calendar_ref and "
+                "resource_version. This exact deletion is authorized, but follow the local approval "
+                "flow. Never delete any other event. After approval, repeat the exact query to verify "
+                "the fixture no longer appears, then finish."
+            ),
+            title=f"{label} calendar cleanup",
+            seconds=420,
+            decisions=24,
+            calls=50,
+        )
+    if not approval_already_executed:
+        waiting = _wait_task(
+            api,
+            task["task_id"],
+            wanted={"waiting_approval", "waiting_input", "completed", "failed", "paused_budget"},
+            timeout=900,
+        )
+        _assert(waiting["task"]["status"] == "waiting_approval", "calendar_cleanup_not_waiting_approval")
+        pending = next(
+            (
+                item for item in waiting.get("effects", [])
+                if item.get("tool_id") == "calendar.delete_event" and item.get("state") == "waiting_approval"
+            ),
+            None,
+        )
+        _assert(pending is not None, "calendar_cleanup_effect_missing")
+        result = pending.get("result") or {}
+        review_id = str(result.get("review_id") or "")
+        proposal_id = str(result.get("proposal_id") or "")
+        _assert(bool(review_id and proposal_id), "calendar_cleanup_review_binding_missing")
+        review = api.request(f"/reviews/{review_id}")["review"]
+        decision = api.request(
+            f"/reviews/{review_id}/local-action-decision",
+            method="POST",
+            body={
+                "proposal_id": proposal_id,
+                "decision": "approve",
+                "bound_proposal_hash": review["item_hash"],
+                "reason": "Approve deletion of the exact non-inviting acceptance fixture.",
+                "idempotency_key": str(uuid4()),
+            },
+        )
+        _assert(bool(decision), "calendar_cleanup_decision_missing")
+        deadline = time.monotonic() + 180
+        proposal_state = ""
+        while time.monotonic() < deadline:
+            proposal = api.request(f"/reviews/action-proposals/{proposal_id}")["proposal"]
+            proposal_state = str(proposal.get("state") or "")
+            if proposal_state in {"executed", "failed_terminal", "denied", "rejected"}:
+                break
+            time.sleep(1.5)
+        _assert(proposal_state == "executed", f"calendar_cleanup_execution:{proposal_state}")
+        current = api.request(f"/api/tasks/{task['task_id']}")
+        api.request(
+            f"/api/tasks/{task['task_id']}/continue",
+            method="POST",
+            body={
+                "expected_revision": current["task"]["revision"],
+                "submission_id": str(uuid4()),
+                "add_seconds": 180,
+                "add_model_decisions": 8,
+                "add_capability_calls": 20,
+            },
+        )
+    completed = _wait_task(
         api,
-        (
-            f"Query the default calendar from 2026-09-29 through exclusive end 2026-11-06 for the "
-            f"exact title `{fixture_title}`. Select only that clearly labeled fixture. Delete its "
-            "entire recurring series with edit_scope series and stable logical operation id "
-            f"`acceptance-calendar-cleanup-{label.casefold()}`. This exact deletion is authorized, "
-            "but follow the local approval flow. Never delete any other event. After approval, "
-            "verify the fixture no longer appears and finish."
-        ),
-        title=f"{label} calendar cleanup",
-        seconds=420,
-        decisions=24,
-        calls=50,
+        task["task_id"],
+        wanted={"completed", "failed", "paused_budget", "waiting_approval", "waiting_input"},
+        timeout=600,
     )
-    waiting = _wait_task(api, task["task_id"], wanted={"waiting_approval", "completed", "failed", "paused_budget"}, timeout=900)
-    _assert(waiting["task"]["status"] == "waiting_approval", "calendar_cleanup_not_waiting_approval")
-    pending = next(
-        (
-            item for item in waiting.get("effects", [])
-            if item.get("tool_id") == "calendar.delete_event" and item.get("state") == "waiting_approval"
-        ),
-        None,
-    )
-    _assert(pending is not None, "calendar_cleanup_effect_missing")
-    result = pending.get("result") or {}
-    review_id = str(result.get("review_id") or "")
-    proposal_id = str(result.get("proposal_id") or "")
-    _assert(bool(review_id and proposal_id), "calendar_cleanup_review_binding_missing")
-    review = api.request(f"/reviews/{review_id}")["review"]
-    decision = api.request(
-        f"/reviews/{review_id}/local-action-decision",
-        method="POST",
-        body={
-            "proposal_id": proposal_id,
-            "decision": "approve",
-            "bound_proposal_hash": review["item_hash"],
-            "reason": "Approve deletion of the exact non-inviting acceptance fixture.",
-            "idempotency_key": str(uuid4()),
-        },
-    )
-    _assert(bool(decision), "calendar_cleanup_decision_missing")
-    deadline = time.monotonic() + 180
-    proposal_state = ""
-    while time.monotonic() < deadline:
-        proposal = api.request(f"/reviews/action-proposals/{proposal_id}")["proposal"]
-        proposal_state = str(proposal.get("state") or "")
-        if proposal_state in {"executed", "failed_terminal", "denied", "rejected"}:
-            break
-        time.sleep(1.5)
-    _assert(proposal_state == "executed", f"calendar_cleanup_execution:{proposal_state}")
-    current = api.request(f"/api/tasks/{task['task_id']}")
-    api.request(
-        f"/api/tasks/{task['task_id']}/continue",
-        method="POST",
-        body={
-            "expected_revision": current["task"]["revision"],
-            "submission_id": str(uuid4()),
-            "add_seconds": 180,
-            "add_model_decisions": 8,
-            "add_capability_calls": 20,
-        },
-    )
-    completed = _wait_task(api, task["task_id"], wanted={"completed", "failed", "paused_budget", "waiting_approval"}, timeout=600)
     _assert(completed["task"]["status"] == "completed", "calendar_cleanup_task_not_completed")
     effects = [item for item in completed.get("effects", []) if item.get("tool_id") == "calendar.delete_event"]
-    _assert(len(effects) == 1 and effects[0].get("state") == "committed", "calendar_cleanup_effect_not_committed_once")
-    return _task_evidence(completed)
+    _assert(len(effects) == 1, "calendar_cleanup_effect_not_exactly_once")
+    approval_evidence: dict[str, Any] | None = None
+    if effects[0].get("state") == "waiting_approval":
+        pending_result = effects[0].get("result") or {}
+        proposal_id = str(pending_result.get("proposal_id") or "")
+        _assert(bool(proposal_id), "calendar_cleanup_executed_proposal_missing")
+        proposal = api.request(f"/reviews/action-proposals/{proposal_id}")["proposal"]
+        _assert(proposal.get("state") == "executed", "calendar_cleanup_proposal_not_executed")
+        _assert(bool(proposal.get("action_receipt_ref")), "calendar_cleanup_receipt_missing")
+        approval_evidence = {
+            "state": "executed",
+            "receipt_present": True,
+            "task_effect_reconciled_by_release": True,
+        }
+    else:
+        _assert(effects[0].get("state") == "committed", "calendar_cleanup_effect_not_committed")
+    cleanup_queries = [
+        item for item in _tool_observations(completed)
+        if item["capability"] == "calendar.query_events"
+    ]
+    _assert(len(cleanup_queries) >= 2, "calendar_cleanup_readback_query_missing")
+    last_fixture_items = [
+        item for item in _walk(cleanup_queries[-1]["result"])
+        if isinstance(item, dict) and str(item.get("title") or "") == fixture_title
+    ]
+    _assert(not last_fixture_items, "calendar_cleanup_fixture_still_present")
+    evidence = _task_evidence(completed)
+    if approval_evidence is not None:
+        evidence["approval"] = approval_evidence
+    return evidence
 
 
 def _run_cancel(api: Api, label: str) -> dict[str, Any]:
@@ -864,6 +1071,27 @@ def main() -> int:
         help="Resume and validate a waiting Calendar acceptance task.",
     )
     parser.add_argument(
+        "--complete-calendar-artifact-for-task",
+        help="Validate a completed Calendar provider task and run its missing read-only artifact proof.",
+    )
+    parser.add_argument(
+        "--validate-calendar-artifact-task",
+        help="Reuse an already-completed read-only artifact task with the Calendar provider task.",
+    )
+    parser.add_argument(
+        "--resume-calendar-cleanup-task",
+        help="Resume a waiting exact-fixture Calendar cleanup task.",
+    )
+    parser.add_argument(
+        "--calendar-event-ref",
+        help="Exact event reference required when resuming Calendar cleanup.",
+    )
+    parser.add_argument(
+        "--resume-calendar-cleanup-after-approval",
+        action="store_true",
+        help="Reconcile a cleanup whose formal approval has already executed.",
+    )
+    parser.add_argument(
         "--phases",
         default="interface,learning,budget,interrupted_script,lists_documents_python,calendar,calendar_cleanup,cancel",
         help="Comma-separated acceptance phases; defaults to the complete campaign.",
@@ -917,6 +1145,28 @@ def main() -> int:
             evidence["status"] = "passed"
             return_code = 0
             return return_code
+        if args.complete_calendar_artifact_for_task:
+            evidence["results"]["calendar"] = _run_calendar_artifact_completion(
+                api,
+                args.label,
+                args.complete_calendar_artifact_for_task,
+                args.validate_calendar_artifact_task,
+            )
+            evidence["status"] = "passed"
+            return_code = 0
+            return return_code
+        if args.resume_calendar_cleanup_task:
+            evidence["results"]["calendar_cleanup"] = _run_calendar_cleanup(
+                api,
+                args.label,
+                f"{args.label} AYSO Recurrence",
+                task_id=args.resume_calendar_cleanup_task,
+                event_ref=args.calendar_event_ref,
+                approval_already_executed=args.resume_calendar_cleanup_after_approval,
+            )
+            evidence["status"] = "passed"
+            return_code = 0
+            return return_code
         if "interface" in phases:
             evidence["results"]["interface"] = _static_checks(api)
         if "learning" in phases:
@@ -938,7 +1188,10 @@ def main() -> int:
             evidence["results"]["calendar"] = calendar
         if "calendar_cleanup" in phases:
             evidence["results"]["calendar_cleanup"] = _run_calendar_cleanup(
-                api, args.label, fixture_title
+                api,
+                args.label,
+                fixture_title,
+                event_ref=args.calendar_event_ref,
             )
         if "cancel" in phases:
             evidence["results"]["cancel"] = _run_cancel(api, args.label)

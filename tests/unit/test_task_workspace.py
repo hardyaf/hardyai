@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from app.jobs.repository import DurableJobRepository
+from app.tasks.capabilities import TaskCapabilityBridge
 from app.tasks.repository import TaskConflictError, TaskRepository
 from app.tasks.code_runner.runner import TaskCodeRunner
 from app.tasks.service import TaskApplicationService
@@ -87,6 +88,55 @@ def test_effect_receipt_replays_only_same_bound_operation(tmp_path):
             arguments_hash="b" * 64,
             run_id=None,
         )
+
+
+def test_terminal_local_approval_is_reconciled_without_model_replay(tmp_path):
+    repository, _jobs, service = _runtime(tmp_path)
+    task = service.create_task(
+        owner_id="operator",
+        source_interface="task_workspace",
+        submission_id="submission-approval-reconcile",
+        goal="Delete one approved fixture",
+    )["task"]
+    repository.reserve_effect(
+        task_id=task["task_id"],
+        logical_operation_id="delete-fixture-1",
+        provider_operation_id="provider-delete-1",
+        tool_id="calendar.delete_event",
+        arguments_hash="c" * 64,
+        run_id=None,
+    )
+    repository.finish_effect(
+        task_id=task["task_id"],
+        logical_operation_id="delete-fixture-1",
+        state="waiting_approval",
+        result={"status": "waiting_for_approval", "proposal_id": "proposal-1"},
+    )
+
+    class ExecutedProposalRepository:
+        def get_action_proposal(self, proposal_id):
+            assert proposal_id == "proposal-1"
+            return {
+                "state": "executed",
+                "action_receipt_ref": "calendar_receipt:fixture",
+            }
+
+    bridge = TaskCapabilityBridge(
+        repository=repository,
+        skill_registry=None,
+        authorized_executor=None,
+        human_review_repository=ExecutedProposalRepository(),
+    )
+
+    assert bridge.reconcile_approval_effects(task_id=task["task_id"]) == 1
+    effect = repository.list_effects(task_id=task["task_id"])[0]
+    assert effect["state"] == "committed"
+    assert effect["result"] == {
+        "status": "ok",
+        "approved_execution": True,
+        "proposal_id": "proposal-1",
+        "receipt_ref": "calendar_receipt:fixture",
+    }
 
 
 def test_preferences_and_instruction_only_skills_are_versioned_and_reversible(tmp_path):

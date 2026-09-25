@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from typing import Any, Mapping
+from uuid import UUID
 
 from app.reviews.repository import HumanReviewRepository
 from app.reviews.service import (
@@ -60,6 +61,40 @@ class ApprovedActionExecutionService:
                     if value:
                         return value[:240]
         return None
+
+    @staticmethod
+    def _local_task_workspace_binding(
+        proposal: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        """Reauthorize the authenticated local operator without an external identity row."""
+
+        channel_scope = str(proposal.get("channel_scope") or "")
+        if not channel_scope.startswith("task:"):
+            return None
+        try:
+            UUID(channel_scope.removeprefix("task:"))
+        except (ValueError, AttributeError):
+            return None
+        if not (
+            str(proposal.get("destination_purpose") or "") == "task_workspace"
+            and str(proposal.get("source_interface") or "") == "task_workspace"
+            and str(proposal.get("principal_kind") or "") == "operator"
+            and str(proposal.get("principal_subject") or "") == "operator"
+            and str(proposal.get("external_user_id") or "") == "operator"
+            and str(proposal.get("requester_user_id") or "") == "operator"
+            and str(proposal.get("approver_principal") or "") == "operator"
+            and str(proposal.get("decided_by_principal") or "") == "operator"
+            and str(proposal.get("agent_id") or "") == "jarvis"
+        ):
+            return None
+        return {
+            "active": True,
+            "user_id": "operator",
+            "agent_id": "jarvis",
+            "age_band": None,
+            "presentation_profile": "default",
+            "policy_profile": "adult",
+        }
 
     @staticmethod
     def _job_matches_proposal(payload: object, proposal: Mapping[str, Any]) -> bool:
@@ -304,15 +339,17 @@ class ApprovedActionExecutionService:
                 fencing_token=fencing_token,
                 reason_code="approval_arguments_unavailable",
             )
-        resolve_identity = getattr(self._identity_service, "resolve", None)
-        binding = (
-            resolve_identity(
-                source=str(proposal["source_interface"]),
-                external_user_id=str(proposal["external_user_id"]),
+        binding = self._local_task_workspace_binding(proposal)
+        if binding is None:
+            resolve_identity = getattr(self._identity_service, "resolve", None)
+            binding = (
+                resolve_identity(
+                    source=str(proposal["source_interface"]),
+                    external_user_id=str(proposal["external_user_id"]),
+                )
+                if callable(resolve_identity)
+                else None
             )
-            if callable(resolve_identity)
-            else None
-        )
         if (
             not isinstance(binding, Mapping)
             or binding.get("active") is not True

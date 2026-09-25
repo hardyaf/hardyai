@@ -192,6 +192,82 @@ class StableIdentity:
         }
 
 
+class NoExternalIdentity:
+    def resolve(self, **kwargs):
+        raise AssertionError(f"local task approval must not resolve an external identity: {kwargs}")
+
+
+def test_local_task_workspace_approval_executes_without_external_identity(tmp_path) -> None:
+    path = tmp_path / "core.db"
+    descriptor = _descriptor()
+    task_id = "11111111-2222-4333-8444-555555555555"
+    envelope = ToolCallEnvelope.create(
+        root_request_id=f"task:{task_id}:delete-fixture",
+        call_ordinal=1,
+        session_id=f"task:{task_id}",
+        principal_kind="operator",
+        principal_subject="operator",
+        external_user_id="operator",
+        user_id="operator",
+        agent_id="jarvis",
+        source_interface="task_workspace",
+        channel_scope=f"task:{task_id}",
+        skill_id=descriptor.skill_id,
+        descriptor=descriptor,
+        authorization_snapshot_ref="authz_v1_" + "e" * 64,
+        validated_arguments={"target": "acceptance-fixture"},
+    )
+    prepared = PreparedToolCall(
+        envelope=envelope,
+        descriptor=descriptor,
+        descriptor_hash=hashlib.sha256(
+            canonical_json(descriptor.to_storage_dict()).encode("utf-8")
+        ).hexdigest(),
+        resource_version="resource-v1",
+    )
+    executor = StableExecutor(prepared)
+    repository = HumanReviewRepository(str(path))
+    service = HumanReviewService(repository)
+    created = service.create_action_proposal(
+        envelope=envelope,
+        descriptor=descriptor,
+        resource_version="resource-v1",
+        approver_principal="operator",
+        expires_at=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+        destination_purpose="task_workspace",
+    )
+    proposal = created["proposal"]
+    decided = service.decide_action_proposal(
+        proposal_id=proposal["proposal_id"],
+        review_id=proposal["review_id"],
+        bound_proposal_hash=proposal["proposal_hash"],
+        decision="approve",
+        actor_principal="operator",
+        destination_purpose="task_workspace",
+        guild_id="",
+        channel_id="",
+        message_id="",
+        reason="Approve the exact acceptance fixture effect.",
+        idempotency_key="local-task-approval",
+    )
+    claimed = repository.job_repository.claim_jobs(
+        job_type=REVIEW_ACTION_EXECUTION_JOB,
+        worker_id="local-task-worker",
+        limit=1,
+        lease_seconds=30,
+    )[0]
+    outcome = ApprovedActionExecutionService(
+        reviews=repository,
+        authorized_executor=executor,
+        identity_service=NoExternalIdentity(),
+    ).execute(claimed)
+    assert outcome == {"status": "executed", "receipt_ref": "synthetic-receipt-1"}
+    assert executor.effect_count == 1
+    assert decided["proposal"]["state"] == "approved"
+    assert repository.get_action_proposal(proposal["proposal_id"])["state"] == "executed"
+    repository.close()
+
+
 def test_restart_after_effect_commit_before_job_completion_never_reexecutes(tmp_path) -> None:
     path = tmp_path / "core.db"
     descriptor = _descriptor()

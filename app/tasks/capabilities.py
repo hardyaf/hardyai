@@ -33,6 +33,56 @@ class TaskCapabilityBridge:
         self._human_review_service = human_review_service
         self._human_review_repository = human_review_repository
 
+    def reconcile_approval_effects(self, *, task_id: str) -> int:
+        """Project terminal approval outcomes into task-owned effect receipts."""
+
+        if self._human_review_repository is None:
+            return 0
+        reconciled = 0
+        terminal_failures = {
+            ActionProposalState.REJECTED.value,
+            ActionProposalState.EXPIRED.value,
+            ActionProposalState.CANCELED.value,
+            ActionProposalState.DENIED.value,
+            ActionProposalState.FAILED_TERMINAL.value,
+        }
+        for effect in self._repository.list_effects(task_id=task_id):
+            if str(effect.get("state") or "") != "waiting_approval":
+                continue
+            prior = effect.get("result") if isinstance(effect.get("result"), dict) else {}
+            proposal_id = str(prior.get("proposal_id") or "")
+            if not proposal_id:
+                continue
+            proposal = self._human_review_repository.get_action_proposal(proposal_id)
+            proposal_state = str((proposal or {}).get("state") or "")
+            if proposal_state == ActionProposalState.EXECUTED.value:
+                state = "committed"
+                result = {
+                    "status": "ok",
+                    "approved_execution": True,
+                    "proposal_id": proposal_id,
+                    "receipt_ref": str((proposal or {}).get("action_receipt_ref") or ""),
+                }
+            elif proposal_state in terminal_failures:
+                state = "failed"
+                result = {
+                    "status": "policy_denied",
+                    "message": "The exact action was not approved or could not be executed.",
+                    "proposal_id": proposal_id,
+                    "proposal_state": proposal_state,
+                    "reason_code": str((proposal or {}).get("terminal_reason_code") or ""),
+                }
+            else:
+                continue
+            self._repository.finish_effect(
+                task_id=task_id,
+                logical_operation_id=str(effect["logical_operation_id"]),
+                state=state,
+                result=result,
+            )
+            reconciled += 1
+        return reconciled
+
     def _context(self, *, task: dict[str, Any], agent_id: str) -> dict[str, Any]:
         return {
             "source_interface": "task_workspace",

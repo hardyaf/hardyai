@@ -300,6 +300,9 @@ class AgentTaskWorker:
         heartbeat: _LeaseHeartbeat,
     ) -> dict[str, Any]:
         identical: dict[str, int] = {}
+        reconcile = getattr(self._capabilities, "reconcile_approval_effects", None)
+        if callable(reconcile):
+            reconcile(task_id=task_id)
         for step in range(1, self._max_steps + 1):
             current = self._repository.get_task(task_id=task_id)
             if current is None:
