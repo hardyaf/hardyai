@@ -7,7 +7,7 @@
 ## Current status
 
 Implementation, consolidated acceptance, deployment, and post-deployment verification are complete.
-The deployed application hotfix commit is `fc637dce22dbaf9004fab2eaec7bdb52f86cd598`.
+The deployed application hotfix commit is `fc637dc66a842ecffdb5ee7efbc80d1eaf439870`.
 The unchanged bounded runner remains from release commit
 `8d7f7d3f6a07c895561af7486a98b555df7933eb`. Exact images:
 
