@@ -43,6 +43,7 @@ from app.skills.domains.email_agent.classification import (
     OllamaEmailModelClassifier,
 )
 from app.skills.domains.email_agent.config import EmailAgentPermissions
+from app.skills.domains.email_agent.model_budget import background_email_token_budget_policy
 from app.skills.domains.email_agent.service import EmailAgentRuntimeConfig, EmailAgentService
 from app.skills.domains.email_agent.storage import EmailAgentSQLiteStorage
 from app.skills.domains.email_agent.summarization import OllamaEmailSummaryCompiler
@@ -109,6 +110,7 @@ adaptive_token_budget_policy = AdaptiveTokenBudgetPolicy(
     growth_factor=settings.model_adaptive_token_growth_factor,
     max_predict_multiplier=settings.model_adaptive_token_max_multiplier,
 )
+background_email_model_budget_policy = background_email_token_budget_policy()
 
 
 def _record_ollama_call(metrics: dict[str, Any]) -> None:
@@ -428,7 +430,7 @@ if settings.email_agent_enabled:
             num_predict=settings.email_agent_summary_num_predict,
             think=settings.email_agent_summary_model_think,
             metrics_callback=_record_ollama_call,
-            adaptive_policy=adaptive_token_budget_policy,
+            adaptive_policy=background_email_model_budget_policy,
         )
         email_model_classifier = OllamaEmailModelClassifier(
             base_url=settings.local_model_url,
@@ -438,7 +440,7 @@ if settings.email_agent_enabled:
             num_predict=settings.email_agent_classifier_num_predict,
             think=settings.email_agent_classifier_model_think,
             metrics_callback=_record_ollama_call,
-            adaptive_policy=adaptive_token_budget_policy,
+            adaptive_policy=background_email_model_budget_policy,
         )
     email_agent_service = EmailAgentService(
         storage=email_agent_storage,

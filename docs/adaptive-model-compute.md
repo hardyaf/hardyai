@@ -1,12 +1,14 @@
 # Adaptive Model Compute Budget
 
-Status: implemented for every Ollama-backed model lane; PaddleOCR-VL uses its bounded quality ceiling because its provider does not expose a reliable token-exhaustion signal.
+Status: implemented for interactive and repair Ollama lanes; optional background Email enrichment uses a single attempt, and PaddleOCR-VL uses its bounded quality ceiling because its provider does not expose a reliable token-exhaustion signal.
 
 ## Policy
 
-Configured output-token counts are efficient starting points, not cost or quality ceilings. When Ollama reports `length`/token-limit completion, or the observed generation count reaches the requested allowance, the same model call is retried with a larger output budget. The default sequence doubles the budget for at most four total attempts and never exceeds eight times the lane's starting budget. A repeated exhaustion at that boundary is treated as a failed loop and returns through the lane's existing failure contract.
+Configured output-token counts are efficient starting points, not cost or quality ceilings for interactive and repair lanes. When Ollama reports `length`/token-limit completion, or the observed generation count reaches the requested allowance, the same model call is retried with a larger output budget. The code default doubles the budget for at most four total attempts and never exceeds eight times the lane's starting budget; deployments may choose a different bounded global ceiling. A repeated exhaustion at that boundary is treated as a failed loop and returns through the lane's existing failure contract.
 
-The policy applies to Main repair compatibility, Main conversation/turn commitment, research decisions, email classification, email summaries, and action-ticket review. It does not retry network, authorization, or provider failures as token problems.
+The adaptive policy applies to Main repair compatibility, Main conversation/turn commitment, research decisions, and action-ticket review. It does not retry network, authorization, or provider failures as token problems.
+
+Email summary and classification inference is intentionally single-attempt even when the global adaptive policy is enabled. Those scheduled background lanes have deterministic, inspectable fallbacks, so output-token exhaustion is treated as failed optional enrichment. This prevents one malformed or looping email response from repeatedly reacquiring and monopolizing the shared accelerator ahead of live Main turns.
 
 PaddleOCR-VL currently receives 4,096 `max_new_tokens` up front. Its pipeline API does not return a dependable generated-token count or stop reason, so speculative reruns would waste accelerator availability without proving truncation. This is compatibility debt: if the provider exposes a trustworthy exhaustion signal, it should adopt the same adaptive policy.
 
@@ -14,7 +16,7 @@ PaddleOCR-VL currently receives 4,096 `max_new_tokens` up front. Its pipeline AP
 
 | Concern | Decision | Authority |
 |---|---|---|
-| Model sizing and metrics | Adapt | Existing `OllamaCallObserver` owns the shared bounded retry policy and content-free metrics. |
+| Model sizing and metrics | Adapt | Existing `OllamaCallObserver` owns bounded retry behavior and content-free metrics; the Email domain supplies its single-attempt background policy at composition. |
 | Escalation history | Reuse | `EventLogService` records `model.compute_budget.escalated`. |
 | Private feedback delivery | Adapt | Existing private-notes channel configuration identifies one protected delivery channel. |
 | Deferred delivery | Reuse | The shared durable-job ledger owns claims, leases, retries, receipts, dead letters, and restart recovery. |
@@ -37,7 +39,7 @@ PaddleOCR-VL currently receives 4,096 `max_new_tokens` up front. Its pipeline AP
 - `model.compute_budget.notice_enqueue_failed`: telemetry was recorded, but the private delivery job could not be persisted.
 - `last_sequence_metrics.failed_loop=true`: the lane exhausted every bounded attempt.
 
-Frequent escalation in one lane is a tuning signal: shorten an oversized prompt, correct an overly verbose schema, raise that lane's efficient starting point, or repair a loop that repeatedly produces unusable output. It is not a cost alarm.
+Frequent escalation in an adaptive lane is a tuning signal: shorten an oversized prompt, correct an overly verbose schema, raise that lane's efficient starting point, or repair a loop that repeatedly produces unusable output. It is not a cost alarm. Email background lanes will record one failed-loop attempt and use their deterministic fallback instead of escalating.
 
 ## Rollback
 
