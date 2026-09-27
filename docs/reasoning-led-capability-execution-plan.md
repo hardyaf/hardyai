@@ -748,11 +748,12 @@ decisions use `NUM_PREDICT=512`. External-effect and durable-delivery retry coun
 raised by this profile. This profile changes reasoning patience, not authority: operation
 allowlists, approval policy, effect cardinality, idempotency, identical-read caps, and observation
 ceilings remain unchanged. Re-tighten only after representative skill behavior is correct and measured.
-Main's reasoning effort is also separated by layer: `MAIN_TURN_DECISION_MODEL_THINK=low` owns the closed
-commitment and skill-selection boundary, while `MAIN_TOOL_STEP_MODEL_THINK=medium` owns schema-aware tool
-planning and observation follow-up. This prevents a single provider thinking mode from trading reliable
-commitment output against temporal and multi-selector precision. Hidden reasoning is never parsed,
-persisted, or treated as tool authority.
+Main's reasoning effort is also separated by layer: `MAIN_TURN_DECISION_MODEL_THINK=false` keeps the
+closed commitment and skill-selection boundary entirely in the visible typed response, while
+`MAIN_TOOL_STEP_MODEL_THINK=medium` owns schema-aware tool planning and observation follow-up. This
+prevents gpt-oss from placing the commitment only in hidden thinking and returning an empty response,
+without trading away temporal and multi-selector precision in the tool planner. Hidden reasoning is
+never parsed, persisted, or treated as tool authority.
 
 ## Effect and approval policy
 

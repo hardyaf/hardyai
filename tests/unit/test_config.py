@@ -98,7 +98,7 @@ def test_main_tool_settings_default_to_main_only_with_empty_operation_allowlists
         "keep_alive": 180.0,
         "repair_num_predict": 1024,
         "conversation_num_predict": 1024,
-        "turn_decision_think": "low",
+        "turn_decision_think": False,
         "tool_step_think": "medium",
         "adaptive_attempts": 4,
         "adaptive_multiplier": 8,
