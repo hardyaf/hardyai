@@ -12,7 +12,7 @@ The deployed release commit is `8d7f7d3f6a07c895561af7486a98b555df7933eb`. Exact
 - application: `sha256:da89146d907614c35ad5f6a347aa783f458856135adef41d5a1eb1813de950d6`
 - bounded runner: `sha256:3b7d27d24413b2874fc0de46db67dfde93393d62609e2a0348cf701bafe11d61`
 
-The local workspace is active at `http://192.168.1.127:8000/`. Authenticate with the existing local
+The local workspace is active at `http://<hardybot-lan-address>:8000/`. Authenticate with the existing local
 operator key; the browser exchanges it for the protected operator session cookie and CSRF token.
 
 The existing Google account was reauthorized without expanding scopes, and both Calendar Events and
@@ -129,16 +129,16 @@ household event was altered and no invitation was sent.
 ## Backup and rollback
 
 - Online database backup:
-  `/home/codex/jarvis-poc/backups/task-workspace/releases/20260925T204016Z/jarvis_v2-20260925T204016Z.sqlite3`
+  `<authoritative-runtime>/backups/task-workspace/releases/20260925T204016Z/jarvis_v2-20260925T204016Z.sqlite3`
 - Previous environment:
-  `/home/codex/jarvis-poc/backups/task-workspace/pre-ff69d8c-runtime.env`
+  `<authoritative-runtime>/backups/task-workspace/pre-ff69d8c-runtime.env`
 - Previous source archive:
-  `/home/codex/jarvis-poc/backups/task-workspace/pre-ff69d8c-source.tar.gz`
+  `<authoritative-runtime>/backups/task-workspace/pre-ff69d8c-source.tar.gz`
 - Rollback image: `jarvis-poc-app:rollback-20260925T204016Z`
   (`sha256:6e289896975c7eb76f5b0a280441a4bbf2436d21628b187ba881d1a03048aa7c`)
 
 The normal rollback is image/config-only because the old reader was explicitly rehearsed against the
-v15 additive database. From `/home/codex/jarvis-poc`, stop the task profile services with the protected
+v15 additive database. From `<authoritative-runtime>`, stop the task profile services with the protected
 env file, restore `pre-ff69d8c-runtime.env` to `.env`, retag the rollback image as
 `jarvis-poc-app:local`, and recreate the prior Jarvis/admission services with
 `docker compose --env-file .env -f deploy/docker/compose.yaml ... --no-build`. Restore the database
