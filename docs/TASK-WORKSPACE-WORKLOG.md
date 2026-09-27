@@ -7,9 +7,11 @@
 ## Current status
 
 Implementation, consolidated acceptance, deployment, and post-deployment verification are complete.
-The deployed release commit is `8d7f7d3f6a07c895561af7486a98b555df7933eb`. Exact images:
+The deployed application hotfix commit is `fc637dce22dbaf9004fab2eaec7bdb52f86cd598`.
+The unchanged bounded runner remains from release commit
+`8d7f7d3f6a07c895561af7486a98b555df7933eb`. Exact images:
 
-- application: `sha256:da89146d907614c35ad5f6a347aa783f458856135adef41d5a1eb1813de950d6`
+- application: `sha256:0b7acd13c478b0bd58c4c5eb3c213236b585428ec8f04f935ea22c4f7bc7e098`
 - bounded runner: `sha256:3b7d27d24413b2874fc0de46db67dfde93393d62609e2a0348cf701bafe11d61`
 
 The local workspace is active at `http://<hardybot-lan-address>:8000/`. Authenticate with the existing local
@@ -126,15 +128,45 @@ household event was altered and no invitation was sent.
   unhealthy and document-worker is restarting. This is compatibility debt outside this release, not
   a regression attributed to the task workspace deployment.
 
+## Calendar timeout hotfix (2026-09-27)
+
+- Production evidence showed that the reported Calendar turn did reach `calendar.query_events`
+  successfully. It stopped at `deadline_exceeded` after 376,226 ms while formatting that observation;
+  the Calendar provider was not the timeout source and no Calendar effect was committed.
+- At the same time, scheduled `email_summary` inference repeatedly exhausted and doubled its output
+  allowance from 2,048 through 32,768 tokens. Those long background attempts reacquired the shared
+  accelerator between interactive Main steps and starved the Calendar response.
+- Email summary and classification inference now use one bounded attempt and their existing
+  deterministic fallbacks. Main conversation, repair, and other interactive/adjudication lanes retain
+  the configured adaptive budget.
+- The first post-hotfix interface check returned promptly but exposed an independent typed-commitment
+  defect: with `gpt-oss:20b`, `MAIN_TURN_DECISION_MODEL_THINK=low` put the decision only in hidden
+  thinking and returned an empty visible response. A bounded A/B call reproduced this exactly; setting
+  the closed commitment lane to `false` returned its valid visible JSON envelope. The default, Compose
+  projection, example configuration, tests, and production configuration now use `false`; tool-step
+  planning remains at its separate medium reasoning setting.
+- Focused verification passed 66 unit tests, candidate compile/import checks, and the fresh public-tree
+  gate. The final production `/ask` read-only Calendar query returned HTTP 200 in 26.2 seconds with
+  `model_responded`, one `calendar.query_events` observation, zero failures, and zero committed effects.
+  It created, changed, deleted, and invited nothing.
+- Jarvis, accelerator admission, task runner launcher, task worker, and action approval worker now run
+  the exact hotfix application image above. The post-hotfix SQLite backup passed `integrity_check`.
+
 ## Backup and rollback
 
-- Online database backup:
+- Current post-hotfix online database backup:
+  `<authoritative-runtime>/backups/task-workspace/releases/20260927T021053Z/jarvis_v2-20260927T021054Z.sqlite3`
+- Original task-workspace deployment backup:
   `<authoritative-runtime>/backups/task-workspace/releases/20260925T204016Z/jarvis_v2-20260925T204016Z.sqlite3`
 - Previous environment:
   `<authoritative-runtime>/backups/task-workspace/pre-ff69d8c-runtime.env`
 - Previous source archive:
   `<authoritative-runtime>/backups/task-workspace/pre-ff69d8c-source.tar.gz`
-- Rollback image: `jarvis-poc-app:rollback-20260925T204016Z`
+- Immediate pre-final-hotfix rollback image: `jarvis-poc-app:rollback-20260927T021053Z`
+  (`sha256:492182a769123ba10a70b81a3425c89281ba4ea4b7793eaaf120927d903952be`)
+- Pre-hotfix task-workspace image: `jarvis-poc-app:rollback-20260927T020512Z`
+  (`sha256:da89146d907614c35ad5f6a347aa783f458856135adef41d5a1eb1813de950d6`)
+- Original pre-task-workspace rollback image: `jarvis-poc-app:rollback-20260925T204016Z`
   (`sha256:6e289896975c7eb76f5b0a280441a4bbf2436d21628b187ba881d1a03048aa7c`)
 
 The normal rollback is image/config-only because the old reader was explicitly rehearsed against the
